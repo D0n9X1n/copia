@@ -291,6 +291,28 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(!FileManager.default.fileExists(atPath: source.path))
 	}
 
+	/// The thumbnail cannot come home and the blob cannot go back to trash. The blob is home, so the clip is restored
+	/// with its preview pending instead of leaving a blob without a row for cleanup to delete (B1:31).
+	@Test func aRestoreWhoseRollbackFailsBringsTheClipBackWhole() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("keep me"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		let deleted = try #require(try await store.delete(clip.key))
+		faulty.failMoveContaining = "trash/\(clip.key).png"
+		faulty.failMoveFromContaining = "blobs/\(clip.key).plist"
+		try await store.restore(deleted)
+		let back = try #require(try await store.fetch(clip.key))
+		#expect(back.previewState == .pending)
+		#expect(try await store.items(for: clip.key).count == 1)
+		#expect(try await store.ftsKeys() == [clip.key])
+		try await store.removeOrphans()
+		try await store.sweep()
+		try await expectWhole(store, dir, clip)
+		#expect(try await store.fetch(clip.key)?.previewState == .pending)
+		await #expect(throws: StoreError.alreadyExists) { try await store.restore(deleted) }
+	}
+
 	/// Undo after its trashed thumbnail was lost brings back a whole clip that asks for a new preview,
 	/// never a final preview state without its image.
 	@Test func restoreWithoutItsTrashedThumbnailAsksForANewPreview() async throws {

@@ -221,15 +221,28 @@ public actor ClipStore {
 		var movedThumb = false
 		do {
 			if files.exists(trashedThumb) { try files.move(trashedThumb, to: thumbURL(key)); movedThumb = true }
-			var clip = deleted.clip
-			if deleted.hadThumbnail, !movedThumb { clip.previewState = .pending }
-			clip.generation = try nextGeneration()
-			try insertRow(clip)
+			try insertRestored(deleted, thumbnailHome: movedThumb)
 		} catch {
-			try? files.move(blobURL(key), to: trashedBlob)
+			let failure = error
+			do {
+				try files.move(blobURL(key), to: trashedBlob)
+			} catch {
+				// The blob cannot go back to trash. It is home, so finish the restore rather than leave a blob without a
+				// row for cleanup to delete; a thumbnail that did not come home is asked for again.
+				if (try? insertRestored(deleted, thumbnailHome: movedThumb)) != nil { return }
+				throw failure
+			}
 			if movedThumb { try? files.move(thumbURL(key), to: trashedThumb) }
-			throw error
+			throw failure
 		}
+	}
+
+	/// Inserts a restored clip's row with a new generation. A thumbnail it had that is not home makes its preview pending.
+	private func insertRestored(_ deleted: DeletedClip, thumbnailHome: Bool) throws {
+		var clip = deleted.clip
+		if deleted.hadThumbnail, !thumbnailHome { clip.previewState = .pending }
+		clip.generation = try nextGeneration()
+		try insertRow(clip)
 	}
 
 	/// Best effort: trash only holds undo copies of items already deleted.
