@@ -31,6 +31,27 @@ struct Preferences {
 	}
 }
 
+/// Launch at login. Tests supply a fake.
+@MainActor
+protocol LoginService: AnyObject {
+	var status: LoginStatus { get }
+	func register() throws
+	func unregister() throws
+}
+
+@MainActor
+final class MainAppLogin: LoginService {
+	var status: LoginStatus {
+		switch SMAppService.mainApp.status {
+		case .enabled: .enabled
+		case .requiresApproval: .requiresApproval
+		default: .disabled
+		}
+	}
+	func register() throws { try SMAppService.mainApp.register() }
+	func unregister() throws { try SMAppService.mainApp.unregister() }
+}
+
 /// Wires the store, capture, previews and paste into the strip, menu bar, Settings and onboarding.
 @MainActor
 public final class AppController {
@@ -55,13 +76,27 @@ public final class AppController {
 	/// Places the strip in this frame instead of the screen's visible frame (used by the benchmark).
 	public var visibleFrameOverride: CGRect?
 
-	public init(directory: URL? = nil, defaults: UserDefaults = .standard) throws {
+	let login: LoginService
+	let permissions: () -> PermissionState
+	/// The clock retention reads; tests move it forward.
+	var now: () -> Date = Date.init
+	static let retentionInterval: TimeInterval = 3_600
+
+	public convenience init(directory: URL? = nil, defaults: UserDefaults = .standard) throws {
+		try self.init(directory: directory, defaults: defaults, pasteboard: GeneralPasteboard(), login: MainAppLogin(),
+			permissions: AppController.livePermissions, links: LiveLinkFetcher(), files: LiveFileThumbnails())
+	}
+
+	init(directory: URL?, defaults: UserDefaults, pasteboard: PasteboardSource, login: LoginService,
+		permissions: @escaping () -> PermissionState, links: LinkFetching, files: FileThumbnailing) throws {
 		prefs = Preferences(defaults: defaults)
 		let dir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
 			.appendingPathComponent("Copia", isDirectory: true)
 		store = try ClipStore(directory: dir)
-		watcher = PasteboardWatcher(ignoredApps: Set(prefs.ignoredApps))
-		previewer = Previewer(store: store)
+		watcher = PasteboardWatcher(source: pasteboard, ignoredApps: Set(prefs.ignoredApps))
+		previewer = Previewer(store: store, links: links, files: files)
+		self.login = login
+		self.permissions = permissions
 		model = StripModel(clips: [], animator: .live(), clock: .live)
 		model.paused = prefs.paused
 		wire()
@@ -85,14 +120,14 @@ public final class AppController {
 		menu?.setPaused(prefs.paused)
 		KeyboardShortcuts.onKeyUp(for: .copiaHistory) { [weak self] in self?.toggleHistory() }
 		KeyboardShortcuts.onKeyUp(for: .copiaPause) { [weak self] in self?.togglePause() }
-		let timer = Timer(timeInterval: 3_600, repeats: true) { [weak self] _ in
-			MainActor.assumeIsolated { Task { await self?.prune(); await self?.reload() } }
+		let timer = Timer(timeInterval: Self.retentionInterval, repeats: true) { [weak self] _ in
+			MainActor.assumeIsolated { Task { await self?.retentionTick() } }
 		}
 		timer.tolerance = 300
 		RunLoop.main.add(timer, forMode: .common)
 		retentionTimer = timer
 		refreshPermissions()
-		if showOnboarding, !prefs.onboarded || !Permissions.accessibilityTrusted { openOnboarding() }
+		if showOnboarding, !prefs.onboarded || !permissions().accessibility { openOnboarding() }
 	}
 
 	private func wire() {
@@ -130,6 +165,10 @@ public final class AppController {
 			},
 			restore: { [weak self] _, _ in },
 			openAccessibilitySettings: { Permissions.requestAccessibility(); Permissions.openAccessibilitySettings() })
+		model.actions.search = { [weak self] query in
+			guard let self, let keys = try? await store.search(query) else { return [] }
+			return Set(keys.map(ClipDraft.uuid(forKey:)))
+		}
 		model.actions.restore = { [weak self] clip, _ in
 			guard let self, let gone = index.deletion(for: clip.id) else { return }
 			try await store.restore(gone)
@@ -214,6 +253,7 @@ public final class AppController {
 			}
 			guard mine == reloads else { return }
 			guard index.apply(map, fetchedAt: fetchedAt) else { continue }
+			model.cancelUndo(for: index.takeEndedUndos())
 			model.applySnapshot(clips)
 			return
 		}
@@ -232,9 +272,25 @@ public final class AppController {
 	}
 
 	func prune() async {
-		guard let cutoff = prefs.retention.cutoff(now: .now) else { return }
+		guard let cutoff = prefs.retention.cutoff(now: now()) else { return }
 		_ = try? await store.prune(before: cutoff)
 	}
+
+	/// The hourly retention pass.
+	func retentionTick() async {
+		await prune()
+		await reload()
+	}
+
+	/// Erases all history after the user confirmed.
+	func erase() async {
+		try? await store.eraseAll()
+		index.noteErased()
+		model.cancelUndo(for: index.takeEndedUndos())
+		await reload()
+	}
+
+	var watcherIgnoredApps: Set<String> { watcher.ignoredApps }
 
 	func togglePause() {
 		prefs.paused.toggle()
@@ -250,13 +306,14 @@ public final class AppController {
 		shell.retention = prefs.retention
 		shell.ignoredApps = prefs.ignoredApps
 		shell.paused = prefs.paused
-		shell.login = Self.loginStatus()
+		shell.login = login.status
 		shell.setLogin = { [weak self] on in
+			guard let self else { return }
 			do {
-				if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-				self?.shell.login = Self.loginStatus()
+				if on { try login.register() } else { try login.unregister() }
+				shell.login = login.status
 			} catch {
-				self?.shell.login = .error(error.localizedDescription)
+				shell.login = .error(error.localizedDescription)
 			}
 		}
 		shell.setRetention = { [weak self] value in
@@ -267,14 +324,7 @@ public final class AppController {
 			self?.prefs.ignoredApps = apps
 			self?.watcher.ignoredApps = Set(apps)
 		}
-		shell.erase = { [weak self] in
-			guard let self else { return }
-			Task {
-				try? await self.store.eraseAll()
-				self.index.noteErased()
-				await self.reload()
-			}
-		}
+		shell.erase = { [weak self] in Task { await self?.erase() } }
 		shell.requestAccessibility = { Permissions.requestAccessibility() }
 		shell.openAccessibility = { Permissions.openAccessibilitySettings() }
 		shell.openPasteboard = { Permissions.openPasteboardSettings() }
@@ -288,22 +338,18 @@ public final class AppController {
 		}
 	}
 
-	static func loginStatus() -> LoginStatus {
-		switch SMAppService.mainApp.status {
-		case .enabled: .enabled
-		case .requiresApproval: .requiresApproval
-		default: .disabled
-		}
-	}
-
-	func refreshPermissions() {
+	static func livePermissions() -> PermissionState {
 		let pasteboard: PermissionState.Pasteboard = switch Permissions.pasteboardAccess {
 		case .alwaysAllow: .allow
 		case .alwaysDeny: .deny
 		case .ask: .ask
 		default: .unset
 		}
-		shell.permissions = PermissionState(accessibility: Permissions.accessibilityTrusted, pasteboard: pasteboard)
+		return PermissionState(accessibility: Permissions.accessibilityTrusted, pasteboard: pasteboard)
+	}
+
+	func refreshPermissions() {
+		shell.permissions = permissions()
 	}
 
 	public func openSettings() {

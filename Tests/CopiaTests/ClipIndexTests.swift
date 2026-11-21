@@ -23,6 +23,16 @@ import Foundation
 		let applied = index.apply([a: "ka"], fetchedAt: index.mutations)
 		#expect(applied)
 		#expect(index.deletion(for: a) == nil)
+		#expect(index.takeEndedUndos() == [a])
+		#expect(index.takeEndedUndos().isEmpty)
+	}
+
+	@Test func eraseEndsEveryUndo() {
+		var index = ClipIndex<String>()
+		index.noteDeleted(a, "trashed a")
+		index.noteDeleted(b, "trashed b")
+		index.noteErased()
+		#expect(index.takeEndedUndos() == [a, b])
 	}
 
 	@Test func restoringPutsTheKeyBackBeforeAnyReload() {

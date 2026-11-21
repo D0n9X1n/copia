@@ -9,7 +9,16 @@ public final class StripModel {
 	public private(set) var clips: [Clip]
 	public private(set) var selectedID: UUID?
 	public var query = "" {
-		didSet { if query != oldValue { reconcileSelection(preferredIndex: 0) } }
+		didSet {
+			guard query != oldValue else { return }
+			reconcileSelection(preferredIndex: 0)
+			searchTask?.cancel()
+			searchTask = Task { [weak self] in
+				try? await Task.sleep(for: Self.searchDelay)
+				guard !Task.isCancelled else { return }
+				await self?.searchStore()
+			}
+		}
 	}
 	public var commandHeld = false
 	public var paused = false
@@ -32,6 +41,12 @@ public final class StripModel {
 	/// Called when the close animation finishes, so the panel can hide and free memory.
 	@ObservationIgnored public var onCloseFinish: () -> Void = {}
 
+	/// IDs the store's full-text search matched for `storeQuery`.
+	private var storeMatches: Set<UUID> = []
+	@ObservationIgnored private var storeQuery = ""
+	@ObservationIgnored private var searchTask: Task<Void, Never>?
+	/// Typing pauses this long before the store is searched.
+	public static let searchDelay: Duration = .milliseconds(120)
 	@ObservationIgnored private var undoEntry: (clip: Clip, index: Int)?
 	@ObservationIgnored private var cancelToast: ToastClock.Cancel?
 	@ObservationIgnored private var busy = false
@@ -52,11 +67,24 @@ public final class StripModel {
 	public var visibleClips: [Clip] {
 		let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !q.isEmpty else { return clips }
+		let stored = storeQuery == q ? storeMatches : []
 		return clips.filter { clip in
-			clip.text.localizedStandardContains(q)
+			stored.contains(clip.id)
+				|| clip.text.localizedStandardContains(q)
 				|| clip.fileNames.contains { $0.localizedStandardContains(q) }
 				|| (clip.url?.absoluteString.localizedStandardContains(q) ?? false)
 		}
+	}
+
+	/// Adds the store's matches for the current query, which reach past the card text. A result for an older query is dropped.
+	public func searchStore() async {
+		let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !q.isEmpty else { return }
+		let found = await actions.search(q)
+		guard q == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+		storeQuery = q
+		storeMatches = found
+		reconcileSelection(preferredIndex: 0)
 	}
 
 	public var selectedIndex: Int? { visibleClips.firstIndex { $0.id == selectedID } }
@@ -142,6 +170,13 @@ public final class StripModel {
 	}
 
 	public var canUndo: Bool { undoEntry != nil }
+
+	/// Ends the pending undo if it is for one of `ids`: the item was copied again or history was erased.
+	public func cancelUndo(for ids: Set<UUID>) {
+		guard let entry = undoEntry, ids.contains(entry.clip.id) else { return }
+		undoEntry = nil
+		if toast == .deleted { dismissToast() }
+	}
 
 	public func undo() async {
 		guard !busy, let entry = undoEntry else { return }

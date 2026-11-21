@@ -160,6 +160,42 @@ final class StripRig {
 		#expect(r.model.selectedID == id)
 	}
 
+	@Test func storeMatchesBeyondTheCardTextAreShown() async {
+		let r = StripRig()
+		let deep = Fixtures.mixed[1].id
+		r.model.actions.search = { q in q == "deepword" ? [deep] : [] }
+		r.model.query = "deepword"
+		#expect(r.model.visibleClips.isEmpty)
+		await r.model.searchStore()
+		#expect(r.model.visibleClips.map(\.id) == [deep])
+		#expect(r.model.selectedID == deep)
+	}
+
+	@Test func aStaleStoreSearchIsIgnored() async {
+		let r = StripRig()
+		r.model.actions.search = { q in
+			if q == "old" { r.model.query = "new" }
+			return [Fixtures.mixed[3].id]
+		}
+		r.model.query = "old"
+		await r.model.searchStore()
+		#expect(r.model.visibleClips.allSatisfy { $0.text.localizedStandardContains("new") })
+	}
+
+	@Test func cancellingUndoEndsItAndItsToast() async {
+		let r = StripRig()
+		let id = Fixtures.mixed[2].id
+		r.model.select(id)
+		await r.model.deleteSelected()
+		r.model.cancelUndo(for: [UUID()])
+		#expect(r.model.canUndo)
+		r.model.cancelUndo(for: [id])
+		#expect(!r.model.canUndo)
+		#expect(r.model.toast == nil)
+		await r.model.undo()
+		#expect(!r.model.clips.contains { $0.id == id })
+	}
+
 	@Test func undoClearsAHidingSearch() async {
 		let r = StripRig()
 		r.model.select(Fixtures.mixed[2].id)

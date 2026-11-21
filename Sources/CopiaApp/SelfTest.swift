@@ -16,6 +16,8 @@ public enum SelfTest {
 		var panelScreen: String?
 		var mouseScreen: String?
 		var stripInsideVisibleFrame: Bool
+		var panelFrameMatchesStrip: Bool
+		var typedQuery: String
 		var cardsMountedAfterClose: Bool
 	}
 
@@ -39,12 +41,19 @@ public enum SelfTest {
 				let mouse = NSEvent.mouseLocation
 				let mouseScreen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
 				let strip = PanelLayout.stripFrame(in: controller.panel.screen?.visibleFrame ?? .zero)
+				// Type one character through the window server's key path, as a user would.
+				let typed = Self.type("q", into: controller.panel)
+				try? await Task.sleep(for: .milliseconds(60))
+				let query = controller.model.query
+				controller.model.query = ""
 				let front = NSWorkspace.shared.frontmostApplication
 				var sample = Sample(display: index, cycle: cycle, panelIdentity: ObjectIdentifier(controller.panel).debugDescription,
 					panelVisible: controller.panel.isVisible, panelIsKey: controller.panel.isKeyWindow,
 					copiaIsFrontmost: front?.processIdentifier == ownPID, frontmostBundleID: front?.bundleIdentifier,
 					panelScreen: controller.panel.screen?.localizedName, mouseScreen: mouseScreen?.localizedName,
 					stripInsideVisibleFrame: controller.panel.screen.map { $0.visibleFrame.contains(strip) } ?? false,
+					panelFrameMatchesStrip: controller.panel.screen.map { controller.panel.frame.contains(strip) && $0.frame.contains(controller.panel.frame) } ?? false,
+					typedQuery: typed ? query : "<not sent>",
 					cardsMountedAfterClose: false)
 				controller.toggleHistory()
 				try? await Task.sleep(for: .milliseconds(400))
@@ -58,13 +67,17 @@ public enum SelfTest {
 				if sample.copiaIsFrontmost { violations.append("\(tag): Copia became the active app") }
 				if sample.panelScreen != sample.mouseScreen { violations.append("\(tag): opened on \(sample.panelScreen ?? "nil"), mouse on \(sample.mouseScreen ?? "nil")") }
 				if !sample.stripInsideVisibleFrame { violations.append("\(tag): strip outside the visible frame") }
+				if !sample.panelFrameMatchesStrip { violations.append("\(tag): panel frame \(controller.panel.frame) does not hold the strip on its screen") }
+				if sample.typedQuery != "q" { violations.append("\(tag): typing reached \"\(sample.typedQuery)\", not the search") }
 				if sample.cardsMountedAfterClose { violations.append("\(tag): still visible after close") }
 			}
 		}
 		if let savedMouse { CGWarpMouseCursorPosition(savedMouse) }
 
 		let report: [String: Any] = [
-			"schema": 1,
+			"schema": 2,
+			// A full-screen Space cannot be entered from a script reliably; run the same check by hand over one.
+			"fullScreenSpace": "manual",
 			"displays": NSScreen.screens.count,
 			"cycles": samples.count,
 			"violations": violations,
@@ -74,6 +87,22 @@ public enum SelfTest {
 			try? data.write(to: output)
 		}
 		return violations.isEmpty ? 0 : 1
+	}
+}
+
+extension SelfTest {
+	/// Posts a key-down and key-up for `character` to the panel's window number. Returns false if no event could be made.
+	static func type(_ character: String, into panel: NSPanel) -> Bool {
+		guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+			windowNumber: panel.windowNumber, context: nil, characters: character, charactersIgnoringModifiers: character,
+			isARepeat: false, keyCode: 12),
+			let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+			windowNumber: panel.windowNumber, context: nil, characters: character, charactersIgnoringModifiers: character,
+			isARepeat: false, keyCode: 12)
+		else { return false }
+		NSApp.postEvent(down, atStart: false)
+		NSApp.postEvent(up, atStart: false)
+		return true
 	}
 }
 

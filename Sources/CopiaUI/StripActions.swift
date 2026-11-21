@@ -29,6 +29,8 @@ public struct StripActions {
 	public var delete: (_ id: UUID) async throws -> Void
 	public var restore: (_ clip: Clip, _ index: Int) async throws -> Void
 	public var openAccessibilitySettings: () -> Void
+	/// Full-text search over everything stored, not only the card text. Returns matching clip IDs.
+	public var search: (_ query: String) async -> Set<UUID> = { _ in [] }
 
 	public init(
 		paste: @escaping (UUID, Bool, @escaping @MainActor () -> Void) async throws -> PasteResult,

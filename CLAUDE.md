@@ -1,6 +1,6 @@
 # Copia
 
-Read first: [wiki/Architecture.md](wiki/Architecture.md), [wiki/Performance.md](wiki/Performance.md) and [wiki/Development.md](wiki/Development.md).
+Read first: [wiki/Home.md](wiki/Home.md), [wiki/Usage.md](wiki/Usage.md), [wiki/Architecture.md](wiki/Architecture.md), [wiki/Performance.md](wiki/Performance.md) and [wiki/Development.md](wiki/Development.md).
 
 - Build with `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`; Command Line Tools alone lack the macro plugins.
 - `swift test` must pass, and `copia-bench` budgets must hold, before a change is done.
