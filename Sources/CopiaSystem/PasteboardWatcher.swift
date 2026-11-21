@@ -48,6 +48,7 @@ public final class PasteboardWatcher {
 	private var lastChange: Int
 	private var log: ActivationLog
 	private var timer: Timer?
+	private lazy var timerTarget = PollTarget(self)
 	private var observer: NSObjectProtocol?
 
 	public init(source: PasteboardSource = GeneralPasteboard(), ignoredApps: Set<String> = [],
@@ -81,11 +82,20 @@ public final class PasteboardWatcher {
 
 	/// Builds the polling timer without scheduling it, so its configuration can be tested in isolation.
 	func makeTimer() -> Timer {
-		let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-			MainActor.assumeIsolated { self?.tick() }
-		}
+		let timer = Timer(timeInterval: 0.5, target: timerTarget, selector: #selector(PollTarget.fire(_:)),
+			userInfo: nil, repeats: true)
 		timer.tolerance = 0.1
 		return timer
+	}
+
+	/// The timer runs on the main run loop. Its target must not keep the watcher alive.
+	@MainActor private final class PollTarget: NSObject {
+		weak var watcher: PasteboardWatcher?
+		init(_ watcher: PasteboardWatcher) { self.watcher = watcher }
+		@objc func fire(_ timer: Timer) {
+			guard let watcher else { timer.invalidate(); return }
+			watcher.tick()
+		}
 	}
 
 	public func stop() {

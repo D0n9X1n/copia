@@ -46,6 +46,37 @@ final class FakePasteboard: PasteboardSource {
 		#expect(timer.isValid)
 	}
 
+	@Test func pollingTimerDoesNotRetainAnAbandonedWatcher() {
+		let pb = FakePasteboard()
+		var watcher: PasteboardWatcher? = PasteboardWatcher(source: pb, frontmost: { nil })
+		weak var weakWatcher = watcher
+		let timer = watcher!.makeTimer()
+		defer { timer.invalidate() }
+		watcher = nil
+		#expect(weakWatcher == nil)
+		timer.fire()
+		#expect(!timer.isValid)
+		#expect(pb.reads == 0)
+	}
+
+	@Test func pollingCallbackStillSkipsPrivateAndPausedContents() {
+		let pb = FakePasteboard()
+		let (watcher, drafts) = make(pb)
+		let timer = watcher.makeTimer()
+		defer { timer.invalidate() }
+		pb.copy("private fixture", extraTypes: ["org.nspasteboard.ConcealedType"])
+		timer.fire()
+		watcher.setPaused(true)
+		pb.copy("paused fixture")
+		timer.fire()
+		#expect(pb.reads == 0 && drafts().isEmpty)
+		watcher.setPaused(false)
+		pb.copy("allowed fixture")
+		timer.fire()
+		#expect(drafts().count == 1)
+		#expect(drafts().first.map(Capture.plainText) == "allowed fixture")
+	}
+
 	@Test func emitsOneDraftPerObservedChange() {
 		let pb = FakePasteboard()
 		let (w, drafts) = make(pb)
