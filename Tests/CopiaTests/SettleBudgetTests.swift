@@ -45,12 +45,13 @@ import CopiaUI
 		#expect(abs(SettleBudget.analytic(.undo, reduced: true) - 0.1485) < 1e-9)
 	}
 
-	/// Amendment 14: the fade and the reflow overlap, so a delete settles when the slower of the two does.
-	@Test func aDeleteSettlesWhenTheSlowerOfItsOverlappingFadeAndReflowDoes() {
-		let fade = SettleBudget.settle(Motion.value(.delete, reduced: false))
+	/// Reflow is requested from the delete completion, so its time starts after the full fade duration.
+	@Test func aDeleteBudgetIncludesTheFadeThenTheReflow() {
 		let reflow = SettleBudget.settle(Motion.value(.reflow, reduced: false))
-		#expect(abs(SettleBudget.analytic(.delete, reduced: false) - max(fade, reflow)) < 1e-9)
-		#expect(abs(SettleBudget.analytic(.delete, reduced: true) - 0.1485) < 1e-9)
+		#expect(Motion.value(.delete, reduced: false) == .easeInOut(0.2))
+		#expect(abs(SettleBudget.analytic(.delete, reduced: false) - (0.2 + reflow)) < 1e-9)
+		#expect(Motion.value(.delete, reduced: true) == .linear(0.15))
+		#expect(abs(SettleBudget.analytic(.delete, reduced: true) - (0.15 + 0.1485)) < 1e-9)
 	}
 
 	@Test func theLimitAddsTwentyMilliseconds() {

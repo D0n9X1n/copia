@@ -177,6 +177,27 @@ final class PasteGate {
 		#expect(r.model.selectedID == nil)
 	}
 
+	@Test func reflowWaitsForTheDeleteCompletion() async {
+		let r = StripRig()
+		var requests: [MotionEvent] = []
+		var finishDelete: (@MainActor () -> Void)?
+		r.model.animator = Animator { event, change, completion in
+			requests.append(event)
+			change()
+			if event == .delete { finishDelete = completion } else { completion() }
+		}
+		let id = r.model.selectedID
+		let before = r.model.clips.map(\.id)
+		await r.model.deleteSelected()
+		#expect(requests == [.delete])
+		#expect(r.model.clips.map(\.id) == before)
+		#expect(r.model.selectedID == id)
+		#expect(finishDelete != nil)
+		finishDelete?()
+		#expect(requests == [.delete, .reflow])
+		#expect(r.model.clips.map(\.id) == before.filter { $0 != id })
+	}
+
 	@Test func undoDuringTheDeleteAnimationKeepsTheCard() async {
 		let r = StripRig()
 		var pending: [@MainActor () -> Void] = []
