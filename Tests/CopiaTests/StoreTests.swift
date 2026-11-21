@@ -11,6 +11,9 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 	var failMoveFromContaining: String?
 	var failWriteContaining: String?
 	var failRemoveContaining: String?
+	/// Persistent: matching paths look absent to `exists`, and moving them fails with a permission error, as a file in a
+	/// folder without search permission does.
+	var hideContaining: String?
 	func write(_ data: Data, to url: URL) throws {
 		if let f = failWriteContaining, url.path.contains(f) { failWriteContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.write(data, to: url)
@@ -18,13 +21,17 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 	func move(_ from: URL, to: URL) throws {
 		if let f = failMoveContaining, from.path.contains(f) || to.path.contains(f) { failMoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		if let f = failMoveFromContaining, from.path.contains(f) { failMoveFromContaining = nil; throw CocoaError(.fileWriteUnknown) }
+		if let f = hideContaining, from.path.contains(f) { throw CocoaError(.fileReadNoPermission) }
 		try live.move(from, to: to)
 	}
 	func remove(_ url: URL) throws {
 		if let f = failRemoveContaining, url.path.contains(f) { failRemoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.remove(url)
 	}
-	func exists(_ url: URL) -> Bool { live.exists(url) }
+	func exists(_ url: URL) -> Bool {
+		if let f = hideContaining, url.path.contains(f) { return false }
+		return live.exists(url)
+	}
 	func list(_ directory: URL) throws -> [URL] { try live.list(directory) }
 }
 
@@ -225,6 +232,149 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		try await expectWhole(store, dir, clip)
 	}
 
+	/// A blob the store cannot reach is not an absent one: the delete fails and nothing changes (B1:64).
+	@Test func aBlobItCannotReachFailsTheDeleteAndKeepsTheClip() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("unreachable"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		faulty.hideContaining = "blobs/"
+		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
+		faulty.hideContaining = nil
+		try await expectWhole(store, dir, clip)
+		_ = try #require(try await store.delete(clip.key))
+		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") == 0)
+		#expect(fileCount(dir, "trash") == 2)
+	}
+
+	/// The same with a real folder that lists but cannot be searched.
+	@Test func aBlobsFolderWithoutSearchPermissionFailsTheDelete() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("unreachable"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		let blobs = dir.appendingPathComponent("blobs").path
+		try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: blobs)
+		defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blobs) }
+		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
+		try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blobs)
+		try await expectWhole(store, dir, clip)
+		_ = try #require(try await store.delete(clip.key))
+		#expect(fileCount(dir, "blobs") == 0)
+	}
+
+	/// Deleting again before any cleanup pass keeps a blob stranded in trash as the undo copy.
+	@Test func aSecondDeleteKeepsAStrandedBlobAsItsUndo() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let clip = try await strandBlobInTrash(store, dir, faulty)
+		let deleted = try #require(try await store.delete(clip.key))
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(fileCount(dir, "trash") == 2)
+		try await store.restore(deleted)
+		try await expectWhole(store, dir, clip)
+	}
+
+	/// Moving a file that is not there fails as "no such file" and leaves the destination alone, so a delete that
+	/// tries a missing file never removes an undo copy already in trash. A real source still replaces the destination.
+	@Test func liveMoveOfAMissingSourceKeepsTheDestination() throws {
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-mv-\(UUID().uuidString)")
+		try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let dest = dir.appendingPathComponent("dest.plist")
+		try Data("undo copy".utf8).write(to: dest)
+		#expect(throws: (any Error).self) { try LiveFileOps().move(dir.appendingPathComponent("missing.plist"), to: dest) }
+		#expect(try Data(contentsOf: dest) == Data("undo copy".utf8))
+		let source = dir.appendingPathComponent("source.plist")
+		try Data("new".utf8).write(to: source)
+		try LiveFileOps().move(source, to: dest)
+		#expect(try Data(contentsOf: dest) == Data("new".utf8))
+		#expect(!FileManager.default.fileExists(atPath: source.path))
+	}
+
+	/// The thumbnail cannot come home and the blob cannot go back to trash. The blob is home, so the clip is restored
+	/// with its preview pending instead of leaving a blob without a row for cleanup to delete (B1:31).
+	@Test func aRestoreWhoseRollbackFailsBringsTheClipBackWhole() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("keep me"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		let deleted = try #require(try await store.delete(clip.key))
+		faulty.failMoveContaining = "trash/\(clip.key).png"
+		faulty.failMoveFromContaining = "blobs/\(clip.key).plist"
+		try await store.restore(deleted)
+		let back = try #require(try await store.fetch(clip.key))
+		#expect(back.previewState == .pending)
+		#expect(try await store.items(for: clip.key).count == 1)
+		#expect(try await store.ftsKeys() == [clip.key])
+		try await store.removeOrphans()
+		try await store.sweep()
+		try await expectWhole(store, dir, clip)
+		#expect(try await store.fetch(clip.key)?.previewState == .pending)
+		await #expect(throws: StoreError.alreadyExists) { try await store.restore(deleted) }
+	}
+
+	/// Restore's thumbnail move fails, its blob cannot go back to trash, and the fallback insert fails too: the restore
+	/// throws with the blob home and no row, the only copy of an undo that is still valid.
+	private func failRestoreCompletely(_ store: ClipStore, _ dir: URL, _ faulty: FaultyFiles) async throws -> (StoredClip, DeletedClip) {
+		let (clip, _) = try await store.insert(text("keep me"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		let deleted = try #require(try await store.delete(clip.key))
+		faulty.failMoveContaining = "trash/\(clip.key).png"
+		faulty.failMoveFromContaining = "blobs/\(clip.key).plist"
+		await store.failNextWrite()
+		await #expect(throws: (any Error).self) { try await store.restore(deleted) }
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(fileCount(dir, "blobs") == 1 && fileCount(dir, "trash") == 1)
+		return (clip, deleted)
+	}
+
+	/// The hourly pass must not remove that blob, and retrying the undo restores the clip whole (B1:31).
+	@Test func aRestoreThatCannotFinishOrRollBackKeepsItsPayloadForARetry() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") == 1)
+		try await store.restore(deleted)
+		try await expectWhole(store, dir, clip)
+		#expect(try await store.fetch(clip.key)?.previewState == .ok)
+	}
+
+	/// Emptying trash (strip close), a sweep (launch) and an erase each end the undo: the payload a failed restore left
+	/// home goes, the undo is refused, and the key's files are ordinary orphans again.
+	@Test(arguments: ["emptyTrash", "sweep", "eraseAll"])
+	func endingTheUndoRemovesAFailedRestoresPayload(pass: String) async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
+		switch pass {
+		case "emptyTrash": await store.emptyTrash()
+		case "sweep": try await store.sweep()
+		default: try await store.eraseAll()
+		}
+		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") + fileCount(dir, "trash") == 0)
+		await #expect(throws: StoreError.missingBlob) { try await store.restore(deleted) }
+		#expect(try await store.fetch(clip.key) == nil)
+		try Data([1]).write(to: dir.appendingPathComponent("blobs/\(clip.key).plist"))
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") == 0)
+	}
+
+	/// Once the clip is back, by a retried restore or a recopy, the key's files are no longer spared: a blob a later
+	/// prune could not remove is cleaned up by the hourly pass.
+	@Test(arguments: ["restore", "recopy"])
+	func protectionEndsWhenTheClipIsBack(how: String) async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
+		if how == "restore" { try await store.restore(deleted) } else { try await store.insert(text("keep me")) }
+		faulty.failRemoveContaining = "blobs/\(clip.key).plist"
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 1_900_000_000)) == 1)
+		#expect(fileCount(dir, "blobs") == 1)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") == 0)
+	}
+
 	/// Undo after its trashed thumbnail was lost brings back a whole clip that asks for a new preview,
 	/// never a final preview state without its image.
 	@Test func restoreWithoutItsTrashedThumbnailAsksForANewPreview() async throws {
@@ -295,13 +445,16 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(try await store.fetch(clip.key) != nil)
 	}
 
+	/// Checked in the FTS table itself: search joins on `clips`, so it would hide an entry the sweep left behind.
 	@Test func sweepDropsRowsWithMissingBlobsAndTheirFts() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
 		let (clip, _) = try await store.insert(text("lost blob"))
+		let (kept, _) = try await store.insert(text("kept blob"))
 		try FileManager.default.removeItem(at: dir.appendingPathComponent("blobs/\(clip.key).plist"))
 		try await store.sweep()
 		#expect(try await store.fetch(clip.key) == nil)
 		#expect(try await store.search("lost").isEmpty)
+		#expect(try await store.ftsKeys() == [kept.key])
 	}
 
 	@Test func pruneRemovesExpiredRowsAndFiles() async throws {

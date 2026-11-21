@@ -249,17 +249,42 @@ final class FakePasteboard: PasteboardSource {
 	@Test func theWaitIncludingTheSettleNeverPasses300Milliseconds() async {
 		var slept: [Int] = []
 		var polls = 0
+		var clock = ContinuousClock.now
 		let late = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 29 ? 1 : 2 }, activate: {},
-			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+			sleep: { ms in slept.append(ms); clock = clock.advanced(by: .milliseconds(ms)); if ms == 10 { polls += 1 } },
+			now: { clock })
 		#expect(slept.reduce(0, +) <= 300)
 		#expect(!late)
 
 		slept = []; polls = 0
 		let justInTime = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 27 ? 1 : 2 }, activate: {},
-			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+			sleep: { ms in slept.append(ms); clock = clock.advanced(by: .milliseconds(ms)); if ms == 10 { polls += 1 } },
+			now: { clock })
 		#expect(justInTime)
 		#expect(slept.reduce(0, +) == 300)
 		#expect(slept.last == Paster.settleMilliseconds)
+	}
+
+	/// The budget is elapsed time on a monotonic clock, not the sum of requested sleeps: here every sleep takes three
+	/// times what it asked for, as under scheduling delay (B2:14).
+	@Test func theBudgetIsElapsedTimeNotRequestedSleeps() async {
+		let start = ContinuousClock.now
+		var clock = start
+		var polls = 0
+		func wait(frontAfter: Int) async -> Bool {
+			clock = start; polls = 0
+			return await Paster.activateAndWait(pid: 1, frontmost: { polls >= frontAfter ? 1 : 2 }, activate: {},
+				sleep: { ms in clock = clock.advanced(by: .milliseconds(3 * ms)); if ms == 10 { polls += 1 } },
+				now: { clock })
+		}
+		// Never comes forward: polling stops within the budget, not after 280 ms of requested sleeps (840 ms elapsed).
+		#expect(await wait(frontAfter: .max) == false)
+		#expect(clock - start <= .milliseconds(300))
+		// Seen at 240 ms elapsed: the settle ends at 330 ms, past the budget, so it is not pasted into.
+		#expect(await wait(frontAfter: 8) == false)
+		// Seen early: pasted into, with the settle inside the budget.
+		#expect(await wait(frontAfter: 2) == true)
+		#expect(clock - start <= .milliseconds(300))
 	}
 
 	/// Every stored item and representation reaches the pasteboard in order, read back through spy events.
@@ -514,13 +539,56 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		#expect(previewer.stats.decodes == 2)
 	}
 
-	@Test func imageThumbnailIsAtMost480Pixels() throws {
+	/// An 8000×8000 PNG (brief:79) through the real capture, store and thumbnail path: its footer gives its size,
+	/// and its saved thumbnail is at most 384 px, enough for a 192 pt card at 2×.
+	@Test func an8000PixelImageIsCapturedStoredAndThumbnailed() async throws {
+		let started = ContinuousClock.now
+		let png = try Self.solidPNG(side: 8000)
+		let pb = FakePasteboard()
+		var drafts: [ClipDraft] = []
+		let watcher = PasteboardWatcher(source: pb, frontmost: { "com.apple.Preview" }, appName: { _ in "Preview" })
+		watcher.onDraft = { drafts.append($0) }
+		pb.changeCount += 1
+		pb.items = [PasteboardItemData([(PasteboardTypes.png, png)])]
+		pb.typeIdentifiers = [PasteboardTypes.png]
+		watcher.tick()
+		let draft = try #require(drafts.first)
+
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let previewer = Previewer(store: store, links: CountingLinks())
+		let (clip, _) = try await store.insert(draft)
+		#expect(clip.kind == .image)
+		#expect(clip.meta == "8000×8000 · PNG")
+		previewer.generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		let thumb = try #require(await store.thumbnail(for: clip.key))
+		let image = try #require(NSBitmapImageRep(data: try Data(contentsOf: thumb)))
+		#expect(max(image.pixelsWide, image.pixelsHigh) <= 384)
+		#expect(image.pixelsWide == image.pixelsHigh)
+		#expect(ContinuousClock.now - started < .seconds(2))
+	}
+
+	/// A solid 8-bit grayscale PNG: 64 MB to draw, a few hundred KB encoded.
+	static func solidPNG(side: Int) throws -> Data {
+		guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side,
+			space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { throw CocoaError(.featureUnsupported) }
+		ctx.setFillColor(gray: 0.5, alpha: 1)
+		ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+		let out = NSMutableData()
+		guard let image = ctx.makeImage(), let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil)
+		else { throw CocoaError(.featureUnsupported) }
+		CGImageDestinationAddImage(dest, image, nil)
+		guard CGImageDestinationFinalize(dest) else { throw CocoaError(.featureUnsupported) }
+		return out as Data
+	}
+
+	@Test func imageThumbnailIsAtMost384Pixels() throws {
 		let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2000, pixelsHigh: 1000, bitsPerSample: 8, samplesPerPixel: 4,
 			hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
 		let png = try #require(rep.representation(using: .png, properties: [:]))
 		let thumb = try #require(Previewer.thumbnailPNG(from: png))
 		let out = try #require(NSBitmapImageRep(data: thumb))
-		#expect(max(out.pixelsWide, out.pixelsHigh) <= 480)
+		#expect(max(out.pixelsWide, out.pixelsHigh) <= 384)
 		#expect(out.hasAlpha)
 	}
 }

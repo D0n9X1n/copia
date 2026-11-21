@@ -24,7 +24,7 @@ public protocol LinkFetching: Sendable {
 	func fetch(_ url: URL) async throws -> LinkPreview
 }
 
-/// LinkPresentation with a 10 s timeout; images are reduced to ≤480 px PNGs. The icon is loaded only without an image.
+/// LinkPresentation with a 10 s timeout; images are reduced to ≤384 px PNGs. The icon is loaded only without an image.
 public struct LiveLinkFetcher: LinkFetching {
 	public init() {}
 	@MainActor
@@ -145,12 +145,12 @@ public final class Previewer {
 		}
 	}
 
-	/// Decodes at display size (≤480 px) and encodes PNG, which keeps alpha and is lossless at this size.
+	/// Decodes at display size (≤384 px: a 192 pt card at 2×) and encodes PNG, which keeps alpha and is lossless at this size.
 	nonisolated static func thumbnailPNG(from data: Data) -> Data? {
 		guard let source = CGImageSourceCreateWithData(data as CFData, nil),
 			let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
 				kCGImageSourceCreateThumbnailFromImageAlways: true,
-				kCGImageSourceThumbnailMaxPixelSize: 480,
+				kCGImageSourceThumbnailMaxPixelSize: 384,
 				kCGImageSourceCreateThumbnailWithTransform: true,
 			] as CFDictionary)
 		else { return nil }
