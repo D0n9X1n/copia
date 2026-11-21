@@ -12,6 +12,22 @@ public enum PasteResult: Sendable {
 	case accessibilityRequired
 }
 
+/// Storage diagnostics survive transient toasts and are shared by the strip and Settings.
+public enum StorageStatus: Equatable, Sendable {
+	case ready, cleanupPending, recoveryRequired
+
+	public var message: String {
+		switch self {
+		case .ready: ""
+		case .cleanupPending: "Some saved files are awaiting cleanup. Copia will retry."
+		case .recoveryRequired: "Outcome unknown; capture paused until restart. Restart Copia to recover."
+		}
+	}
+}
+
+/// An indeterminate database outcome must not be presented as a rolled-back operation.
+public enum StripActionError: Error { case outcomeUnknown, undoExpired }
+
 /// The four actions a card offers. Mouse, keyboard and VoiceOver all go through these.
 public enum CardAction: String, CaseIterable, Sendable {
 	case paste = "Paste"

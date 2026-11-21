@@ -60,7 +60,9 @@ enum Bench {
 				copiedAt: base.addingTimeInterval(TimeInterval(i)))
 			let (clip, _) = try await store.insert(draft)
 			if clip.kind == .image, let thumb = pngs.first {
-				_ = try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: thumb)
+				guard try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: thumb) else {
+					throw StoreError.sqlite("benchmark image preview was rejected")
+				}
 			}
 		}
 	}

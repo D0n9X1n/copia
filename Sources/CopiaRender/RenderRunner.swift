@@ -54,6 +54,8 @@ enum RenderRunner {
 				m.actions.paste = { _, _, _ in .accessibilityRequired }
 				await m.paste(plain: false)
 			}))
+			list.append(Scene(name: "06-storage-cleanup-\(mode)", dark: dark, prepare: { $0.storageStatus = .cleanupPending }))
+			list.append(Scene(name: "06-storage-recovery-\(mode)", dark: dark, prepare: { $0.storageStatus = .recoveryRequired }))
 			list.append(Scene(name: "07-reduce-transparency-\(mode)", dark: dark, overrides: CopiaOverrides(reduceTransparency: true)))
 			list.append(Scene(name: "07-increase-contrast-\(mode)", dark: dark, overrides: CopiaOverrides(highContrast: true)))
 			list.append(Scene(name: "08-hover-\(mode)", dark: dark, prepare: { m in m.hoveredID = m.clips[2].id }))
@@ -266,6 +268,12 @@ enum RenderRunner {
 				let window = settingsWindow(model: shell, tab: tab, level: .floating + 1)
 				rows.append(try await capture(window, name: "10-settings-\(tab.rawValue.lowercased())-\(mode)", output: output, stage: stage))
 			}
+			for (name, status) in [("cleanup", StorageStatus.cleanupPending), ("recovery", .recoveryRequired)] {
+				shell.storageStatus = status
+				rows.append(try await capture(settingsWindow(model: shell, tab: .general, level: .floating + 1),
+					name: "10-settings-storage-\(name)-\(mode)", output: output, stage: stage))
+			}
+			shell.storageStatus = .ready
 			rows.append(try await captureEraseConfirmation(name: "10-settings-erase-confirm-\(mode)", output: output, stage: stage, screen: screen))
 			for (index, step) in OnboardingStep.allCases.enumerated() {
 				for granted in [false, true] where step == .accessibility || step == .pasteboard || granted {

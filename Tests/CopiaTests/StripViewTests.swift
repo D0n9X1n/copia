@@ -44,6 +44,47 @@ import CopiaFixtures
 		#expect(abs(visible.height - height) < 0.5)
 	}
 
+	@Test func storageWarningsRemainVisibleAfterTransientToastsEnd() async throws {
+		let host = StripHost(overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.storageStatus = .cleanupPending
+		await host.model.deleteSelected()
+		#expect(host.model.toast == .deleted)
+		await host.settle()
+		#expect(host.root.all.contains { $0.label == StorageStatus.cleanupPending.message || $0.value == StorageStatus.cleanupPending.message })
+		clock.advance(by: .seconds(3))
+		#expect(host.model.toast == nil)
+		for status in [StorageStatus.cleanupPending, .recoveryRequired] {
+			host.model.storageStatus = status
+			await host.settle()
+			let warning = try #require(host.root.all.first { $0.value == status.message || $0.label == status.message })
+			#expect(host.isOnScreen(warning))
+			#expect(host.window.frame.contains(warning.frame))
+			#expect(warning.frame.minY >= host.window.frame.maxY - Theme.topBarHeight, "storage warning must not cover cards")
+		}
+	}
+
+	@Test func recoveryHeaderFitsTheCIWidthWithAnExpandedSearchField() async throws {
+		let host = StripHost(width: 1008, overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		host.model.storageStatus = .recoveryRequired
+		host.model.paused = true
+		host.model.query = "example"
+		await host.settle()
+		let warning = try #require(host.root.all.first { $0.label == StorageStatus.recoveryRequired.message || $0.value == StorageStatus.recoveryRequired.message })
+		#expect(host.isOnScreen(warning))
+		#expect(warning.frame.minY >= host.window.frame.maxY - Theme.topBarHeight)
+		func searchField(in view: NSView) -> NSTextField? {
+			if let field = view as? NSTextField, field.accessibilityLabel() == "Search clipboard history" { return field }
+			return view.subviews.lazy.compactMap { searchField(in: $0) }.first
+		}
+		let field = try #require(host.window.contentView.flatMap { searchField(in: $0) })
+		let frame = host.window.convertToScreen(field.convert(field.bounds, to: nil))
+		#expect(frame.maxX < warning.frame.minX)
+	}
+
 	@Test func aNewCopyWhileOpenSlidesInAtIndexZeroAndTheSelectionStaysInView() async throws {
 		let host = StripHost(width: 1000)
 		defer { host.close() }

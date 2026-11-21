@@ -36,9 +36,11 @@ The dedup identity is a SHA-256 over the ordered pasteboard items. Each item's r
 
 ### Storage, delete and undo
 
-`ClipStore` is an actor, so rows and files change together. Delete removes the row and its FTS entry in one transaction, then moves the blob and thumbnail to `trash/`. ⌘Z restores them. Closing the strip, erasing history and launching all empty `trash/`. A launch sweep removes files without rows and rows without blobs.
+`ClipStore` serializes mutations. Delete copies the payload and saved thumbnail into a token-named undo snapshot before committing the row and FTS removal; restore copies the complete snapshot home before publishing its row. Original files remain until the database outcome is known, so a failed operation never relies on moving the only copy back. Undo tokens expire after three seconds, when replaced, on close, erase, relaunch or recopy—even if a snapshot cannot yet be unlinked.
 
-Each row has a `generation` that increases on every insert and restore. A preview is saved only if its generation still matches, so a late preview never lands on a deleted or recopied clip. Clips still pending after an undo or relaunch are fetched again.
+A committed operation can leave redundant files awaiting cleanup. The strip and Settings show a persistent warning; existing close, hourly and launch passes retry. Erase reports an error while any file remains. If a database outcome cannot be confirmed, Copia preserves all copies, pauses capture and blocks storage actions until restart. A launch sweep removes unowned files and rows whose payload is proven missing; unreadable directories stop destructive cleanup.
+
+Each row has a `generation` that increases on every insert and restore. A preview is saved only if its generation still matches, so a late preview never lands on a deleted or recopied clip. Clips still pending after an undo or relaunch are fetched again. A finalized preview is immutable except for title updates: undo preserves its saved state and files and never refetches a finalized link. Missing required snapshot files make undo fail without consuming its token.
 
 ### The strip
 

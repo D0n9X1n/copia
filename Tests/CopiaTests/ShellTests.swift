@@ -151,6 +151,26 @@ import CopiaFixtures
 		}
 	}
 
+	@Test func settingsExposesPersistentStorageWarningAndDisablesEraseDuringRecovery() async throws {
+		AccessibilityNode.enableInProcess()
+		for status in [StorageStatus.cleanupPending, .recoveryRequired] {
+			let model = ShellModel()
+			model.storageStatus = status
+			let window = SettingsView.makeSettingsWindow(model: model)
+			window.setFrameOrigin(CGPoint(x: -6000, y: -6000))
+			window.alphaValue = 0
+			window.orderFrontRegardless()
+			defer { window.orderOut(nil) }
+			try await Task.sleep(for: .milliseconds(150))
+			window.contentView?.layoutSubtreeIfNeeded()
+			let nodes = AccessibilityNode(window).all
+			#expect(nodes.contains { $0.value == status.message || $0.label == status.message })
+			let erase = try #require(nodes.first { $0.label == "Erase History…" }?.object)
+			#expect(erase.responds(to: NSSelectorFromString("isAccessibilityEnabled")))
+			#expect((erase.value(forKey: "isAccessibilityEnabled") as? Bool) == (status != .recoveryRequired))
+		}
+	}
+
 	@Test func windowIs560PointsWide() {
 		_ = NSApplication.shared
 		for tab in SettingsTab.allCases {

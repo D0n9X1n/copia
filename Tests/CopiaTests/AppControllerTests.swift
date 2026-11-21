@@ -1,5 +1,6 @@
 import Testing
 import AppKit
+import Synchronization
 import CopiaCore
 import CopiaUI
 @testable import CopiaApp
@@ -24,6 +25,28 @@ final class FakeLogin: LoginService {
 	}
 }
 
+/// Holds one snapshot copy so the main actor can close the strip while delete is running.
+final class PausedSnapshotFiles: FileOps, Sendable {
+	private let live = LiveFileOps()
+	private let state = Mutex((pause: true, entered: false))
+	private let release = DispatchSemaphore(value: 0)
+	var entered: Bool { state.withLock { $0.entered } }
+	func resume() { release.signal() }
+	func write(_ data: Data, to url: URL) throws { try live.write(data, to: url) }
+	func copy(_ from: URL, to: URL) throws {
+		let pause = state.withLock { state in
+			guard state.pause else { return false }
+			state.pause = false; state.entered = true
+			return true
+		}
+		if pause, release.wait(timeout: .now() + 5) == .timedOut { throw CocoaError(.fileWriteUnknown) }
+		try live.copy(from, to: to)
+	}
+	func remove(_ url: URL) throws { try live.remove(url) }
+	func exists(_ url: URL) -> Bool { live.exists(url) }
+	func list(_ directory: URL) throws -> [URL] { try live.list(directory) }
+}
+
 /// A controller over a temporary store, a fake pasteboard and a private defaults suite. Nothing reaches the system clipboard.
 @MainActor
 final class AppRig {
@@ -39,14 +62,14 @@ final class AppRig {
 	var permissions = PermissionState(accessibility: false, pasteboard: .unset)
 	let controller: AppController
 
-	init(dir shared: URL? = nil) throws {
+	init(dir shared: URL? = nil, storageFiles: any FileOps = LiveFileOps()) throws {
 		dir = shared ?? FileManager.default.temporaryDirectory.appendingPathComponent("copia-app-\(UUID().uuidString)")
 		ownsDirectory = shared == nil
 		defaults = UserDefaults(suiteName: suite)!
 		var rig: AppRig?
 		controller = try AppController(directory: dir, defaults: defaults, pasteboard: pasteboard, login: login,
 			permissions: { rig?.permissions ?? PermissionState(accessibility: false, pasteboard: .unset) },
-			links: links, files: thumbs)
+			links: links, files: thumbs, storageFiles: storageFiles)
 		rig = self
 		controller.model.animator = .immediate
 	}
@@ -258,7 +281,7 @@ func eventually(_ condition: () async throws -> Bool) async rethrows -> Bool {
 
 	@Test func retentionPrunesOnTheInjectedClockEveryHour() async throws {
 		let r = try AppRig()
-		try await r.copy("old")
+		try await r.copy("https://example.com/old")
 		let clip = try #require(try await r.controller.store.recent().first)
 		try await r.controller.store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
 		#expect(r.fileCount("blobs") == 1 && r.fileCount("thumbs") == 1)
@@ -268,6 +291,135 @@ func eventually(_ condition: () async throws -> Bool) async rethrows -> Bool {
 		#expect(r.titles().isEmpty)
 		#expect(r.fileCount("blobs") == 0 && r.fileCount("thumbs") == 0)
 		#expect(try await r.controller.store.ftsKeys().isEmpty)
+	}
+
+	@Test func recoveryStatusPausesCaptureWithoutChangingThePreference() async throws {
+		let r = try AppRig()
+		#expect(!r.controller.prefs.paused)
+		r.controller.applyStorageStatus(cleanupPending: true, recoveryRequired: true)
+		#expect(r.controller.shell.storageStatus == .recoveryRequired)
+		#expect(r.controller.model.storageStatus == .recoveryRequired)
+		#expect(r.controller.watcher.paused)
+		#expect(!r.controller.prefs.paused)
+		r.controller.togglePause()
+		#expect(r.controller.watcher.paused)
+		#expect(!r.controller.prefs.paused)
+	}
+
+	@Test func aStaleStatusRefreshCannotClearRecoveryBeforeRestart() throws {
+		let r = try AppRig()
+		r.controller.applyStorageStatus(cleanupPending: true, recoveryRequired: true)
+		r.controller.applyStorageStatus(cleanupPending: false, recoveryRequired: false)
+		#expect(r.controller.model.storageStatus == .recoveryRequired)
+		#expect(r.controller.shell.storageStatus == .recoveryRequired)
+		#expect(r.controller.watcher.paused)
+	}
+
+	@Test func reloadUsesOneConsistentSnapshotWithoutPerClipQueries() async throws {
+		let r = try AppRig()
+		for i in 0..<100 { try await r.copy("snapshot \(i)") }
+		await r.controller.store.resetReadCounts()
+		await r.controller.reload()
+		#expect(r.titles().count == 100)
+		// Includes status refresh: cached diagnostics must not add another history query.
+		#expect(await r.controller.store.readStatementCount == 1)
+		#expect(await r.controller.store.readRowCount == 100)
+	}
+
+	@Test func cleanupWarningReflectsVerifiedStoreStatus() throws {
+		let r = try AppRig()
+		r.controller.applyStorageStatus(cleanupPending: true, recoveryRequired: false)
+		#expect(r.controller.shell.storageStatus == .cleanupPending)
+		#expect(r.controller.model.storageStatus == .cleanupPending)
+		r.controller.applyStorageStatus(cleanupPending: false, recoveryRequired: false)
+		#expect(r.controller.shell.storageStatus == .ready)
+		#expect(r.controller.model.storageStatus == .ready)
+	}
+
+	@Test func committedDeleteAndRestoreKeepCleanupWarningsVisible() async throws {
+		let files = FaultyFiles(), r = try AppRig(storageFiles: files)
+		try await r.copy("cleanup candidate")
+		r.controller.model.open()
+		files.failRemoveContaining = "blobs/"
+		await r.controller.model.deleteSelected()
+		#expect(r.titles().isEmpty)
+		#expect(r.controller.model.canUndo)
+		#expect(r.controller.model.storageStatus == .cleanupPending)
+		#expect(r.controller.shell.storageStatus == .cleanupPending)
+		files.failRemoveContaining = "trash/"
+		await r.controller.store.failTransaction(commit: .afterEffect)
+		await r.controller.model.undo()
+		#expect(r.titles() == ["cleanup candidate"])
+		#expect(!r.controller.model.canUndo)
+		#expect(r.controller.model.toast == nil)
+		#expect(r.controller.model.storageStatus == .cleanupPending)
+		await r.controller.retentionTick()
+		#expect(r.controller.shell.storageStatus == .ready)
+		#expect(r.fileCount("trash") == 0)
+	}
+
+	@Test func unknownDeleteOutcomePausesCaptureAndPreservesVisibleState() async throws {
+		let r = try AppRig()
+		try await r.copy("unknown outcome")
+		r.controller.model.open()
+		await r.controller.store.failTransaction(commit: .beforeEffect, rollback: true)
+		await r.controller.model.deleteSelected()
+		#expect(r.titles() == ["unknown outcome"])
+		#expect(r.controller.model.storageStatus == .recoveryRequired)
+		#expect(r.controller.shell.storageStatus == .recoveryRequired)
+		#expect(r.controller.watcher.paused)
+		#expect(r.controller.model.toast == .error(StorageStatus.recoveryRequired.message))
+		#expect(!r.controller.model.canUndo)
+		await r.controller.erase()
+		#expect(r.fileCount("blobs") == 1)
+	}
+
+	@Test func closeDoesNotExpireDeletionStartedAfterReopen() async throws {
+		let r = try AppRig()
+		try await r.copy("first"); try await r.copy("second")
+		r.controller.model.open()
+		r.controller.model.select(r.controller.model.clips[0].id)
+		await r.controller.model.deleteSelected()
+		r.controller.model.beginClose()
+		r.controller.model.open()
+		await r.controller.model.deleteSelected()
+		#expect(r.controller.model.canUndo)
+		await r.controller.model.undo()
+		#expect(r.titles() == ["first"])
+		#expect(!r.controller.model.canUndo)
+	}
+
+	@Test func deleteInFlightDuringCloseInvalidatesItsStoreTokenAfterReopen() async throws {
+		let files = PausedSnapshotFiles(), r = try AppRig(storageFiles: files)
+		defer { files.resume() }
+		try await r.copy("in flight")
+		r.controller.model.open()
+		let deleting = Task { await r.controller.model.deleteSelected() }
+		#expect(await eventually { files.entered })
+		r.controller.model.beginClose()
+		r.controller.model.open()
+		files.resume()
+		await deleting.value
+		#expect(!r.controller.model.canUndo)
+		#expect(r.titles().isEmpty)
+		#expect(await eventually { r.fileCount("trash") == 0 })
+		await r.controller.model.undo()
+		#expect(try await r.controller.store.recent().isEmpty)
+	}
+
+	@Test func expiredUndoCallbackRemovesItsSnapshot() async throws {
+		let r = try AppRig(), clock = ClockProbe()
+		r.controller.model.clock = clock.clock
+		try await r.copy("expires")
+		r.controller.model.open()
+		await r.controller.model.deleteSelected()
+		#expect(r.fileCount("trash") == 1)
+		clock.advance(by: .seconds(3))
+		#expect(!r.controller.model.canUndo)
+		#expect(await eventually { r.fileCount("trash") == 0 })
+		r.controller.model.open()
+		await r.controller.model.undo()
+		#expect(r.titles().isEmpty)
 	}
 
 	@Test func settingsPersist() throws {

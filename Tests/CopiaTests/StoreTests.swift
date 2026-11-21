@@ -6,33 +6,53 @@ import CopiaCore
 /// Fails the next matching file operation once.
 final class FaultyFiles: FileOps, @unchecked Sendable {
 	let live = LiveFileOps()
-	var failMoveContaining: String?
-	/// Matches only the source path, so a rollback move out of trash can fail while the move into trash succeeds.
-	var failMoveFromContaining: String?
+	var listCalls = 0
+	var readCalls = 0
+	var failCopyContaining: String?
 	var failWriteContaining: String?
 	var failRemoveContaining: String?
-	/// Persistent: matching paths look absent to `exists`, and moving them fails with a permission error, as a file in a
+	var failListContaining: String?
+	var failListAfter: Int?
+	var failAtomicWrite = false
+	/// Persistent: matching paths look absent to `exists`, and copying them fails with a permission error, as a file in a
 	/// folder without search permission does.
 	var hideContaining: String?
 	func write(_ data: Data, to url: URL) throws {
+		if failAtomicWrite {
+			failAtomicWrite = false
+			try Data([8]).write(to: url.deletingLastPathComponent().appendingPathComponent(".atomic-leftover"))
+			throw CocoaError(.fileWriteUnknown)
+		}
 		if let f = failWriteContaining, url.path.contains(f) { failWriteContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.write(data, to: url)
 	}
-	func move(_ from: URL, to: URL) throws {
-		if let f = failMoveContaining, from.path.contains(f) || to.path.contains(f) { failMoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
-		if let f = failMoveFromContaining, from.path.contains(f) { failMoveFromContaining = nil; throw CocoaError(.fileWriteUnknown) }
+	func read(_ url: URL) throws -> Data {
+		readCalls += 1
+		if let f = hideContaining, url.path.contains(f) { throw CocoaError(.fileReadNoPermission) }
+		return try Data(contentsOf: url, options: .mappedIfSafe)
+	}
+	func copy(_ from: URL, to: URL) throws {
+		if let f = failCopyContaining, from.path.contains(f) || to.path.contains(f) { failCopyContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		if let f = hideContaining, from.path.contains(f) { throw CocoaError(.fileReadNoPermission) }
-		try live.move(from, to: to)
+		try live.copy(from, to: to)
 	}
 	func remove(_ url: URL) throws {
-		if let f = failRemoveContaining, url.path.contains(f) { failRemoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
+		if let f = failRemoveContaining, url.path.contains(f), live.exists(url) { failRemoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.remove(url)
 	}
 	func exists(_ url: URL) -> Bool {
 		if let f = hideContaining, url.path.contains(f) { return false }
 		return live.exists(url)
 	}
-	func list(_ directory: URL) throws -> [URL] { try live.list(directory) }
+	func list(_ directory: URL) throws -> [URL] {
+		listCalls += 1
+		if let left = failListAfter {
+			if left == 0 { throw CocoaError(.fileReadNoPermission) }
+			failListAfter = left - 1
+		}
+		if let f = failListContaining, directory.path.contains(f) { throw CocoaError(.fileReadNoPermission) }
+		return try live.list(directory)
+	}
 }
 
 private func text(_ s: String, at t: TimeInterval = 1_800_000_000) -> ClipDraft {
@@ -49,6 +69,683 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 }
 
 @Suite struct StoreTests {
+	@Test(arguments: [false, true])
+	func ordinaryCloseDoesNotScanHistoryAndKeepsLaterTokens(failUnlink: Bool) async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		for i in 0..<1_000 { try await store.insert(text("history \(i)")) }
+		let (first, _) = try await store.insert(text("close first"))
+		let (second, _) = try await store.insert(text("close later"))
+		let expired = try #require(try await store.delete(first.key))
+		let later = try #require(try await store.delete(second.key))
+		#expect(await store.cleanupPending == false)
+		files.listCalls = 0
+		await store.resetReadCounts()
+		if failUnlink { files.failRemoveContaining = first.key }
+		await store.emptyTrash(through: expired.issuedSequence)
+		#expect(files.listCalls == 0)
+		#expect(await store.readRowCount <= 1)
+		#expect(await store.readStatementCount <= 1)
+		#expect(await store.cleanupPending == failUnlink)
+		#expect(fileCount(dir, "trash") == (failUnlink ? 2 : 1))
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(expired) }
+		if failUnlink {
+			files.failListContaining = "thumbs"
+			await store.emptyTrash(through: expired.issuedSequence)
+			#expect(fileCount(dir, "trash") == 2)
+			#expect(await store.cleanupPending)
+			files.failListContaining = nil
+			await store.emptyTrash(through: expired.issuedSequence)
+			#expect(fileCount(dir, "trash") == 1)
+			#expect(await store.cleanupPending == false)
+		}
+		try await store.restore(later)
+		#expect(try await store.items(for: second.key) == text("close later").items)
+		if failUnlink {
+			try await store.removeOrphans()
+			#expect(await store.cleanupPending == false)
+		} else {
+			files.listCalls = 0
+			await store.resetReadCounts()
+			await store.emptyTrash()
+			#expect(files.listCalls == 0)
+			#expect(await store.readStatementCount == 0)
+		}
+	}
+
+	@Test(arguments: [false, true])
+	func hourlyCleanupUsesOneInventoryAndRetainsFailedPaths(failUnlink: Bool) async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("owned"))
+		let deleted = try #require(try await store.delete(clip.key))
+		try Data([1]).write(to: dir.appendingPathComponent("blobs/orphan.plist"))
+		try Data([2]).write(to: dir.appendingPathComponent("thumbs/.atomic-leftover"))
+		if failUnlink { files.failRemoveContaining = "orphan.plist" }
+		files.listCalls = 0
+		await store.resetReadCounts()
+		try await store.removeOrphans()
+		#expect(files.listCalls == 3)
+		#expect(await store.readStatementCount == 1)
+		#expect(await store.cleanupPending == failUnlink)
+		#expect(fileCount(dir, "blobs") == (failUnlink ? 1 : 0))
+		#expect(fileCount(dir, "thumbs") == 0 && fileCount(dir, "trash") == 1)
+		try await store.restore(deleted)
+		if failUnlink {
+			files.listCalls = 0
+			try await store.removeOrphans()
+			#expect(files.listCalls == 3)
+			#expect(await store.cleanupPending == false)
+		}
+	}
+
+	@Test func legacyRecoveryNeedsOnlyOneAdditionalInventory() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let clip = try await strandBlobInTrash(store, dir, files)
+		files.listCalls = 0
+		try await store.removeOrphans()
+		#expect(files.listCalls == 6)
+		#expect(await store.cleanupPending == false)
+		try await expectWhole(store, dir, clip)
+	}
+
+	@Test(arguments: ["insert", "preview", "delete", "restore"])
+	func confirmedSQLRollbackWithCompleteFilesDoesNotInventCleanupDebt(op: String) async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await writeFixture(op, store)
+		let rows = try await store.recent(), before = try dataFiles(dir)
+		#expect(await store.cleanupPending == false)
+		await store.failTransaction(commit: .beforeEffect)
+		await #expect(throws: StoreError.self) { try await perform(op, store, clip, deleted) }
+		#expect(try await store.recent() == rows)
+		#expect(try dataFiles(dir) == before)
+		#expect(await store.cleanupPending == false)
+		try await perform(op, store, clip, deleted)
+		#expect(await store.cleanupPending == false)
+	}
+
+	@Test func failedPreviewPublicationCannotHideUnownedThumbnailDebt() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/failed"))
+		files.failRemoveContaining = ".png"
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .failed, image: Data([1])))
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		#expect(await store.cleanupPending)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "thumbs") == 0)
+		#expect(await store.cleanupPending == false)
+	}
+
+	@Test func directoryListingUnavailableDoesNotPreventSingleItemPaste() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("paste without listing")
+		let (clip, _) = try await store.insert(draft)
+		files.listCalls = 0; files.readCalls = 0
+		files.failListContaining = "blobs"
+		#expect(try await store.items(for: clip.key) == draft.items)
+		#expect(files.listCalls == 0)
+		#expect(files.readCalls == 1)
+		let blob = dir.appendingPathComponent("blobs/\(clip.key).plist")
+		try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: blob.path)
+		defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: blob.path) }
+		await #expect(throws: (any Error).self) { try await store.items(for: clip.key) }
+	}
+
+	@Test func legacyFallbackRequiresAnActuallyMissingHomeBlob() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("legacy readable")
+		let (clip, _) = try await store.insert(draft)
+		let home = dir.appendingPathComponent("blobs/\(clip.key).plist")
+		let legacy = dir.appendingPathComponent("trash/\(clip.key).plist")
+		try FileManager.default.copyItem(at: home, to: legacy)
+		files.hideContaining = "blobs/"
+		files.listCalls = 0; files.readCalls = 0
+		await #expect(throws: CocoaError(.fileReadNoPermission)) { try await store.items(for: clip.key) }
+		#expect(files.listCalls == 0 && files.readCalls == 1)
+		files.hideContaining = nil
+		try FileManager.default.removeItem(at: home)
+		files.failListContaining = "trash"
+		#expect(try await store.items(for: clip.key) == draft.items)
+		#expect(try Data(contentsOf: legacy) == ClipStore.encode(draft.items))
+	}
+
+	@Test func targetedDeleteCleanupDoesNotScanHistoryOrDirectories() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/target"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([3]))
+		for i in 0..<100 { try await store.insert(text("unrelated \(i)")) }
+		files.listCalls = 0
+		await store.resetReadCounts()
+		let deleted = try #require(try await store.delete(clip.key))
+		#expect(files.listCalls == 0)
+		#expect(await store.readRowCount < 20)
+		#expect(fileCount(dir, "blobs") == 100 && fileCount(dir, "thumbs") == 0)
+		try await store.restore(deleted)
+		#expect(files.listCalls == 0)
+	}
+
+	@Test func cleanupStatusReadsAreCachedUntilAFullScan() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		#expect(await store.cleanupPending == false)
+		files.listCalls = 0
+		await store.resetReadCounts()
+		for _ in 0..<5 { #expect(await store.cleanupPending == false) }
+		#expect(files.listCalls == 0)
+		#expect(await store.readStatementCount == 0)
+		let (clip, _) = try await store.insert(text("debt"))
+		files.failRemoveContaining = "blobs/"
+		_ = try await store.delete(clip.key)
+		#expect(await store.cleanupPending)
+		try FileManager.default.removeItem(at: dir.appendingPathComponent("blobs/\(clip.key).plist"))
+		#expect(await store.cleanupPending)
+		try await store.removeOrphans()
+		#expect(await store.cleanupPending == false)
+	}
+
+	@Test func snapshotUsesOneRowQueryAndKeepsThumbnailOwnership() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (pending, _) = try await store.insert(text("https://example.com/pending", at: 1))
+		let (final, _) = try await store.insert(text("https://example.com/final", at: 2))
+		try await store.setPreview(key: final.key, generation: final.generation, state: .ok, image: Data([3]))
+		try Data([9]).write(to: dir.appendingPathComponent("thumbs/\(pending.key).png"))
+		for i in 0..<100 { try await store.insert(text("unrelated \(i)", at: TimeInterval(i + 3))) }
+		files.listCalls = 0
+		await store.resetReadCounts()
+		let snapshot = try await store.snapshot()
+		#expect(snapshot.count == 102)
+		#expect(snapshot.suffix(2).map { $0.clip.key } == [final.key, pending.key])
+		#expect(snapshot.first { $0.clip.key == pending.key }?.thumbnail == nil)
+		let thumbnail = try #require(snapshot.first { $0.clip.key == final.key }?.thumbnail)
+		#expect(try Data(contentsOf: thumbnail) == Data([3]))
+		#expect(await store.readStatementCount == 1)
+		#expect(await store.readRowCount == 102)
+		#expect(files.listCalls == 0)
+		_ = try await store.delete(final.key)
+		#expect(try await store.snapshot().contains { $0.clip.key == final.key } == false)
+		await store.failNextStep()
+		await #expect(throws: StoreError.self) { try await store.snapshot() }
+	}
+
+	@Test func eraseListingFailureCountsOnlyFilesNotAlreadyRemoved() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		try await store.insert(text("one"))
+		try await store.insert(text("two"))
+		files.failRemoveContaining = ".plist"
+		files.failListAfter = 3
+		await #expect(throws: StoreError.filesLeft(1)) { try await store.eraseAll() }
+		#expect(try await store.recent().isEmpty)
+		#expect(fileCount(dir, "blobs") == 1)
+		#expect(await store.cleanupPending)
+	}
+
+	@Test func sweepCleanupReadFailureDoesNotMisreportCommittedRowRemoval() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("missing"))
+		try FileManager.default.removeItem(at: dir.appendingPathComponent("blobs/\(clip.key).plist"))
+		files.failListAfter = 3
+		try await store.sweep()
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(try await store.ftsKeys().isEmpty)
+		#expect(await store.cleanupPending)
+	}
+
+	@Test(arguments: writes)
+	func commitBeforeEffectRollsBackEveryWrite(op: String) async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await writeFixture(op, store)
+		let rows = try await store.recent(), fts = try await store.ftsKeys(), before = try dataFiles(dir)
+		await store.failTransaction(commit: .beforeEffect)
+		await #expect(throws: StoreError.self) { try await perform(op, store, clip, deleted) }
+		#expect(await store.recoveryRequired == false)
+		#expect(try await store.recent() == rows)
+		#expect(try await store.ftsKeys() == fts)
+		#expect(try dataFiles(dir) == before)
+		if let deleted { try await store.restore(deleted) }
+	}
+
+	@Test func unreadableLegacySourceRejectsRecopyBeforeMutation() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (legacy, _) = try await store.insert(text("legacy"))
+		try FileManager.default.moveItem(at: dir.appendingPathComponent("blobs/\(legacy.key).plist"), to: dir.appendingPathComponent("trash/\(legacy.key).plist"))
+		let source = dir.appendingPathComponent("trash/\(legacy.key).plist")
+		try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: source.path)
+		defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: source.path) }
+		await #expect(throws: (any Error).self) { try await store.insert(text("legacy")) }
+		#expect(try await store.fetch(legacy.key) == legacy)
+	}
+
+	@Test func failedStagingCleanupDebtKeepsOwnedSnapshotAndExpiresOnRestore() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("https://example.com/staging")
+		let (clip, _) = try await store.insert(draft)
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([3]))
+		let deleted = try #require(try await store.delete(clip.key))
+		files.failCopyContaining = ".png"
+		files.failRemoveContaining = "blobs/"
+		await #expect(throws: (any Error).self) { try await store.restore(deleted) }
+		#expect(await store.cleanupPending)
+		#expect(fileCount(dir, "trash") == 2)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "trash") == 2)
+		files.failRemoveContaining = "trash/"
+		try await store.restore(deleted)
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(deleted) }
+		#expect(await store.cleanupPending)
+		try await store.removeOrphans()
+		#expect(await store.cleanupPending == false)
+		#expect(try await store.items(for: clip.key) == draft.items)
+		let again = try #require(try await store.delete(clip.key))
+		try FileManager.default.removeItem(at: dir.appendingPathComponent("trash/\(clip.key).\(again.token.uuidString).png"))
+		// External changes become known at the next explicit scan, not a cached status read.
+		try await store.removeOrphans()
+		#expect(await store.cleanupPending)
+	}
+
+	@Test(arguments: ["recopy", "preview"])
+	func missingLiveBlobRejectsWritesWithoutMutation(op: String) async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("https://example.com/missing")
+		let (clip, _) = try await store.insert(draft)
+		try FileManager.default.removeItem(at: dir.appendingPathComponent("blobs/\(clip.key).plist"))
+		await #expect(throws: StoreError.missingBlob) {
+			if op == "recopy" { try await store.insert(draft) }
+			else { try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1])) }
+		}
+		#expect(try await store.fetch(clip.key) == clip)
+		#expect(fileCount(dir, "thumbs") == 0)
+	}
+
+	@Test func pendingPreviewCannotPublishAnotherPendingImage() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/pending"))
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .pending, image: Data([1])) == false)
+		#expect(try await store.fetch(clip.key) == clip)
+		#expect(fileCount(dir, "thumbs") == 0)
+	}
+
+	@Test func unreadableSavedThumbnailCannotBeSilentlyOmittedFromSnapshot() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/thumbnail"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		let before = try dataFiles(dir)
+		files.hideContaining = "thumbs/"
+		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
+		files.hideContaining = nil
+		#expect(try dataFiles(dir) == before)
+		#expect(try await store.fetch(clip.key) != nil)
+	}
+
+	@Test func cleanupFailureReturnsCommittedDeleteAndWarning() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("cleanup"))
+		files.failRemoveContaining = "blobs/"
+		let deleted = try #require(try await store.delete(clip.key))
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(await store.cleanupPending)
+		try await store.restore(deleted)
+		#expect(try await store.items(for: clip.key) == text("cleanup").items)
+	}
+
+	@Test func cleanupWarningSurvivesUntilVerifiedScan() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("cleanup"))
+		files.failRemoveContaining = "blobs/"
+		_ = try await store.delete(clip.key)
+		#expect(await store.cleanupPending)
+		files.failListContaining = "thumbs"
+		await #expect(throws: (any Error).self) { try await store.removeOrphans() }
+		#expect(fileCount(dir, "blobs") == 1)
+		#expect(await store.cleanupPending)
+		files.failListContaining = nil
+		try await store.removeOrphans()
+		#expect(await store.cleanupPending == false)
+		#expect(fileCount(dir, "trash") == 1)
+	}
+
+	@Test func eraseStillReportsEveryRemainingFile() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("erase"))
+		_ = try await store.delete(clip.key)
+		try Data([1]).write(to: dir.appendingPathComponent("thumbs/.atomic-leftover"))
+		files.failRemoveContaining = "trash/"
+		await store.failTransaction(commit: .afterEffect)
+		await #expect(throws: StoreError.filesLeft(1)) { try await store.eraseAll() }
+		#expect(try await store.recent().isEmpty)
+		#expect(await store.recoveryRequired == false)
+		#expect(await store.cleanupPending)
+		#expect(fileCount(dir, "trash") == 1)
+		try await store.removeOrphans()
+		#expect(await store.cleanupPending == false)
+	}
+
+	@Test func pruneAndAtomicTempsSetCleanupDebt() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("old", at: 100))
+		files.failRemoveContaining = clip.key
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 200)) == 1)
+		#expect(await store.cleanupPending)
+		try await store.removeOrphans()
+		#expect(await store.cleanupPending == false)
+		files.failAtomicWrite = true
+		await #expect(throws: (any Error).self) { try await store.insert(text("new")) }
+		#expect(await store.cleanupPending)
+		let reopened = try ClipStore(directory: dir)
+		#expect(await reopened.cleanupPending)
+		try await reopened.sweep()
+		#expect(await reopened.cleanupPending == false)
+	}
+
+	@Test func unreadableListingStopsAllCleanupBeforeAnyUnlink() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("undo"))
+		let deleted = try #require(try await store.delete(clip.key))
+		files.failListContaining = "thumbs"
+		// An explicit scan discovers unreadable-directory debt; close retries that debt without unlinking.
+		await #expect(throws: (any Error).self) { try await store.removeOrphans() }
+		await store.emptyTrash()
+		#expect(fileCount(dir, "trash") == 1)
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(deleted) }
+		#expect(await store.cleanupPending)
+		files.failListContaining = nil
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "trash") == 0)
+	}
+
+	@Test func unownedThumbnailBlocksPublishIfRemovalFails() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("https://example.com/new")
+		let thumbnail = dir.appendingPathComponent("thumbs/\(draft.contentKey).png")
+		try Data([8]).write(to: thumbnail)
+		files.failRemoveContaining = ".png"
+		await #expect(throws: (any Error).self) { try await store.insert(draft) }
+		#expect(try await store.fetch(draft.contentKey) == nil)
+		#expect(try Data(contentsOf: thumbnail) == Data([8]))
+		try await store.insert(draft)
+		#expect(await store.thumbnail(for: draft.contentKey) == nil)
+	}
+
+	@Test func oldTrashThumbnailNeverBecomesNewIcon() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("https://example.com/new")
+		try Data([8]).write(to: dir.appendingPathComponent("trash/\(draft.contentKey).png"))
+		try Data([9]).write(to: dir.appendingPathComponent("thumbs/\(draft.contentKey).png"))
+		let (clip, _) = try await store.insert(draft)
+		try await store.removeOrphans()
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		#expect(fileCount(dir, "trash") == 0)
+	}
+
+	@Test func finalPreviewRejectsReplacementAndDemotion() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/final"))
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: Data([7])))
+		let before = try await store.fetch(clip.key)
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Changed", image: Data([8])) == false)
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .pending) == false)
+		#expect(try await store.fetch(clip.key) == before)
+		#expect(try Data(contentsOf: dir.appendingPathComponent("thumbs/\(clip.key).png")) == Data([7]))
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Indexed"))
+		#expect(try await store.search("Indexed") == [clip.key])
+	}
+
+	@Test func rolledBackPreviewLeftoverDoesNotBlockRetry() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/retry"))
+		await store.failNextWrite()
+		files.failRemoveContaining = ".png"
+		await #expect(throws: StoreError.self) { try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([8])) }
+		#expect(fileCount(dir, "thumbs") == 1)
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .okNoImage, title: "No icon"))
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		#expect(fileCount(dir, "thumbs") == 0)
+	}
+
+	@Test func restoreWithoutRequiredThumbnailKeepsUndo() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("https://example.com/saved")
+		let (clip, _) = try await store.insert(draft)
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: Data([7]))
+		let deleted = try #require(try await store.delete(clip.key))
+		let thumbnail = dir.appendingPathComponent("trash/\(clip.key).\(deleted.token.uuidString).png")
+		try FileManager.default.removeItem(at: thumbnail)
+		await #expect(throws: StoreError.missingThumbnail) { try await store.restore(deleted) }
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(try await store.pending().isEmpty)
+		#expect(fileCount(dir, "blobs") == 0)
+		try Data([7]).write(to: thumbnail)
+		let restored = try await store.restore(deleted)
+		#expect(restored.previewState == .ok && restored.title == "Saved")
+		#expect(restored.generation != clip.generation)
+		#expect(try await store.items(for: clip.key) == draft.items)
+	}
+
+	@Test func failedRecopyKeepsAuthoritativeSnapshot() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("https://example.com/saved")
+		let (clip, _) = try await store.insert(draft)
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: Data([7]))
+		let deleted = try #require(try await store.delete(clip.key))
+		let before = try dataFiles(dir)
+		try await store.rejectNewRows(true)
+		await #expect(throws: StoreError.self) { try await store.insert(draft) }
+		try await store.rejectNewRows(false)
+		#expect(try dataFiles(dir) == before)
+		try await store.removeOrphans()
+		let back = try await store.restore(deleted)
+		#expect(back.title == "Saved" && back.previewState == .ok)
+	}
+
+	@Test func snapshotTokensRejectOldHandleAfterRedelete() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("token"))
+		let old = try #require(try await store.delete(clip.key))
+		try await store.restore(old)
+		let new = try #require(try await store.delete(clip.key))
+		#expect(old.token != new.token)
+		#expect(new.issuedSequence > old.issuedSequence)
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(old) }
+		try await store.restore(new)
+	}
+
+	@Test func expiredUndoCannotRestoreLeftoverSnapshot() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("token"))
+		let deleted = try #require(try await store.delete(clip.key))
+		files.failRemoveContaining = ".plist"
+		await store.invalidateUndo(deleted)
+		#expect(fileCount(dir, "trash") == 1)
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(deleted) }
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "trash") == 0)
+	}
+
+	@Test func snapshotFilenameDistinguishesLegacyFromToken() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("token"))
+		let deleted = try #require(try await store.delete(clip.key))
+		let names = try FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent("trash").path)
+		#expect(names == ["\(clip.key).\(deleted.token.uuidString).plist"])
+	}
+
+	@Test func closeCutoffKeepsReopenedDeletion() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (first, _) = try await store.insert(text("one"))
+		let (second, _) = try await store.insert(text("two"))
+		let old = try #require(try await store.delete(first.key))
+		let reopened = try #require(try await store.delete(second.key))
+		await store.emptyTrash(through: old.issuedSequence)
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(old) }
+		try await store.restore(reopened)
+		await store.invalidateUndo(old)
+		#expect(try await store.items(for: second.key) == text("two").items)
+	}
+
+	@Test func missingBlobFailsWithoutMutation() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("missing"))
+		try FileManager.default.removeItem(at: dir.appendingPathComponent("blobs/\(clip.key).plist"))
+		await #expect(throws: StoreError.missingBlob) { try await store.delete(clip.key) }
+		#expect(try await store.fetch(clip.key) == clip)
+		#expect(try await store.ftsKeys() == [clip.key])
+	}
+
+	@Test func rowGatePreventsGhostPayloadReads() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("ghost"))
+		files.failRemoveContaining = "blobs/"
+		_ = try await store.delete(clip.key)
+		await #expect(throws: StoreError.missingBlob) { try await store.items(for: clip.key) }
+	}
+
+	private static let writes = ["insert", "recopy", "preview", "delete", "restore", "prune", "erase"]
+
+	private func writeFixture(_ op: String, _ store: ClipStore) async throws -> (StoredClip, DeletedClip?) {
+		let (clip, _) = try await store.insert(text("https://example.com/original", at: 100))
+		if op == "restore" {
+			try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: Data([7]))
+			return (clip, try await store.delete(clip.key))
+		}
+		return (clip, nil)
+	}
+
+	private func perform(_ op: String, _ store: ClipStore, _ clip: StoredClip, _ deleted: DeletedClip?) async throws {
+		switch op {
+		case "insert": try await store.insert(text("https://example.com/new"))
+		case "recopy": try await store.insert(text("https://example.com/original", at: 200))
+		case "preview": try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: Data([7]))
+		case "delete": _ = try await store.delete(clip.key)
+		case "restore": try await store.restore(try #require(deleted))
+		case "prune": try await store.prune(before: Date(timeIntervalSince1970: 150))
+		default: try await store.eraseAll()
+		}
+	}
+
+	@Test(arguments: writes)
+	func commitErrorAfterCommitIsClassifiedForEveryWrite(op: String) async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await writeFixture(op, store)
+		await store.failTransaction(commit: .afterEffect)
+		try await perform(op, store, clip, deleted)
+		#expect(await store.recoveryRequired == false)
+		switch op {
+		case "insert": #expect(try await store.items(for: text("https://example.com/new").contentKey) == text("https://example.com/new").items)
+		case "recopy":
+			#expect(try await store.fetch(clip.key)?.copyCount == 2)
+			#expect(try await store.fetch(clip.key)?.lastCopied == Date(timeIntervalSince1970: 200))
+		case "preview", "restore":
+			#expect(try await store.fetch(clip.key)?.title == "Saved")
+			#expect(try await store.search("Saved") == [clip.key])
+			let thumb = try #require(await store.thumbnail(for: clip.key))
+			#expect(try Data(contentsOf: thumb) == Data([7]))
+			#expect(try await store.items(for: clip.key) == text("https://example.com/original").items)
+		default:
+			#expect(try await store.fetch(clip.key) == nil)
+			#expect(try await store.ftsKeys().isEmpty)
+		}
+	}
+
+	@Test(arguments: writes)
+	func commitAndRollbackFailureFreezesStoreWithoutCleanup(op: String) async throws {
+		try await expectUnknown(op, rollback: true)
+	}
+
+	@Test(arguments: writes)
+	func failedReadbackPreservesAllCopies(op: String) async throws {
+		try await expectUnknown(op, rollback: false)
+	}
+
+	private func expectUnknown(_ op: String, rollback: Bool) async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await writeFixture(op, store)
+		let before = try dataFiles(dir)
+		await store.failTransaction(commit: rollback ? .beforeEffect : .afterEffect, rollback: rollback, readback: !rollback)
+		await #expect(throws: StoreError.outcomeUnknown) { try await perform(op, store, clip, deleted) }
+		#expect(await store.recoveryRequired)
+		let frozen = try dataFiles(dir)
+		for (url, bytes) in before { #expect(frozen[url] == bytes) }
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.recent() }
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.snapshot() }
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.fetch(clip.key) }
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.search("original") }
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.pending() }
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.items(for: clip.key) }
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		for write in Self.writes {
+			await #expect(throws: StoreError.outcomeUnknown) { try await perform(write, store, clip, deleted ?? DeletedClip(clip: clip, hadThumbnail: false, token: UUID(), issuedSequence: 0)) }
+		}
+		await store.emptyTrash()
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.removeOrphans() }
+		await #expect(throws: StoreError.outcomeUnknown) { try await store.sweep() }
+		#expect(try dataFiles(dir) == frozen)
+	}
+
+	private func dataFiles(_ dir: URL) throws -> [URL: Data] {
+		var result: [URL: Data] = [:]
+		for name in ["blobs", "thumbs", "trash"] {
+			for url in try FileManager.default.contentsOfDirectory(at: dir.appendingPathComponent(name), includingPropertiesForKeys: nil) {
+				result[url] = try Data(contentsOf: url)
+			}
+		}
+		return result
+	}
+
+	@Test func failedDeleteStagingKeepsExactLiveFiles() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("https://example.com/saved")
+		let (clip, _) = try await store.insert(draft)
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved title", image: Data([1, 2, 3]))
+		let before = try #require(try await store.fetch(clip.key))
+		let blob = dir.appendingPathComponent("blobs/\(clip.key).plist")
+		let thumbnail = dir.appendingPathComponent("thumbs/\(clip.key).png")
+		let bytes = try Data(contentsOf: blob)
+		faulty.failCopyContaining = ".png"
+		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
+		#expect(try await store.fetch(clip.key) == before)
+		#expect(try await store.search("Saved title") == [clip.key])
+		#expect(try await store.items(for: clip.key) == draft.items)
+		#expect(try Data(contentsOf: blob) == bytes)
+		#expect(try Data(contentsOf: thumbnail) == Data([1, 2, 3]))
+	}
+
+	@Test func failedRestoreStagingKeepsExactUndoFiles() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/saved"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved title", image: Data([1, 2, 3]))
+		let deleted = try #require(try await store.delete(clip.key))
+		let snapshots = try FileManager.default.contentsOfDirectory(at: dir.appendingPathComponent("trash"), includingPropertiesForKeys: nil)
+		let before = try Dictionary(uniqueKeysWithValues: snapshots.map { ($0, try Data(contentsOf: $0)) })
+		faulty.failCopyContaining = ".png"
+		try await store.rejectNewRows(true)
+		await #expect(throws: (any Error).self) { try await store.restore(deleted) }
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(try await store.ftsKeys().isEmpty)
+		for (url, bytes) in before { #expect(try Data(contentsOf: url) == bytes) }
+		try await store.rejectNewRows(false)
+	}
+
 	@Test func insertsAndRoundTripsEveryRepresentationInOrder() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
 		let files = (1...300).map { PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/f\($0).txt".utf8))]) }
@@ -74,7 +771,7 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 
 	@Test func deleteRemovesRowFtsBlobAndThumb() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("delete me"))
+		let (clip, _) = try await store.insert(text("https://example.com/delete-me"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1, 2, 3]))
 		#expect(fileCount(dir, "thumbs") == 1)
 		_ = try await store.delete(clip.key)
@@ -94,7 +791,7 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		let again = try #require(try await store.delete(clip.key))
 		await store.emptyTrash()
 		#expect(fileCount(dir, "trash") == 0)
-		await #expect(throws: StoreError.missingBlob) { try await store.restore(again) }
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(again) }
 		#expect(try await store.fetch(clip.key) == nil)
 	}
 
@@ -103,15 +800,15 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		let (clip, _) = try await store.insert(text("dup"))
 		let deleted = try #require(try await store.delete(clip.key))
 		try await store.insert(text("dup"))
-		await #expect(throws: StoreError.alreadyExists) { try await store.restore(deleted) }
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(deleted) }
 	}
 
 	@Test func stalePreviewWritesNothingAfterDeleteOrRecopy() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("x"))
+		let (clip, _) = try await store.insert(text("https://example.com/x"))
 		_ = try await store.delete(clip.key)
 		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([9])) == false)
-		let (fresh, _) = try await store.insert(text("x"))
+		let (fresh, _) = try await store.insert(text("https://example.com/x"))
 		#expect(fresh.generation != clip.generation)
 		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([9])) == false)
 		#expect(fileCount(dir, "thumbs") == 0)
@@ -132,11 +829,10 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 	@Test func faultDuringDeleteKeepsRowFtsAndFilesTogether() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("orphan"))
+		let (clip, _) = try await store.insert(text("https://example.com/orphan"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
-		faulty.failMoveContaining = "blobs"
-		faulty.failRemoveContaining = "blobs"
-		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
+		faulty.failCopyContaining = "blobs"
+				await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
 		try await expectWhole(store, dir, clip)
 		try await store.sweep()
 		try await expectWhole(store, dir, clip)
@@ -147,23 +843,23 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(fileCount(dir, "trash") == 2)
 	}
 
-	/// The blob already reached trash when the thumbnail's move fails: the blob goes back and the clip stays whole.
-	@Test func aFailedThumbnailMoveToTrashKeepsTheWholeClip() async throws {
+	/// A failed thumbnail copy never changes either authoritative live file.
+	@Test func aFailedThumbnailCopyToTrashKeepsTheWholeClip() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("orphan"))
+		let (clip, _) = try await store.insert(text("https://example.com/orphan"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
-		faulty.failMoveContaining = "thumbs"
+		faulty.failCopyContaining = "thumbs"
 		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
 		try await expectWhole(store, dir, clip)
 		try await store.sweep()
 		try await expectWhole(store, dir, clip)
 	}
 
-	/// The files reached trash but the row could not be deleted: the files go back, so the sweep never strands the row.
-	@Test func aFailedRowDeleteMovesTheFilesBack() async throws {
+	/// SQL rejection removes only staged duplicates; the live files never left home.
+	@Test func aFailedRowDeleteKeepsTheExactFiles() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("orphan"))
+		let (clip, _) = try await store.insert(text("https://example.com/orphan"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
 		await store.failNextWrite()
 		await #expect(throws: StoreError.self) { try await store.delete(clip.key) }
@@ -172,22 +868,20 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		try await expectWhole(store, dir, clip)
 	}
 
-	/// The thumbnail fails to reach trash and the blob cannot move back: the delete throws, and the blob sits in trash
-	/// under a row that is still live.
+	/// Legacy stores may have a live blob in trash after an old rename rollback failed.
 	private func strandBlobInTrash(_ store: ClipStore, _ dir: URL, _ faulty: FaultyFiles) async throws -> StoredClip {
-		let (clip, _) = try await store.insert(text("keep me"))
+		let (clip, _) = try await store.insert(text("https://example.com/keep-me"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
-		faulty.failMoveContaining = "thumbs/"
-		faulty.failMoveFromContaining = "trash/\(clip.key).plist"
-		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
-		#expect(try await store.fetch(clip.key) != nil)
+		try FileManager.default.moveItem(at: dir.appendingPathComponent("blobs/\(clip.key).plist"),
+			to: dir.appendingPathComponent("trash/\(clip.key).plist"))
+		#expect(try await store.items(for: clip.key) == text("https://example.com/keep-me").items)
 		#expect(fileCount(dir, "blobs") == 0 && fileCount(dir, "trash") == 1)
 		return clip
 	}
 
-	/// Every pass that empties or cleans files first moves a live row's stranded blob home, so the row stays whole.
+	/// Cleanup copies a legacy live blob home before removing its fallback.
 	@Test(arguments: ["emptyTrash", "sweep", "removeOrphans"])
-	func aBlobStrandedByAFailedDeleteRollbackGoesHomeBeforeCleanup(pass: String) async throws {
+	func legacyBlobIsImmediatelyReadableAndRecoveredBeforeCleanup(pass: String) async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
 		let clip = try await strandBlobInTrash(store, dir, faulty)
@@ -201,30 +895,31 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		try await expectWhole(store, dir, clip)
 	}
 
-	/// The row delete fails and the thumbnail cannot move back: emptying trash moves it home instead of removing it.
-	@Test func aThumbnailStrandedByAFailedDeleteRollbackGoesHome() async throws {
-		let faulty = FaultyFiles()
-		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("keep me"))
+	@Test func legacyTrashThumbnailIsNeverAdopted() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("https://example.com/keep-me"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
-		await store.failNextWrite()
-		faulty.failMoveFromContaining = "trash/\(clip.key).png"
-		await #expect(throws: StoreError.self) { try await store.delete(clip.key) }
-		#expect(fileCount(dir, "thumbs") == 0 && fileCount(dir, "trash") == 1)
-		await store.emptyTrash()
-		try await expectWhole(store, dir, clip)
+		try FileManager.default.moveItem(at: dir.appendingPathComponent("thumbs/\(clip.key).png"),
+			to: dir.appendingPathComponent("trash/\(clip.key).png"))
+		let reopened = try ClipStore(directory: dir)
+		#expect(await reopened.cleanupPending)
+		await reopened.emptyTrash()
+		#expect(try await store.fetch(clip.key)?.previewState == .ok)
+		#expect(try await store.items(for: clip.key) == text("https://example.com/keep-me").items)
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		#expect(fileCount(dir, "trash") == 0)
 	}
 
-	/// If moving the stranded blob home fails too, it stays in trash and its row stays live; a later pass recovers it.
-	@Test func aStrandedBlobWhoseMoveHomeFailsIsKeptNotRemoved() async throws {
+	/// Failed legacy recovery preserves its source and row until a later copy succeeds.
+	@Test func samePathLegacyBlobIsNeverUnlinkedOnFailure() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
 		let clip = try await strandBlobInTrash(store, dir, faulty)
-		faulty.failMoveContaining = "trash/\(clip.key).plist"
+		faulty.failCopyContaining = "trash/\(clip.key).plist"
 		await store.emptyTrash()
 		#expect(try await store.fetch(clip.key) != nil)
 		#expect(fileCount(dir, "trash") == 1)
-		faulty.failMoveContaining = "trash/\(clip.key).plist"
+		faulty.failCopyContaining = "trash/\(clip.key).plist"
 		try await store.sweep()
 		#expect(try await store.fetch(clip.key) != nil)
 		#expect(fileCount(dir, "trash") == 1)
@@ -236,7 +931,7 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 	@Test func aBlobItCannotReachFailsTheDeleteAndKeepsTheClip() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("unreachable"))
+		let (clip, _) = try await store.insert(text("https://example.com/unreachable"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
 		faulty.hideContaining = "blobs/"
 		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
@@ -250,7 +945,7 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 	/// The same with a real folder that lists but cannot be searched.
 	@Test func aBlobsFolderWithoutSearchPermissionFailsTheDelete() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("unreachable"))
+		let (clip, _) = try await store.insert(text("https://example.com/unreachable"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
 		let blobs = dir.appendingPathComponent("blobs").path
 		try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: blobs)
@@ -274,74 +969,52 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		try await expectWhole(store, dir, clip)
 	}
 
-	/// Moving a file that is not there fails as "no such file" and leaves the destination alone, so a delete that
-	/// tries a missing file never removes an undo copy already in trash. A real source still replaces the destination.
-	@Test func liveMoveOfAMissingSourceKeepsTheDestination() throws {
+	/// Copying a missing source preserves the destination; successful and same-path copies preserve the source.
+	@Test func liveCopyOfAMissingSourceKeepsTheDestination() throws {
 		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-mv-\(UUID().uuidString)")
 		try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 		defer { try? FileManager.default.removeItem(at: dir) }
 		let dest = dir.appendingPathComponent("dest.plist")
 		try Data("undo copy".utf8).write(to: dest)
-		#expect(throws: (any Error).self) { try LiveFileOps().move(dir.appendingPathComponent("missing.plist"), to: dest) }
+		#expect(throws: (any Error).self) { try LiveFileOps().copy(dir.appendingPathComponent("missing.plist"), to: dest) }
 		#expect(try Data(contentsOf: dest) == Data("undo copy".utf8))
 		let source = dir.appendingPathComponent("source.plist")
 		try Data("new".utf8).write(to: source)
-		try LiveFileOps().move(source, to: dest)
+		try LiveFileOps().copy(source, to: dest)
 		#expect(try Data(contentsOf: dest) == Data("new".utf8))
-		#expect(!FileManager.default.fileExists(atPath: source.path))
+		#expect(FileManager.default.fileExists(atPath: source.path))
+		try LiveFileOps().copy(source, to: source)
+		#expect(try Data(contentsOf: source) == Data("new".utf8))
 	}
 
-	/// The thumbnail cannot come home and the blob cannot go back to trash. The blob is home, so the clip is restored
-	/// with its preview pending instead of leaving a blob without a row for cleanup to delete (B1:31).
-	@Test func aRestoreWhoseRollbackFailsBringsTheClipBackWhole() async throws {
-		let faulty = FaultyFiles()
-		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("keep me"))
-		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
-		let deleted = try #require(try await store.delete(clip.key))
-		faulty.failMoveContaining = "trash/\(clip.key).png"
-		faulty.failMoveFromContaining = "blobs/\(clip.key).plist"
-		try await store.restore(deleted)
-		let back = try #require(try await store.fetch(clip.key))
-		#expect(back.previewState == .pending)
-		#expect(try await store.items(for: clip.key).count == 1)
-		#expect(try await store.ftsKeys() == [clip.key])
-		try await store.removeOrphans()
-		try await store.sweep()
-		try await expectWhole(store, dir, clip)
-		#expect(try await store.fetch(clip.key)?.previewState == .pending)
-		await #expect(throws: StoreError.alreadyExists) { try await store.restore(deleted) }
-	}
-
-	/// Restore's thumbnail move fails, its blob cannot go back to trash, and the fallback insert fails too: the restore
-	/// throws with the blob home and no row, the only copy of an undo that is still valid.
+	/// SQL rejection after staging keeps both snapshot files exact and retryable.
 	private func failRestoreCompletely(_ store: ClipStore, _ dir: URL, _ faulty: FaultyFiles) async throws -> (StoredClip, DeletedClip) {
-		let (clip, _) = try await store.insert(text("keep me"))
+		let (clip, _) = try await store.insert(text("https://example.com/keep-me"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
 		let deleted = try #require(try await store.delete(clip.key))
-		faulty.failMoveContaining = "trash/\(clip.key).png"
-		faulty.failMoveFromContaining = "blobs/\(clip.key).plist"
-		await store.failNextWrite()
-		await #expect(throws: (any Error).self) { try await store.restore(deleted) }
+		let before = try dataFiles(dir)
+		try await store.rejectNewRows(true)
+		await #expect(throws: StoreError.self) { try await store.restore(deleted) }
+		try await store.rejectNewRows(false)
 		#expect(try await store.fetch(clip.key) == nil)
-		#expect(fileCount(dir, "blobs") == 1 && fileCount(dir, "trash") == 1)
+		#expect(try dataFiles(dir) == before)
+		#expect(fileCount(dir, "blobs") == 0 && fileCount(dir, "trash") == 2)
 		return (clip, deleted)
 	}
 
-	/// The hourly pass must not remove that blob, and retrying the undo restores the clip whole (B1:31).
-	@Test func aRestoreThatCannotFinishOrRollBackKeepsItsPayloadForARetry() async throws {
+	/// Hourly cleanup preserves both authoritative snapshot files and allows a complete retry.
+	@Test func failedRestoreSQLKeepsCompleteSnapshotForHourlyPassAndRetry() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
 		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
 		try await store.removeOrphans()
-		#expect(fileCount(dir, "blobs") == 1)
+		#expect(fileCount(dir, "blobs") == 0 && fileCount(dir, "trash") == 2)
 		try await store.restore(deleted)
 		try await expectWhole(store, dir, clip)
 		#expect(try await store.fetch(clip.key)?.previewState == .ok)
 	}
 
-	/// Emptying trash (strip close), a sweep (launch) and an erase each end the undo: the payload a failed restore left
-	/// home goes, the undo is refused, and the key's files are ordinary orphans again.
+	/// Close, sweep and erase expire failed-restore snapshots; leftover files never grant permission to restore.
 	@Test(arguments: ["emptyTrash", "sweep", "eraseAll"])
 	func endingTheUndoRemovesAFailedRestoresPayload(pass: String) async throws {
 		let faulty = FaultyFiles()
@@ -353,27 +1026,25 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		default: try await store.eraseAll()
 		}
 		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") + fileCount(dir, "trash") == 0)
-		await #expect(throws: StoreError.missingBlob) { try await store.restore(deleted) }
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(deleted) }
 		#expect(try await store.fetch(clip.key) == nil)
 		try Data([1]).write(to: dir.appendingPathComponent("blobs/\(clip.key).plist"))
 		try await store.removeOrphans()
 		#expect(fileCount(dir, "blobs") == 0)
 	}
 
-	/// A recopy of the same content whose row the database refuses must not remove the payload a failed restore left
-	/// home: it is the same bytes and still the undo's only copy. Protection stays, the hourly pass spares it, and the
-	/// undo restores the clip whole once the database accepts rows again.
-	@Test func aFailedRecopyKeepsAFailedRestoresPayload() async throws {
+	/// A rejected recopy cannot consume the complete snapshot from a previously failed restore.
+	@Test func failedRecopyAfterFailedRestoreKeepsCompleteSnapshot() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
 		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
 		try await store.rejectNewRows(true)
-		await #expect(throws: StoreError.self) { try await store.insert(text("keep me")) }
+		await #expect(throws: StoreError.self) { try await store.insert(text("https://example.com/keep-me")) }
 		try await store.rejectNewRows(false)
 		#expect(try await store.fetch(clip.key) == nil)
-		#expect(fileCount(dir, "blobs") == 1)
+		#expect(fileCount(dir, "blobs") == 0 && fileCount(dir, "trash") == 2)
 		try await store.removeOrphans()
-		#expect(fileCount(dir, "blobs") == 1)
+		#expect(fileCount(dir, "blobs") == 0 && fileCount(dir, "trash") == 2)
 		try await store.restore(deleted)
 		try await expectWhole(store, dir, clip)
 	}
@@ -390,14 +1061,13 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(fileCount(dir, "blobs") == 1)
 	}
 
-	/// Once the clip is back, by a retried restore or a recopy, the key's files are no longer spared: a blob a later
-	/// prune could not remove is cleaned up by the hourly pass.
+	/// A successful restore or recopy expires the token; a later failed prune unlink is ordinary cleanup debt.
 	@Test(arguments: ["restore", "recopy"])
-	func protectionEndsWhenTheClipIsBack(how: String) async throws {
+	func snapshotExpiresWhenTheClipIsBack(how: String) async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
 		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
-		if how == "restore" { try await store.restore(deleted) } else { try await store.insert(text("keep me")) }
+		if how == "restore" { try await store.restore(deleted) } else { try await store.insert(text("https://example.com/keep-me")) }
 		faulty.failRemoveContaining = "blobs/\(clip.key).plist"
 		#expect(try await store.prune(before: Date(timeIntervalSince1970: 1_900_000_000)) == 1)
 		#expect(fileCount(dir, "blobs") == 1)
@@ -405,35 +1075,27 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") == 0)
 	}
 
-	/// Undo after its trashed thumbnail was lost brings back a whole clip that asks for a new preview,
-	/// never a final preview state without its image.
-	@Test func restoreWithoutItsTrashedThumbnailAsksForANewPreview() async throws {
+	@Test func expiredUndoWithLeftoverBlobNeverRequestsANewPreview() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
-		let link = text("https://example.com/post")
-		let (clip, _) = try await store.insert(link)
+		let (clip, _) = try await store.insert(text("https://example.com/post"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: Data([1]))
 		let deleted = try #require(try await store.delete(clip.key))
-		faulty.failRemoveContaining = "trash/\(clip.key).plist"
+		faulty.failRemoveContaining = ".plist"
 		await store.emptyTrash()
 		#expect(fileCount(dir, "trash") == 1)
-		try await store.restore(deleted)
-		let back = try #require(try await store.fetch(clip.key))
-		#expect(back.previewState == .pending)
-		#expect(try await store.pending().map(\.key) == [clip.key])
-		#expect(try await store.items(for: clip.key) == link.items)
-		#expect(try await store.ftsKeys() == [clip.key])
-		#expect(await store.thumbnail(for: clip.key) == nil)
-		#expect(fileCount(dir, "trash") == 0)
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(deleted) }
+		#expect(try await store.pending().isEmpty)
+		#expect(try await store.fetch(clip.key) == nil)
 	}
 
 	@Test func recopyingADeletedItemEmptiesItsTrash() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("again"))
+		let (clip, _) = try await store.insert(text("https://example.com/again"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
 		_ = try await store.delete(clip.key)
 		#expect(fileCount(dir, "trash") == 2)
-		try await store.insert(text("again"))
+		try await store.insert(text("https://example.com/again"))
 		#expect(fileCount(dir, "trash") == 0)
 		#expect(fileCount(dir, "blobs") == 1)
 	}
@@ -462,10 +1124,10 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 	@Test func faultDuringRestoreRollsBackCompletely() async throws {
 		let faulty = FaultyFiles()
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("roll"))
+		let (clip, _) = try await store.insert(text("https://example.com/roll"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
 		let deleted = try #require(try await store.delete(clip.key))
-		faulty.failMoveContaining = "trash/\(clip.key).png"
+		faulty.failCopyContaining = ".png"
 		await #expect(throws: (any Error).self) { try await store.restore(deleted) }
 		#expect(try await store.fetch(clip.key) == nil)
 		#expect(try await store.search("roll").isEmpty)
@@ -499,9 +1161,9 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 
 	@Test func eraseRemovesEverything() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-		let (clip, _) = try await store.insert(text("a1"))
+		let (clip, _) = try await store.insert(text("https://example.com/a1"))
 		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
-		let (other, _) = try await store.insert(text("b2"))
+		let (other, _) = try await store.insert(text("https://example.com/b2"))
 		try await store.setPreview(key: other.key, generation: other.generation, state: .ok, image: Data([2]))
 		_ = try await store.delete(clip.key)
 		#expect(fileCount(dir, "thumbs") == 1)
@@ -529,9 +1191,9 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 
 	@Test func pruneRemovesAnExpiredClipsThumbnail() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-		let (old, _) = try await store.insert(text("old", at: 100))
+		let (old, _) = try await store.insert(text("https://example.com/old", at: 100))
 		try await store.setPreview(key: old.key, generation: old.generation, state: .ok, image: Data([1]))
-		let (new, _) = try await store.insert(text("new", at: 1_000))
+		let (new, _) = try await store.insert(text("https://example.com/new", at: 1_000))
 		try await store.setPreview(key: new.key, generation: new.generation, state: .ok, image: Data([2]))
 		#expect(fileCount(dir, "thumbs") == 2)
 		#expect(try await store.prune(before: Date(timeIntervalSince1970: 500)) == 1)

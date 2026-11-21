@@ -198,6 +198,111 @@ final class PasteGate {
 		#expect(r.model.clips.map(\.id) == before.filter { $0 != id })
 	}
 
+	@Test func deleteInFlightDuringCloseDoesNotOfferUndoAfterReopen() async {
+		let r = StripRig()
+		var release: CheckedContinuation<Void, Never>?
+		r.model.actions.delete = { _ in await withCheckedContinuation { release = $0 } }
+		let id = r.model.selectedID
+		let deleting = Task { await r.model.deleteSelected() }
+		while release == nil { await Task.yield() }
+		r.model.beginClose()
+		r.model.open()
+		release?.resume()
+		await deleting.value
+		#expect(!r.model.canUndo)
+		#expect(!r.model.clips.contains { $0.id == id })
+		#expect(r.model.toast != .deleted)
+	}
+
+	@Test func recoveryStateBlocksStoreActionsAndKeepsItsWarning() async {
+		let r = StripRig()
+		r.model.storageStatus = .recoveryRequired
+		let selected = r.model.selectedID!
+		await r.model.paste(plain: false)
+		await r.model.perform(.copy, id: selected)
+		await r.model.deleteSelected()
+		await r.model.undo()
+		#expect(r.log.isEmpty)
+		#expect(r.model.clips.count == Fixtures.mixed.count)
+		#expect(r.model.storageStatus.message.contains("capture paused"))
+		r.model.beginClose()
+		r.model.open()
+		#expect(r.model.storageStatus == .recoveryRequired)
+	}
+
+	@Test func anUnknownMutationDoesNotClaimItRolledBack() async {
+		let r = StripRig()
+		r.model.actions.delete = { _ in throw StripActionError.outcomeUnknown }
+		await r.model.deleteSelected()
+		#expect(r.model.storageStatus == .recoveryRequired)
+		#expect(r.model.toast == .error(StorageStatus.recoveryRequired.message))
+		#expect(!r.model.canUndo)
+	}
+
+	@Test func startingAnotherDeleteExpiresThePreviousUndo() async {
+		let r = StripRig()
+		var ended: [UUID] = []
+		r.model.onUndoExpired = { ended.append($0) }
+		let first = r.model.selectedID!
+		await r.model.deleteSelected()
+		await r.model.deleteSelected()
+		#expect(ended == [first])
+		#expect(r.model.canUndo)
+	}
+
+	@Test func expiredStoreUndoCannotCreateAPhantomCard() async {
+		let r = StripRig()
+		await r.model.deleteSelected()
+		let count = r.model.clips.count
+		r.model.actions.restore = { _, _ in throw StripActionError.undoExpired }
+		await r.model.undo()
+		#expect(!r.model.canUndo)
+		#expect(r.model.clips.count == count)
+		#expect(r.model.storageStatus == .ready)
+	}
+
+	@Test func undoExpiryDuringActiveRestoreResolvesSafely() async {
+		for expired in [false, true] {
+			let r = StripRig()
+			await r.model.deleteSelected()
+			var release: CheckedContinuation<Void, Never>?
+			r.model.actions.restore = { _, _ in
+				await withCheckedContinuation { release = $0 }
+				if expired { throw StripActionError.undoExpired }
+			}
+			let restoring = Task { await r.model.undo() }
+			while release == nil { await Task.yield() }
+			r.probe.advance(by: .seconds(3))
+			release?.resume()
+			await restoring.value
+			#expect(!r.model.canUndo)
+			#expect(r.model.clips.count == Fixtures.mixed.count - (expired ? 1 : 0))
+		}
+	}
+
+	@Test func deleteDuringCloseDoesNotStartAStorageOperation() async {
+		let r = StripRig()
+		r.model.animator = Animator { _, change, _ in change() }
+		r.model.beginClose()
+		let before = r.log
+		await r.model.deleteSelected()
+		#expect(r.log == before)
+		#expect(!r.model.canUndo)
+		#expect(r.model.clips.count == Fixtures.mixed.count)
+	}
+
+	@Test func undoExpiryNotifiesTheOwnerExactlyOnce() async {
+		let r = StripRig()
+		var ended: [UUID] = []
+		r.model.onUndoExpired = { ended.append($0) }
+		let selected = r.model.selectedID!
+		await r.model.deleteSelected()
+		r.probe.advance(by: .seconds(3))
+		#expect(ended == [selected])
+		r.model.beginClose()
+		#expect(ended == [selected])
+	}
+
 	@Test func undoDuringTheDeleteAnimationKeepsTheCard() async {
 		let r = StripRig()
 		var pending: [@MainActor () -> Void] = []

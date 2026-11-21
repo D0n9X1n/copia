@@ -54,6 +54,7 @@ public final class ShellModel {
 	public var eraseConfirmation = false
 	/// Set when an erase could not remove every file.
 	public var eraseError: String?
+	public var storageStatus: StorageStatus = .ready
 	public var onboardingStep = 0
 
 	@ObservationIgnored public var setLogin: (Bool) -> Void = { _ in }
@@ -211,6 +212,8 @@ public struct SettingsView: View {
 					ForEach(Retention.allCases, id: \.self) { Text($0.title).tag($0) }
 				}
 				Button("Erase History…", role: .destructive) { model.requestErase() }
+					.disabled(model.storageStatus == .recoveryRequired)
+				if model.storageStatus != .ready { Text(model.storageStatus.message).font(.callout).foregroundStyle(ShellTheme.error) }
 				if let message = model.eraseError { Text(message).font(.callout).foregroundStyle(ShellTheme.error) }
 			}
 		}

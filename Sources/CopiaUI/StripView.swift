@@ -111,6 +111,13 @@ public struct StripView: View {
 	private var topBar: some View {
 		HStack(spacing: 12) {
 			SearchPill(model: model, focus: focus)
+			if model.storageStatus != .ready {
+				Text(model.storageStatus.message).font(.system(size: 12, weight: .medium))
+					.foregroundStyle(Theme.ink).lineLimit(2)
+					.padding(.horizontal, 10).padding(.vertical, 4)
+					.background(Theme.card, in: .capsule)
+					.accessibilityLabel(model.storageStatus.message)
+			}
 			Spacer()
 			if model.paused {
 				Label("Capture paused", systemImage: "pause.fill")

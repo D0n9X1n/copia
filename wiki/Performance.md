@@ -17,14 +17,14 @@
 | Scroll smoothness | ≥ 95% of frames show new card-row content and ≥ 95% of frame intervals are ≤ 1.5 × the refresh interval | Local, gated on a 120 Hz main display |
 | Motion settle | open, close, lens, delete and undo, with and without Reduce Motion: ≤ the analytic settle time + 20 ms | Local, gated on a 120 Hz main display |
 
-Every run measures at a 1512 pt strip, a 14-inch MacBook Pro's screen, unless `--width` is given, so local and CI results compare. Presented-frame checks gate only when the main display runs at 120 Hz or faster. On a slower display they are measured and listed under `reportedOnly` with the refresh rate, because one 60 Hz refresh (16.7 ms) is most of the 20 ms settle margin. The frozen-row and hidden-render controls gate at any refresh.
+The default reference width is 1512 pt, capped to the screen's available width; `--width` overrides the reference but not that cap. The panel then takes an 8 pt inset on each side. Read `stripWidthPoints` and `backingScale` before comparing runs: local runs used a 1496 pt panel, while the current CI display produced 1008 pt at 1×. Presented-frame checks gate only when the main display runs at 120 Hz or faster. On a slower display they are measured and listed under `reportedOnly` with the refresh rate, because one 60 Hz refresh (16.7 ms) is most of the 20 ms settle margin. The frozen-row and hidden-render controls gate at any refresh.
 
 ### Two paths
 
 The bench picks its path at launch and writes it to the report as `path`:
 
 - **`screenCaptureKit`** runs when the terminal has Screen Recording permission (`CGPreflightScreenCaptureAccess()`) and `--no-sck` is not passed. It records the bench's own windows for the presented-frame checks, then runs the in-process ⌘Y measure as well.
-- **`proxy`** runs otherwise, which includes CI because the hosted runner has no Screen Recording. ⌘Y is measured in process, and the recorded checks (scroll smoothness and every motion settle) are skipped, not failed. Each skipped check is listed with its reason under `skipped` in the JSON.
+- **`proxy`** runs otherwise. CI may use either path: the current `xcode-27` image grants Screen Recording, so inspect the report rather than assuming a proxy run. ⌘Y is measured in process, and the recorded checks (scroll smoothness and every motion settle) are skipped, not failed. Each skipped check is listed with its reason under `skipped` in the JSON.
 
 ### How each budget is measured
 
@@ -91,5 +91,5 @@ Options: `--idle SECONDS` (default 60), `--opens N` (default 50), `--width POINT
 - The in-process ⌘Y measure cannot see presented frames. The presented time adds the window server's commit-to-screen pipeline (about three refreshes at 60 Hz) and the slide until the first card's top is visible.
 - Settle times are quantised to the display's refresh interval, 16.7 ms at 60 Hz, so a 20 ms margin leaves room for about one frame. That is why presented-frame checks gate at 120 Hz.
 - At 60 Hz, presented ⌘Y is over 100 ms, close, lens and undo settle one or two refreshes late, and about 5% of scroll frame intervals run long. The 120 Hz run that gates them has not been done yet: open the lid, make the built-in display the main display, and run the bench.
-- The recorded checks run only locally; CI lists them under `skipped`.
+- Recorded checks run wherever Screen Recording is granted; otherwise the report lists them under `skipped`. The CI image can grant recording access.
 - Delete schedules reflow from the fade's completion. The recorded delete finishes sooner than the full scheduled sequence; the cause is not established. The budget follows the scheduled sequence, not an assumption of overlap.

@@ -68,6 +68,7 @@ public final class AppController {
 	private var menu: MenuBarController?
 	private var index = ClipIndex<DeletedClip>()
 	private var reloads = 0
+	private var lastDeliveredUndoSequence: UInt64 = 0
 	private var target: NSRunningApplication?
 	private var retentionTimer: Timer?
 	private var settingsWindow: NSWindow?
@@ -88,11 +89,12 @@ public final class AppController {
 	}
 
 	init(directory: URL?, defaults: UserDefaults, pasteboard: PasteboardSource, login: LoginService,
-		permissions: @escaping () -> PermissionState, links: LinkFetching, files: FileThumbnailing) throws {
+		permissions: @escaping () -> PermissionState, links: LinkFetching, files: FileThumbnailing,
+		storageFiles: any FileOps = LiveFileOps()) throws {
 		prefs = Preferences(defaults: defaults)
 		let dir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
 			.appendingPathComponent("Copia", isDirectory: true)
-		store = try ClipStore(directory: dir)
+		store = try ClipStore(directory: dir, files: storageFiles)
 		watcher = PasteboardWatcher(source: pasteboard, ignoredApps: Set(prefs.ignoredApps))
 		previewer = Previewer(store: store, links: links, files: files)
 		self.login = login
@@ -109,7 +111,8 @@ public final class AppController {
 		await prune()
 		await reload()
 		await previewer.resumePending()
-		watcher.setPaused(prefs.paused)
+		await refreshStorageStatus()
+		watcher.setPaused(prefs.paused || model.storageStatus == .recoveryRequired)
 		watcher.start()
 		guard menuAndHotkeys else { return }
 		menu = MenuBarController(actions: .init(
@@ -117,7 +120,7 @@ public final class AppController {
 			pause: { [weak self] in self?.togglePause() },
 			settings: { [weak self] in self?.openSettings() },
 			quit: { NSApp.terminate(nil) }))
-		menu?.setPaused(prefs.paused)
+		menu?.setPaused(prefs.paused || model.storageStatus == .recoveryRequired)
 		KeyboardShortcuts.onKeyUp(for: .copiaHistory) { [weak self] in self?.toggleHistory() }
 		KeyboardShortcuts.onKeyUp(for: .copiaPause) { [weak self] in self?.togglePause() }
 		let timer = Timer(timeInterval: Self.retentionInterval, repeats: true) { [weak self] _ in
@@ -139,29 +142,55 @@ public final class AppController {
 		}
 		model.onOpenFinish = { [weak self] in self?.panel.invalidateShadow() }
 		model.onCloseStart = { [weak self] in
-			CopiaDebug.log("closeStart key=\(self?.panel.isKeyWindow ?? false)")
-			self?.panel.resignKey()
+			guard let self else { return }
+			CopiaDebug.log("closeStart key=\(panel.isKeyWindow)")
+			panel.resignKey()
+			let cutoff = lastDeliveredUndoSequence
+			index.clearDeletions()
+			Task { await self.store.emptyTrash(through: cutoff); await self.refreshStorageStatus() }
 		}
 		model.onCloseFinish = { [weak self] in
 			guard let self else { return }
 			panel.hide()
 			thumbnails.removeAll()
-			index.clearDeletions()
-			Task { await self.store.emptyTrash() }
+		}
+		model.onUndoExpired = { [weak self] id in
+			guard let self, let gone = index.takeDeletion(for: id) else { return }
+			Task { await self.store.invalidateUndo(gone); await self.refreshStorageStatus() }
 		}
 		model.actions = StripActions(
 			paste: { [weak self] id, plain, beginClose in
 				guard let self, let key = index.keys[id] else { return .copied }
-				let items = try await store.items(for: key)
-				return await paster.paste(items, plain: plain, target: target, beginClose: beginClose)
+				do {
+					let items = try await store.items(for: key)
+					return await paster.paste(items, plain: plain, target: target, beginClose: beginClose)
+				} catch {
+					await refreshStorageStatus()
+					throw actionError(error)
+				}
 			},
 			copy: { [weak self] id in
 				guard let self, let key = index.keys[id] else { return }
-				paster.write(try await store.items(for: key), plain: false)
+				do { paster.write(try await store.items(for: key), plain: false) }
+				catch { await refreshStorageStatus(); throw actionError(error) }
 			},
 			delete: { [weak self] id in
 				guard let self, let key = index.keys[id] else { return }
-				if let gone = try await store.delete(key) { index.noteDeleted(id, gone) }
+				let close = model.closeCount
+				do {
+					if let gone = try await store.delete(key) {
+						lastDeliveredUndoSequence = max(lastDeliveredUndoSequence, gone.issuedSequence)
+						index.noteDeleted(id, gone)
+						if close != model.closeCount {
+							_ = index.takeDeletion(for: id)
+							await store.invalidateUndo(gone)
+						}
+					}
+					await refreshStorageStatus()
+				} catch {
+					await refreshStorageStatus()
+					throw actionError(error)
+				}
 			},
 			restore: { _, _ in },
 			openAccessibilitySettings: { Permissions.requestAccessibility(); Permissions.openAccessibilitySettings() })
@@ -170,15 +199,23 @@ public final class AppController {
 			return Set(keys.map(ClipDraft.uuid(forKey:)))
 		}
 		model.actions.restore = { [weak self] clip, _ in
-			guard let self, let gone = index.deletion(for: clip.id) else { return }
-			try await store.restore(gone)
-			index.noteRestored(clip.id, key: gone.clip.key)
-			if let restored = try await store.fetch(gone.clip.key) { previewer.generate(for: restored) }
+			guard let self else { throw StripActionError.undoExpired }
+			guard let gone = index.deletion(for: clip.id) else { throw StripActionError.undoExpired }
+			do {
+				let restored = try await store.restore(gone)
+				index.noteRestored(clip.id, key: gone.clip.key)
+				previewer.generate(for: restored)
+				await refreshStorageStatus()
+			} catch {
+				await refreshStorageStatus()
+				throw actionError(error)
+			}
 		}
 		watcher.onDraft = { [weak self] draft in
 			guard let self else { return }
 			Task {
-				guard let result = try? await self.store.insert(draft) else { return }
+				guard self.model.storageStatus != .recoveryRequired else { return }
+				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
 				await self.reload()
 			}
@@ -239,17 +276,19 @@ public final class AppController {
 
 	/// Shows the store's current history. The newest reload wins, and one that raced a delete or restore fetches again.
 	public func reload() async {
+		await refreshStorageStatus()
+		guard model.storageStatus != .recoveryRequired else { return }
 		reloads += 1
 		let mine = reloads
 		while true {
 			let fetchedAt = index.mutations
-			guard let stored = try? await store.recent() else { return }
+			guard let stored = try? await store.snapshot() else { await refreshStorageStatus(); return }
 			var map: [UUID: String] = [:]
 			var clips: [Clip] = []
-			for s in stored {
-				let id = ClipDraft.uuid(forKey: s.key)
-				map[id] = s.key
-				clips.append(Self.clip(from: s, thumbnail: await store.thumbnail(for: s.key)))
+			for row in stored {
+				let id = ClipDraft.uuid(forKey: row.clip.key)
+				map[id] = row.clip.key
+				clips.append(Self.clip(from: row.clip, thumbnail: row.thumbnail))
 			}
 			guard mine == reloads else { return }
 			guard index.apply(map, fetchedAt: fetchedAt) else { continue }
@@ -286,25 +325,61 @@ public final class AppController {
 
 	/// Erases all history after the user confirmed.
 	func erase() async {
+		guard model.storageStatus != .recoveryRequired else { return }
 		do {
 			try await store.eraseAll()
 			shell.eraseError = nil
+		} catch StoreError.outcomeUnknown {
+			await refreshStorageStatus()
+			shell.eraseError = StorageStatus.recoveryRequired.message
+			return
+		} catch StoreError.filesLeft {
+			shell.eraseError = "Some saved files could not be removed. Copia will retry cleanup."
 		} catch {
-			shell.eraseError = "Some saved files could not be removed. Quit Copia and delete ~/Library/Application Support/Copia to finish."
+			await refreshStorageStatus()
+			shell.eraseError = "Couldn't erase: \(error.localizedDescription)"
+			return
 		}
 		index.noteErased()
 		model.cancelUndo(for: index.takeEndedUndos())
 		await reload()
 	}
 
+	func refreshStorageStatus() async {
+		let recovery = await store.recoveryRequired
+		let cleanup = await store.cleanupPending
+		applyStorageStatus(cleanupPending: cleanup, recoveryRequired: recovery)
+	}
+
+	func applyStorageStatus(cleanupPending: Bool, recoveryRequired: Bool) {
+		// Recovery is terminal for this instance; an older asynchronous status read cannot unfreeze it.
+		let recoveryRequired = recoveryRequired || model.storageStatus == .recoveryRequired
+		let status: StorageStatus = recoveryRequired ? .recoveryRequired : (cleanupPending ? .cleanupPending : .ready)
+		shell.storageStatus = status
+		model.storageStatus = status
+		if recoveryRequired {
+			watcher.setPaused(true)
+			model.paused = true
+			shell.paused = true
+			menu?.setPaused(true)
+		}
+	}
+
+	private func actionError(_ error: Error) -> Error {
+		if case StoreError.outcomeUnknown = error { return StripActionError.outcomeUnknown }
+		if case StoreError.undoExpired = error { return StripActionError.undoExpired }
+		return error
+	}
+
 	var watcherIgnoredApps: Set<String> { watcher.ignoredApps }
 
 	func togglePause() {
+		guard model.storageStatus != .recoveryRequired else { return }
 		prefs.paused.toggle()
 		watcher.setPaused(prefs.paused)
 		model.paused = prefs.paused
 		shell.paused = prefs.paused
-		menu?.setPaused(prefs.paused)
+		menu?.setPaused(prefs.paused || model.storageStatus == .recoveryRequired)
 	}
 
 	// MARK: Settings and onboarding

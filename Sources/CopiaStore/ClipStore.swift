@@ -4,21 +4,26 @@ import CopiaCore
 
 /// File operations the store performs, so tests can inject failures.
 public protocol FileOps: Sendable {
+	func read(_ url: URL) throws -> Data
 	func write(_ data: Data, to url: URL) throws
-	func move(_ from: URL, to: URL) throws
+	func copy(_ from: URL, to: URL) throws
 	func remove(_ url: URL) throws
 	func exists(_ url: URL) -> Bool
 	/// Throws when the folder cannot be read, so an unreadable folder never looks empty.
 	func list(_ directory: URL) throws -> [URL]
 }
 
+public extension FileOps {
+	func read(_ url: URL) throws -> Data { try Data(contentsOf: url, options: .mappedIfSafe) }
+}
+
 public struct LiveFileOps: FileOps {
 	public init() {}
+	public func read(_ url: URL) throws -> Data { try Data(contentsOf: url, options: .mappedIfSafe) }
 	public func write(_ data: Data, to url: URL) throws { try data.write(to: url, options: .atomic) }
-	/// rename(2): replaces the destination atomically, and leaves it alone when the source is missing, so moving a
-	/// file that is not there never removes an undo copy already in trash. Every store move stays on one volume.
-	public func move(_ from: URL, to: URL) throws {
-		guard rename(from.path, to.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+	public func copy(_ from: URL, to: URL) throws {
+		guard from != to else { return }
+		try read(from).write(to: to, options: .atomic)
 	}
 	/// Only "no such file" counts as done; any other failure (permissions, I/O) is reported.
 	public func remove(_ url: URL) throws {
@@ -37,7 +42,10 @@ public enum PreviewState: String, Sendable {
 public enum StoreError: Error, Equatable {
 	case sqlite(String)
 	case missingBlob
+	case missingThumbnail
 	case alreadyExists
+	case outcomeUnknown
+	case undoExpired
 	/// Erase cleared the history but could not remove this many files.
 	case filesLeft(Int)
 }
@@ -66,8 +74,10 @@ public struct StoredClip: Equatable, Sendable {
 /// Everything needed to undo a delete.
 public struct DeletedClip: Sendable {
 	public let clip: StoredClip
-	/// The clip had a thumbnail when it was deleted, so a restore without it must ask for a new preview.
+	/// A saved thumbnail is required to restore this exact snapshot.
 	let hadThumbnail: Bool
+	public let token: UUID
+	public let issuedSequence: UInt64
 }
 
 /// History on disk: SQLite (WAL) with a trigram FTS index, plus blob and thumbnail files.
@@ -76,17 +86,28 @@ public actor ClipStore {
 	public let directory: URL
 	let files: FileOps
 	private nonisolated(unsafe) var db: OpaquePointer?
+	private var undos: [UUID: DeletedClip] = [:]
+	private var issuedSequence: UInt64 = 0
+
+	public private(set) var recoveryRequired = false
+	private var cleanupDebt = false
+	/// Cached warning. Only startup or a complete successful cleanup scan can clear it.
+	public var cleanupPending: Bool { cleanupDebt }
 
 	var blobs: URL { directory.appendingPathComponent("blobs", isDirectory: true) }
 	var thumbs: URL { directory.appendingPathComponent("thumbs", isDirectory: true) }
 	var trash: URL { directory.appendingPathComponent("trash", isDirectory: true) }
 
 	public init(directory: URL, files: FileOps = LiveFileOps()) throws {
-		self.directory = directory
 		self.files = files
 		for dir in ["blobs", "thumbs", "trash"] {
 			try FileManager.default.createDirectory(at: directory.appendingPathComponent(dir), withIntermediateDirectories: true)
 		}
+		guard let canonical = realpath(directory.path, nil) else {
+			throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+		}
+		self.directory = URL(fileURLWithPath: String(cString: canonical), isDirectory: true)
+		free(canonical)
 		var handle: OpaquePointer?
 		guard sqlite3_open_v2(directory.appendingPathComponent("copia.sqlite").path, &handle,
 			SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK
@@ -105,6 +126,33 @@ public actor ClipStore {
 			CREATE VIRTUAL TABLE IF NOT EXISTS clips_fts USING fts5(id UNINDEXED, title, preview_text, tokenize='trigram');
 			CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 			""")
+		cleanupDebt = Self.initialCleanupDebt(db: handle, directory: self.directory, files: files)
+	}
+
+	/// Actor initialization has no undo tokens. Inspect just ownership columns, not full clip payload metadata.
+	private static func initialCleanupDebt(db: OpaquePointer?, directory: URL, files: FileOps) -> Bool {
+		do {
+			let listed = try ["blobs", "thumbs", "trash"].flatMap { try files.list(directory.appendingPathComponent($0, isDirectory: true)) }
+			let paths = Set(listed.map(\.path))
+			var owned = Set<String>(), missingBlob = false
+			var statement: OpaquePointer?
+			guard sqlite3_prepare_v2(db, "SELECT id, preview_state FROM clips", -1, &statement, nil) == SQLITE_OK else { return true }
+			defer { sqlite3_finalize(statement) }
+			while true {
+				let result = sqlite3_step(statement)
+				if result == SQLITE_DONE { break }
+				guard result == SQLITE_ROW else { return true }
+				let key = String(cString: sqlite3_column_text(statement, 0))
+				let state = String(cString: sqlite3_column_text(statement, 1))
+				let blob = directory.appendingPathComponent("blobs/\(key).plist").path
+				owned.insert(blob)
+				missingBlob = missingBlob || !paths.contains(blob)
+				if state == PreviewState.ok.rawValue || state == PreviewState.okNoImage.rawValue {
+					owned.insert(directory.appendingPathComponent("thumbs/\(key).png").path)
+				}
+			}
+			return missingBlob || !paths.isSubset(of: owned)
+		} catch { return true }
 	}
 
 	deinit { sqlite3_close(db) }
@@ -114,9 +162,32 @@ public actor ClipStore {
 	func blobURL(_ key: String) -> URL { blobs.appendingPathComponent("\(key).plist") }
 	func thumbURL(_ key: String) -> URL { thumbs.appendingPathComponent("\(key).png") }
 	func trashURL(_ key: String, _ ext: String) -> URL { trash.appendingPathComponent("\(key).\(ext)") }
+	func snapshotURL(_ deleted: DeletedClip, _ ext: String) -> URL {
+		trash.appendingPathComponent("\(deleted.clip.key).\(deleted.token.uuidString).\(ext)")
+	}
+
+	/// Only an actual ENOENT permits fallback. Permission/I/O errors must not masquerade as absence.
+	private func readIfPresent(_ url: URL) throws -> Data? {
+		do { return try files.read(url) } catch where Self.isNoSuchFile(error) { return nil }
+	}
+
+	private func liveBlob(_ key: String) throws -> (url: URL, data: Data) {
+		let home = blobURL(key)
+		if let data = try readIfPresent(home) { return (home, data) }
+		let legacy = trashURL(key, "plist")
+		if let data = try readIfPresent(legacy) { cleanupDebt = true; return (legacy, data) }
+		cleanupDebt = true
+		throw StoreError.missingBlob
+	}
+
 	public func thumbnail(for key: String) -> URL? {
+		guard !recoveryRequired, let clip = try? fetch(key), ownsThumbnail(clip) else { return nil }
 		let url = thumbURL(key)
 		return files.exists(url) ? url : nil
+	}
+
+	private func ownsThumbnail(_ clip: StoredClip) -> Bool {
+		clip.previewState == .ok || clip.previewState == .okNoImage
 	}
 
 	// MARK: Insert
@@ -126,10 +197,14 @@ public actor ClipStore {
 	public func insert(_ draft: ClipDraft) throws -> (clip: StoredClip, isNew: Bool) {
 		let key = draft.contentKey
 		if var existing = try fetch(key) {
+			let blob = try liveBlob(key).url
 			existing.lastCopied = draft.copiedAt
 			existing.copyCount += 1
-			try run("UPDATE clips SET last_copied=?, copy_count=? WHERE id=?",
-				[.real(draft.copiedAt.timeIntervalSince1970), .int(existing.copyCount), .text(key)])
+			try transaction(keys: [key], validFiles: { self.files.exists(blob) }) {
+				try run("UPDATE clips SET last_copied=?, copy_count=? WHERE id=?",
+					[.real(draft.copiedAt.timeIntervalSince1970), .int(existing.copyCount), .text(key)])
+			}
+			expireUndos(for: key)
 			return (existing, false)
 		}
 		let text = Capture.plainText(draft)
@@ -144,25 +219,26 @@ public actor ClipStore {
 		case .image: "Image"
 		default: String(text.prefix(600))
 		}
-		let clip = StoredClip(key: key, kind: kind, title: title, previewText: String((text + " " + fileNames.joined(separator: " ")).prefix(4_000)),
+		var clip = StoredClip(key: key, kind: kind, title: title, previewText: String((text + " " + fileNames.joined(separator: " ")).prefix(4_000)),
 			isCode: kind == .text && Capture.looksLikeCode(text), sourceBundle: draft.sourceBundleID, sourceName: draft.sourceName,
 			firstCopied: draft.copiedAt, lastCopied: draft.copiedAt, copyCount: 1, byteSize: draft.byteSize,
 			meta: Capture.meta(kind: kind, text: text, files: fileURLs, byteSize: draft.byteSize, url: url,
 				image: kind == .image ? Capture.imageData(draft) : nil),
 			colorHex: kind == .color ? Capture.colorHex(text) : nil, url: url?.absoluteString, fileNames: fileNames,
-			previewState: [.image, .link, .file].contains(kind) ? .pending : .ok, generation: try nextGeneration())
-		try files.write(Self.encode(draft.items), to: blobURL(key))
+			previewState: [.image, .link, .file].contains(kind) ? .pending : .ok, generation: 0)
+		try removeUnownedThumbnail(key)
 		do {
-			try insertRow(clip)
+			try writeAtomically(Self.encode(draft.items), to: blobURL(key))
+			try transaction(keys: [key], validFiles: { self.files.exists(self.blobURL(key)) }) {
+				clip.generation = try nextGeneration()
+				try insertRow(clip)
+			}
 		} catch {
-			// A protected key's blob is a failed restore's payload: same content, so the same bytes, and still the
-			// undo's only copy. It stays, and so does its protection.
-			if !protectedUndo.contains(key) { try? files.remove(blobURL(key)) }
+			cleanup([blobURL(key)])
 			throw error
 		}
 		// A recopy of a deleted item ends its undo, so its trashed files go once the new copy is saved.
-		for ext in ["plist", "png"] { try? files.remove(trashURL(key, ext)) }
-		protectedUndo.remove(key)
+		expireUndos(for: key)
 		return (clip, true)
 	}
 
@@ -172,123 +248,126 @@ public actor ClipStore {
 	@discardableResult
 	public func setPreview(key: String, generation: Int, state: PreviewState, title: String? = nil, image: Data? = nil) throws -> Bool {
 		guard let current = try fetch(key), current.generation == generation else { return false }
-		if let image { try files.write(image, to: thumbURL(key)) }
-		try transaction {
-			try run("UPDATE clips SET preview_state=?, title=COALESCE(?, title) WHERE id=?",
-				[.text(state.rawValue), title.map { .text($0) } ?? .null, .text(key)])
-			if let title {
-				try run("UPDATE clips_fts SET title=? WHERE id=?", [.text(title), .text(key)])
-			}
+		guard state != .pending else { return false }
+		if current.previewState != .pending {
+			guard state == current.previewState, image == nil else { return false }
 		}
+		let blob = try liveBlob(key).url
+		var staged: [URL] = []
+		do {
+			if !ownsThumbnail(current) { try removeUnownedThumbnail(key) }
+			if let image {
+				staged.append(thumbURL(key))
+				try writeAtomically(image, to: thumbURL(key))
+			}
+			try transaction(keys: [key], validFiles: { self.files.exists(blob) && (image == nil || self.files.exists(self.thumbURL(key))) }) {
+				try run("UPDATE clips SET preview_state=?, title=COALESCE(?, title) WHERE id=?",
+					[.text(state.rawValue), title.map { .text($0) } ?? .null, .text(key)])
+				if let title { try run("UPDATE clips_fts SET title=? WHERE id=?", [.text(title), .text(key)]) }
+			}
+		} catch {
+			cleanup(staged)
+			throw error
+		}
+		if state == .failed, image != nil { cleanup(staged) }
 		return true
 	}
 
 	// MARK: Delete, restore, prune, erase
 
-	/// Moves the clip's files to trash for undo, then removes the row and FTS entry in one transaction.
-	/// Either all of it happens or nothing does: a failed move or row delete puts the moved files back and throws.
-	/// A file that cannot move back stays in trash under its live row; `emptyTrash`, `removeOrphans` and `sweep`
-	/// move it home before they remove anything.
+	/// Stages undo copies before removing either the row or its authoritative files.
 	public func delete(_ key: String) throws -> DeletedClip? {
 		guard let clip = try fetch(key) else { return nil }
-		var moved: [(file: URL, trashed: URL)] = []
+		let source = try liveBlob(key).url
+		let hadThumbnail = try ownsThumbnail(clip) && readIfPresent(thumbURL(key)) != nil
+		let deleted = DeletedClip(clip: clip, hadThumbnail: hadThumbnail, token: UUID(), issuedSequence: issuedSequence + 1)
+		var staged: [URL] = []
 		do {
-			for (file, trashed) in [(blobURL(key), trashURL(key, "plist")), (thumbURL(key), trashURL(key, "png"))] {
-				do {
-					try files.move(file, to: trashed)
-					moved.append((file, trashed))
-				} catch let error where Self.isNoSuchFile(error) && !files.exists(file) {
-					// Only a file that is really not there is skipped: no thumbnail yet, or a blob already in trash.
-					// A file the store cannot reach fails with a permission error and fails the delete.
-				}
-			}
-			try transaction {
+			try stage(source, to: snapshotURL(deleted, "plist"), staged: &staged)
+			if hadThumbnail { try stage(thumbURL(key), to: snapshotURL(deleted, "png"), staged: &staged) }
+			try transaction(keys: [key], validFiles: {
+				self.files.exists(self.snapshotURL(deleted, "plist")) && (!hadThumbnail || self.files.exists(self.snapshotURL(deleted, "png")))
+			}) {
 				try run("DELETE FROM clips WHERE id=?", [.text(key)])
 				try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
 			}
 		} catch {
-			for (file, trashed) in moved.reversed() { try? files.move(trashed, to: file) }
+			cleanup(staged)
 			throw error
 		}
-		return DeletedClip(clip: clip, hadThumbnail: moved.contains { $0.file == thumbURL(key) })
+		issuedSequence = deleted.issuedSequence
+		undos[deleted.token] = deleted
+		cleanup([source, thumbURL(key)])
+		return deleted
 	}
 
-	/// Puts a deleted clip back. Either the row and its files all return, or nothing changes.
-	/// A thumbnail lost from trash comes back as a pending preview, so the app asks for it again.
-	public func restore(_ deleted: DeletedClip) throws {
-		let key = deleted.clip.key
-		guard try fetch(key) == nil else { throw StoreError.alreadyExists }
-		let trashedBlob = trashURL(key, "plist")
-		let trashedThumb = trashURL(key, "png")
-		// A retry finds the payload where an earlier failed restore left it: home, and spared from cleanup.
-		let blobHome = protectedUndo.contains(key) && files.exists(blobURL(key))
-		guard blobHome || files.exists(trashedBlob) else { throw StoreError.missingBlob }
-		if !blobHome { try files.move(trashedBlob, to: blobURL(key)) }
-		var movedThumb = false
-		do {
-			if files.exists(trashedThumb) { try files.move(trashedThumb, to: thumbURL(key)); movedThumb = true }
-			try insertRestored(deleted, thumbnailHome: movedThumb)
-		} catch {
-			let failure = error
-			do {
-				try files.move(blobURL(key), to: trashedBlob)
-			} catch {
-				// The blob cannot go back to trash. It is home, so finish the restore rather than leave a blob without a
-				// row for cleanup to delete; a thumbnail that did not come home is asked for again.
-				if (try? insertRestored(deleted, thumbnailHome: movedThumb)) != nil { protectedUndo.remove(key); return }
-				// Neither finished nor rolled back: the blob is home without a row and is this undo's only payload.
-				// Cleanup spares it and a retry uses it, until the undo ends (emptyTrash, sweep, erase, recopy).
-				protectedUndo.insert(key)
-				throw failure
-			}
-			protectedUndo.remove(key)
-			if movedThumb { try? files.move(thumbURL(key), to: trashedThumb) }
-			throw failure
-		}
-		protectedUndo.remove(key)
-	}
-
-	/// Keys whose undo payload a failed restore left home without a row. In memory only: launch starts without any.
-	private var protectedUndo: Set<String> = []
-
-	/// Inserts a restored clip's row with a new generation. A thumbnail it had that is not home makes its preview pending.
-	private func insertRestored(_ deleted: DeletedClip, thumbnailHome: Bool) throws {
-		var clip = deleted.clip
-		if deleted.hadThumbnail, !thumbnailHome { clip.previewState = .pending }
-		clip.generation = try nextGeneration()
-		try insertRow(clip)
-	}
-
-	/// Best effort: trash only holds undo copies of items already deleted.
-	/// A trash file whose row is still live is moved home, never removed. If the live rows or the trash cannot be
-	/// read, nothing is removed.
-	public func emptyTrash() {
-		guard let keys = try? Set(strings("SELECT id FROM clips", [])), let listed = try? files.list(trash) else { return }
-		emptyTrash(listed, live: keys)
-		// Emptying trash ends every undo, including one whose payload a failed restore left home.
-		for key in protectedUndo.subtracting(keys) { try? files.remove(blobURL(key)); try? files.remove(thumbURL(key)) }
-		protectedUndo.removeAll()
-	}
-
-	/// Moves each trash file whose key has a live row back to its empty home path, then removes every other trash
-	/// file. A file whose move home fails stays in trash; returns the keys whose blob is still there.
+	/// Copies the snapshot home before publishing its row. A failure never consumes the snapshot.
 	@discardableResult
-	private func emptyTrash(_ listed: [URL], live keys: Set<String>) -> Set<String> {
-		var kept = Set<URL>(), stuckBlobs = Set<String>()
-		for url in listed {
-			let key = url.deletingPathExtension().lastPathComponent
-			let home: URL? = switch url.pathExtension {
-			case "plist": blobURL(key)
-			case "png": thumbURL(key)
-			default: nil
+	public func restore(_ deleted: DeletedClip) throws -> StoredClip {
+		try checkAvailable()
+		guard let saved = undos[deleted.token], saved.clip.key == deleted.clip.key,
+			saved.issuedSequence == deleted.issuedSequence else { throw StoreError.undoExpired }
+		let key = saved.clip.key
+		guard try fetch(key) == nil else { throw StoreError.alreadyExists }
+		guard try readIfPresent(snapshotURL(saved, "plist")) != nil else { cleanupDebt = true; throw StoreError.missingBlob }
+		if saved.hadThumbnail, try readIfPresent(snapshotURL(saved, "png")) == nil { cleanupDebt = true; throw StoreError.missingThumbnail }
+		try removeUnownedThumbnail(key)
+		var staged: [URL] = []
+		var clip = saved.clip
+		do {
+			try stage(snapshotURL(saved, "plist"), to: blobURL(key), staged: &staged)
+			if saved.hadThumbnail { try stage(snapshotURL(saved, "png"), to: thumbURL(key), staged: &staged) }
+			try transaction(keys: [key], validFiles: {
+				self.files.exists(self.blobURL(key)) && (!saved.hadThumbnail || self.files.exists(self.thumbURL(key)))
+			}) {
+				clip.generation = try nextGeneration()
+				try insertRow(clip)
 			}
-			// A home copy that already exists is the live one; the trash copy is redundant and goes below.
-			guard keys.contains(key), let home, !files.exists(home) else { continue }
-			kept.insert(url)
-			do { try files.move(url, to: home) } catch { if url.pathExtension == "plist" { stuckBlobs.insert(key) } }
+		} catch {
+			cleanup(staged)
+			throw error
 		}
-		for url in listed where !kept.contains(url) { try? files.remove(url) }
-		return stuckBlobs
+		invalidateUndo(saved)
+		return clip
+	}
+
+	/// A failed atomic write can leave a temporary file even when its destination was never published.
+	private func writeAtomically(_ data: Data, to url: URL) throws {
+		do { try files.write(data, to: url) } catch { cleanupDebt = true; throw error }
+	}
+
+	private func stage(_ source: URL, to target: URL, staged: inout [URL]) throws {
+		guard source != target else { return }
+		staged.append(target)
+		do { try files.copy(source, to: target) } catch { cleanupDebt = true; throw error }
+	}
+
+	private func removeUnownedThumbnail(_ key: String) throws {
+		do { try files.remove(thumbURL(key)) } catch { cleanupDebt = true; throw error }
+	}
+
+	private func expireUndos(for key: String) {
+		for deleted in undos.values.filter({ $0.clip.key == key }) { invalidateUndo(deleted) }
+	}
+
+	/// Invalidates exactly this handle, even when unlinking its files fails.
+	public func invalidateUndo(_ deleted: DeletedClip) {
+		guard !recoveryRequired, let saved = undos[deleted.token], saved.clip.key == deleted.clip.key else { return }
+		undos.removeValue(forKey: deleted.token)
+		cleanup([snapshotURL(saved, "plist"), snapshotURL(saved, "png")])
+	}
+
+	/// Nil ends every undo; a cutoff never consumes a deletion issued after the close began.
+	public func emptyTrash(through cutoff: UInt64? = nil) {
+		guard !recoveryRequired else { return }
+		let recoverDebt = cleanupDebt
+		let expired = undos.values.filter { deleted in cutoff.map { deleted.issuedSequence <= $0 } ?? true }
+		for deleted in expired { undos.removeValue(forKey: deleted.token) }
+		if recoverDebt {
+			try? removeOrphans()
+		} else {
+			cleanup(expired.flatMap { [snapshotURL($0, "plist"), snapshotURL($0, "png")] })
+		}
 	}
 
 	/// Deletes clips last copied before `cutoff`, with their FTS entries and files.
@@ -296,72 +375,156 @@ public actor ClipStore {
 	public func prune(before cutoff: Date) throws -> Int {
 		let keys = try strings("SELECT id FROM clips WHERE last_copied < ?", [.real(cutoff.timeIntervalSince1970)])
 		guard !keys.isEmpty else { return 0 }
-		try transaction {
+		try transaction(keys: keys) {
 			for key in keys {
 				try run("DELETE FROM clips WHERE id=?", [.text(key)])
 				try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
 			}
 		}
-		for key in keys {
-			try? files.remove(blobURL(key))
-			try? files.remove(thumbURL(key))
-		}
+		cleanup(keys.flatMap { [blobURL($0), thumbURL($0), trashURL($0, "plist")] })
 		return keys.count
 	}
 
 	/// Clears every row, then every file. A file that cannot be removed is reported, not hidden.
 	public func eraseAll() throws {
+		try checkAvailable()
+		// Get a complete inventory before committing; an unreadable directory stops destruction.
+		let before: Inventory
+		do { before = try inventory() } catch {
+			cleanupDebt = true
+			throw StoreError.sqlite("erase inventory unreadable: \(error)")
+		}
 		try transaction {
 			try run("DELETE FROM clips", [])
 			try run("DELETE FROM clips_fts", [])
 		}
-		protectedUndo.removeAll()
-		var left = 0
-		for dir in [blobs, thumbs, trash] {
-			guard let urls = try? files.list(dir) else { left += 1; continue }
+		undos.removeAll()
+		let unremoved = cleanup(before.listed)
+		let remaining: Int
+		do {
+			let after = try inventory()
+			remaining = after.listed.count
+			refreshCleanupStatus(after)
+		} catch {
+			cleanupDebt = true
+			throw StoreError.filesLeft(unremoved.count)
+		}
+		if remaining > 0 { cleanupDebt = true; throw StoreError.filesLeft(remaining) }
+	}
+
+	private struct Inventory {
+		let clips: [StoredClip]
+		let listed: [URL]
+		let paths: Set<String>
+		let owned: Set<String>
+	}
+
+	/// Full sweeps require readable rows and every directory before destructive cleanup.
+	private func inventory() throws -> Inventory {
+		let clips = try recent()
+		let listed = try files.list(blobs) + files.list(thumbs) + files.list(trash)
+		let paths = Set(listed.map(\.path))
+		var owned = Set<String>()
+		for clip in clips {
+			let home = blobURL(clip.key), legacy = trashURL(clip.key, "plist")
+			owned.insert(home.path)
+			if !paths.contains(home.path), paths.contains(legacy.path) { owned.insert(legacy.path) }
+			if ownsThumbnail(clip) { owned.insert(thumbURL(clip.key).path) }
+		}
+		for deleted in undos.values {
+			owned.insert(snapshotURL(deleted, "plist").path)
+			if deleted.hadThumbnail { owned.insert(snapshotURL(deleted, "png").path) }
+		}
+		return Inventory(clips: clips, listed: listed, paths: paths, owned: owned)
+	}
+
+	/// Check only the exact candidate keys/tokens. A failed ownership read preserves the entire batch.
+	@discardableResult
+	private func cleanup(_ urls: [URL]) -> [URL] {
+		guard !recoveryRequired, !urls.isEmpty else { return urls }
+		do {
+			var rows: [String: StoredClip] = [:], checked = Set<String>(), owned = Set<String>()
 			for url in urls {
-				do { try files.remove(url) } catch { left += 1 }
+				let parent = url.deletingLastPathComponent().path
+				let name = url.deletingPathExtension().lastPathComponent
+				let ext = url.pathExtension
+				// Token-specific snapshots are owned only by the exact active actor record.
+				if parent == trash.path, let dot = name.lastIndex(of: "."),
+					let token = UUID(uuidString: String(name[name.index(after: dot)...])) {
+					if let saved = undos[token], saved.clip.key == String(name[..<dot]),
+						ext == "plist" || (ext == "png" && saved.hadThumbnail) { owned.insert(url.path) }
+					continue
+				}
+				guard [blobs.path, thumbs.path, trash.path].contains(parent) else { owned.insert(url.path); continue }
+				if checked.insert(name).inserted { rows[name] = try fetch(name) }
+				guard let clip = rows[name] else { continue }
+				if parent == blobs.path, ext == "plist" { owned.insert(url.path) }
+				if parent == thumbs.path, ext == "png", ownsThumbnail(clip) { owned.insert(url.path) }
+				if parent == trash.path, ext == "plist", try readIfPresent(blobURL(name)) == nil { owned.insert(url.path) }
 			}
-		}
-		if left > 0 { throw StoreError.filesLeft(left) }
+			// Token-only/atomic-temp batches still require a readable database before destruction.
+			if checked.isEmpty { _ = try strings("SELECT id FROM clips LIMIT 1", []) }
+			return unlink(urls.filter { !owned.contains($0.path) })
+		} catch { cleanupDebt = true; return urls }
 	}
 
-	/// The hourly pass: moves a live row's files home from trash (a delete whose rollback failed), then removes blob
-	/// and thumbnail files that have no row, left by a prune or erase whose removal failed. Undo copies in trash stay.
+	private func unlink(_ urls: [URL]) -> [URL] {
+		var unremoved: [URL] = []
+		for url in urls {
+			do { try files.remove(url) } catch { cleanupDebt = true; unremoved.append(url) }
+		}
+		return unremoved
+	}
+
+	/// A complete readable scan is the only authority that can clear a previously observed warning.
+	private func refreshCleanupStatus(_ inventory: Inventory, removing removed: Set<String> = []) {
+		let remaining = inventory.paths.subtracting(removed)
+		cleanupDebt = !remaining.isSubset(of: inventory.owned)
+			|| inventory.clips.contains { !remaining.contains(blobURL($0.key).path) }
+			|| undos.values.contains { !remaining.contains(snapshotURL($0, "plist").path)
+				|| ($0.hadThumbnail && !remaining.contains(snapshotURL($0, "png").path)) }
+	}
+
+	/// Hourly cleanup preserves every valid token. Legacy fallback is blob-only, never a thumbnail.
 	public func removeOrphans() throws {
-		let keys = Set(try strings("SELECT id FROM clips", []))
-		emptyTrash(((try? files.list(trash)) ?? []).filter { keys.contains($0.deletingPathExtension().lastPathComponent) }, live: keys)
-		// A failed restore's payload stays while its undo is valid.
-		let kept = keys.union(protectedUndo)
-		for url in try files.list(blobs) + files.list(thumbs) where !kept.contains(url.deletingPathExtension().lastPathComponent) {
-			try? files.remove(url)
-		}
-	}
-
-	/// Launch cleanup: move live rows' files home from trash, empty trash, drop files without rows and rows without blobs.
-	/// Rows are dropped only for blobs a successful listing shows are absent; a folder that cannot be read stops the sweep.
-	public func sweep() throws {
-		let keys = Set(try strings("SELECT id FROM clips", []))
-		// A blob that still cannot move home is in trash, not lost: its row stays.
-		let stuck = emptyTrash(try files.list(trash), live: keys)
-		let blobFiles = try files.list(blobs), thumbFiles = try files.list(thumbs)
-		// Launch ends every undo: a failed restore's payload is an orphan like any other.
-		protectedUndo.removeAll()
-		for url in blobFiles + thumbFiles where !keys.contains(url.deletingPathExtension().lastPathComponent) {
-			try? files.remove(url)
-		}
-		let present = Set(blobFiles.map { $0.deletingPathExtension().lastPathComponent }).union(stuck)
-		let missing = keys.subtracting(present)
-		if !missing.isEmpty {
-			try transaction {
-				for key in missing {
-					try run("DELETE FROM clips WHERE id=?", [.text(key)])
-					try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
-					try? files.remove(thumbURL(key))
+		try checkAvailable()
+		do {
+			let before = try inventory()
+			var recoveredBlob = false, copyFailed = false
+			for clip in before.clips {
+				let home = blobURL(clip.key), legacy = trashURL(clip.key, "plist")
+				if !before.paths.contains(home.path), before.paths.contains(legacy.path) {
+					do { try files.copy(legacy, to: home); recoveredBlob = true }
+					catch { copyFailed = true }
 				}
 			}
+			// Only publishing a recovered blob changes file ownership and needs another inventory.
+			let known = try recoveredBlob ? inventory() : before
+			let obsolete = known.listed.filter { !known.owned.contains($0.path) }
+			let unremoved = unlink(obsolete)
+			let removed = Set(obsolete.map(\.path)).subtracting(unremoved.map(\.path))
+			// The complete inventory plus confirmed unlink results proves what remains without relisting.
+			refreshCleanupStatus(known, removing: removed)
+			if copyFailed { cleanupDebt = true }
+		} catch { cleanupDebt = true; throw error }
+	}
+
+	/// Launch ends undos, recovers legacy live blobs, and drops rows proven to have no payload.
+	public func sweep() throws {
+		let clips = try recent()
+		let listed = try files.list(blobs) + files.list(thumbs) + files.list(trash)
+		let paths = Set(listed.map(\.path))
+		let missing = clips.filter { !paths.contains(blobURL($0.key).path) && !paths.contains(trashURL($0.key, "plist").path) }.map(\.key)
+		try transaction {
+			for key in missing {
+				try run("DELETE FROM clips WHERE id=?", [.text(key)])
+				try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
+			}
+			try run("DELETE FROM clips_fts WHERE id NOT IN (SELECT id FROM clips)", [])
 		}
-		try run("DELETE FROM clips_fts WHERE id NOT IN (SELECT id FROM clips)", [])
+		undos.removeAll()
+		// The row removal is committed. Later cleanup failure is diagnostic, not a failed sweep.
+		try? removeOrphans()
 	}
 
 	// MARK: Read
@@ -369,6 +532,14 @@ public actor ClipStore {
 	/// Every clip, newest first. History is bounded by retention, not by a count.
 	public func recent() throws -> [StoredClip] {
 		try query("SELECT * FROM clips ORDER BY last_copied DESC", [])
+	}
+
+	/// One actor-isolated row query pairs current metadata with thumbnails owned by those same rows.
+	public func snapshot() throws -> [(clip: StoredClip, thumbnail: URL?)] {
+		try recent().map { clip in
+			let url = thumbURL(clip.key)
+			return (clip, ownsThumbnail(clip) && files.exists(url) ? url : nil)
+		}
 	}
 
 	public func fetch(_ key: String) throws -> StoredClip? {
@@ -381,8 +552,8 @@ public actor ClipStore {
 
 	/// The stored pasteboard items, for pasting.
 	public func items(for key: String) throws -> [PasteboardItemData] {
-		guard let data = try? Data(contentsOf: blobURL(key)) else { throw StoreError.missingBlob }
-		return try Self.decode(data)
+		guard try fetch(key) != nil else { throw StoreError.missingBlob }
+		return try Self.decode(liveBlob(key).data)
 	}
 
 	/// Substring search: FTS5 trigram for 3+ characters, LIKE for shorter queries. Returns keys, newest first.
@@ -458,8 +629,19 @@ public actor ClipStore {
 		}
 	}
 
+	enum CommitFault { case beforeEffect, afterEffect }
+	private var commitFault: CommitFault?
+	private var rollbackFault = false
+	private var readbackFault = false
+	func failTransaction(commit: CommitFault, rollback: Bool = false, readback: Bool = false) {
+		commitFault = commit; rollbackFault = rollback; readbackFault = readback
+	}
+
 	private var inTransaction = false
 	private var stepFault = false
+	private(set) var readStatementCount = 0
+	private(set) var readRowCount = 0
+	func resetReadCounts() { readStatementCount = 0; readRowCount = 0 }
 	private var writeFault = false
 
 	/// Tests: the next read step fails as SQLite would on a busy or damaged database.
@@ -470,6 +652,7 @@ public actor ClipStore {
 
 	/// Tests: while on, the database refuses new clip rows only, so an insert fails after its generation and blob write.
 	func rejectNewRows(_ on: Bool) throws {
+		try checkAvailable()
 		try Self.exec(db, on
 			? "CREATE TEMP TRIGGER IF NOT EXISTS reject_new_rows BEFORE INSERT ON clips BEGIN SELECT RAISE(ABORT, 'injected'); END;"
 			: "DROP TRIGGER IF EXISTS temp.reject_new_rows;")
@@ -489,27 +672,66 @@ public actor ClipStore {
 	private func nextRow(_ statement: OpaquePointer?) throws -> Bool {
 		let code = stepFault ? SQLITE_IOERR : sqlite3_step(statement)
 		stepFault = false
-		if code == SQLITE_ROW { return true }
+		if code == SQLITE_ROW { readRowCount += 1; return true }
 		guard code == SQLITE_DONE else { throw StoreError.sqlite(String(cString: sqlite3_errstr(code))) }
 		return false
 	}
 
-	func transaction(_ body: () throws -> Void) throws {
+	private func checkAvailable() throws {
+		if recoveryRequired { throw StoreError.outcomeUnknown }
+	}
+
+	private struct SQLState: Equatable {
+		let rows: [StoredClip]
+		let fts: [String]
+		let generation: [String]
+	}
+
+	private func sqlState(_ keys: [String]?) throws -> SQLState {
+		let filter = keys.map { " WHERE id IN (" + $0.map { _ in "?" }.joined(separator: ",") + ")" } ?? ""
+		let values = (keys ?? []).map(Value.text)
+		return try SQLState(rows: query("SELECT * FROM clips" + filter + " ORDER BY id", values),
+			fts: strings("SELECT quote(id)||quote(title)||quote(preview_text) FROM clips_fts" + filter + " ORDER BY id", values),
+			generation: strings("SELECT value FROM meta WHERE key='generation'", []))
+	}
+
+	/// A SQL exception is not evidence of rollback. Read back only after SQLite confirms autocommit.
+	/// The prospective state includes row fields, generation and FTS; the caller supplies required files.
+	func transaction(keys: [String]? = nil, validFiles: () -> Bool = { true }, _ body: () throws -> Void) throws {
+		try checkAvailable()
 		if inTransaction { return try body() }
-		try Self.exec(db, "BEGIN IMMEDIATE")
-		inTransaction = true
+		let prior = try sqlState(keys)
+		var expected: SQLState?
 		do {
+			try Self.exec(db, "BEGIN IMMEDIATE")
+			inTransaction = true
 			try body()
-			inTransaction = false
+			expected = try sqlState(keys)
+			let fault = commitFault
+			commitFault = nil
+			if fault == .beforeEffect { throw StoreError.sqlite("injected COMMIT before effect") }
 			try Self.exec(db, "COMMIT")
-		} catch {
 			inTransaction = false
-			try? Self.exec(db, "ROLLBACK")
-			throw error
+			if fault == .afterEffect { throw StoreError.sqlite("injected COMMIT after effect") }
+		} catch {
+			let failure = error
+			inTransaction = false
+			if sqlite3_get_autocommit(db) == 0, !rollbackFault { try? Self.exec(db, "ROLLBACK") }
+			rollbackFault = false
+			var persisted: SQLState?
+			if sqlite3_get_autocommit(db) != 0, !readbackFault { persisted = try? sqlState(keys) }
+			readbackFault = false
+			if let persisted {
+				if let expected, persisted == expected, validFiles() { return }
+				if persisted == prior { throw failure }
+			}
+			recoveryRequired = true
+			throw StoreError.outcomeUnknown
 		}
 	}
 
 	private func prepare(_ sql: String, _ values: [Value]) throws -> OpaquePointer? {
+		try checkAvailable()
 		var statement: OpaquePointer?
 		guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
 			throw StoreError.sqlite(String(cString: sqlite3_errmsg(db)))
@@ -535,6 +757,7 @@ public actor ClipStore {
 	}
 
 	private func strings(_ sql: String, _ values: [Value]) throws -> [String] {
+		readStatementCount += 1
 		let statement = try prepare(sql, values)
 		defer { sqlite3_finalize(statement) }
 		var result: [String] = []
@@ -545,6 +768,7 @@ public actor ClipStore {
 	}
 
 	private func query(_ sql: String, _ values: [Value]) throws -> [StoredClip] {
+		readStatementCount += 1
 		let statement = try prepare(sql, values)
 		defer { sqlite3_finalize(statement) }
 		var result: [StoredClip] = []

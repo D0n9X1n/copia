@@ -30,9 +30,9 @@
 
 - **⌘C is all it takes.** Text, rich text, images, links, files and colors land at the front of your history. Copy something again and it moves back to the front.
 - **⌘Y brings it back.** The strip opens over whatever you are doing without taking focus from it, so the paste lands in the app you were using.
-- **Fast enough to forget.** The strip opens in 79 ms (p95 93 ms) and idles at 0.05% CPU and 31 MB. CI fails any build that goes over budget.
+- **Measured, not assumed.** Earlier local runs opened in 79 ms (p95 93 ms) and idled at 0.05% CPU and 31 MB. CI has since missed CPU and open-latency budgets; those failures block release.
 - **Private by default.** Concealed copies and password managers are never stored, ⌘T pauses capture, and nothing leaves your Mac except a link's one-time preview request.
-- **Yours, on disk.** History is one SQLite file plus thumbnails in Application Support. Deleting a card deletes its files.
+- **Yours, on disk.** History is one SQLite file plus thumbnails in Application Support. Deleting a card keeps a short-lived undo snapshot; any pending file cleanup is reported.
 
 ## A closer look
 
@@ -105,14 +105,14 @@ Then copy something and press <kbd>⌘Y</kbd>.
 
 `copia-bench` seeds 1,000 clips, 300 of them images, and CI fails the build when any budget is exceeded.
 
-| | Budget | Measured |
+| | Budget | Earlier local measurement |
 |---|---|---|
 | Idle CPU, strip hidden | < 0.1% | 0.05% |
 | Idle memory | < 40 MB | 31 MB |
 | Strip open, after scrolling through every card | < 120 MB | 34 MB, 92 MB after scrolling all 1,000 |
 | ⌘Y to first frame, in process | p95 < 100 ms | p50 77–81 ms, p95 91–93 ms |
 
-<sub>M3 Pro, macOS 27.2, release build, a 1512 pt strip. On this Mac's 60 Hz display the first presented frame arrives at p95 120–125 ms; presented-frame budgets are checked on a 120 Hz display. How it stays there: [Performance](wiki/Performance.md).</sub>
+<sub>Earlier local runs on an M3 Pro, macOS 27.2, release build, a 1512 pt reference width (1496 pt panel). Later 60 Hz presented-frame p95 ranged from 126 to 165.5 ms; the required 120 Hz run is still outstanding. CI has also missed idle CPU (0.208–0.214% against <0.1%) and one in-process open p95 run (103 ms against <100 ms; the other was 74.7 ms), so these local results are not a release sign-off. Details: [Performance](wiki/Performance.md).</sub>
 
 ## Build from source
 

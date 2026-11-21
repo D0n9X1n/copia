@@ -65,4 +65,13 @@ import Foundation
 		#expect(!applied)
 		#expect(index.keys.isEmpty)
 	}
+	@Test func expiringOneDeletionDoesNotForgetAnother() {
+		var index = ClipIndex<String>()
+		index.noteDeleted(a, "undo a")
+		index.noteDeleted(b, "undo b")
+		#expect(index.takeDeletion(for: a) == "undo a")
+		#expect(index.takeDeletion(for: a) == nil)
+		#expect(index.deletion(for: b) == "undo b")
+	}
+
 }

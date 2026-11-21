@@ -629,8 +629,8 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		#expect(links.calls == 2)
 	}
 
-	/// Undo after the trashed thumbnail was lost: the restored image asks again and ends whole, with a saved thumbnail.
-	@Test func anUndoneImageWhoseTrashedThumbnailWasLostGetsItsPreviewBack() async throws {
+	/// Closing expires the undo even if a snapshot cannot be unlinked; leftover bytes do not authorize restore.
+	@Test func closingWithSnapshotCleanupFailureDoesNotRegenerateAPreview() async throws {
 		let faulty = FaultyFiles()
 		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-prev-\(UUID().uuidString)")
 		defer { try? FileManager.default.removeItem(at: dir) }
@@ -640,13 +640,38 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		previewer.generate(for: clip)
 		#expect(try await waitForState(store, clip.key) == .ok)
 		let deleted = try #require(try await store.delete(clip.key))
-		faulty.failRemoveContaining = "trash/\(clip.key).plist"
+		faulty.failRemoveContaining = deleted.token.uuidString + ".plist"
 		await store.emptyTrash()
-		try await store.restore(deleted)
+		#expect(await store.cleanupPending)
+		await #expect(throws: StoreError.undoExpired) { try await store.restore(deleted) }
 		await previewer.resumePending()
-		#expect(try await waitForState(store, clip.key) == .ok)
-		#expect(await store.thumbnail(for: clip.key) != nil)
-		#expect(previewer.stats.decodes == 2)
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		#expect(previewer.stats.decodes == 1)
+		try await store.removeOrphans()
+		#expect(!(await store.cleanupPending))
+	}
+
+	@Test func finalizedLinkUndoPreservesSavedPreviewWithoutRefetch() async throws {
+		let faulty = FaultyFiles()
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-prev-\(UUID().uuidString)")
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let store = try ClipStore(directory: dir, files: faulty)
+		let links = CountingLinks(), previewer = Previewer(store: store, links: links)
+		let (clip, _) = try await store.insert(link())
+		let image = try pngData(64)
+		#expect(try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: image))
+		let deleted = try #require(try await store.delete(clip.key))
+		faulty.failCopyContaining = ".png"
+		await #expect(throws: (any Error).self) { try await store.restore(deleted) }
+		#expect(try await store.fetch(clip.key) == nil)
+		let restored = try await store.restore(deleted)
+		#expect(restored.previewState == .ok && restored.title == "Saved")
+		let thumbnail = try #require(await store.thumbnail(for: clip.key))
+		#expect(try Data(contentsOf: thumbnail) == image)
+		previewer.generate(for: restored)
+		await previewer.resumePending()
+		#expect(links.calls == 0)
 	}
 
 	/// An 8000×8000 PNG (brief:79) through the real capture, store and thumbnail path: its footer gives its size,

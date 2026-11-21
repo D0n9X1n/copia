@@ -22,6 +22,7 @@ public final class StripModel {
 	}
 	public var commandHeld = false
 	public var paused = false
+	public var storageStatus: StorageStatus = .ready
 	public var hoveredID: UUID?
 	public private(set) var toast: Toast?
 	public private(set) var isClosing = false
@@ -40,6 +41,7 @@ public final class StripModel {
 	@ObservationIgnored public var onCloseStart: () -> Void = {}
 	/// Called when the close animation finishes, so the panel can hide and free memory.
 	@ObservationIgnored public var onCloseFinish: () -> Void = {}
+	@ObservationIgnored public var onUndoExpired: (UUID) -> Void = { _ in }
 
 	/// IDs the store's full-text search matched for `storeQuery`.
 	private var storeMatches: Set<UUID> = []
@@ -53,6 +55,8 @@ public final class StripModel {
 	@ObservationIgnored private var cancelUndoDeadline: ToastClock.Cancel?
 	@ObservationIgnored private var busy = false
 	@ObservationIgnored private var presentation = 0
+	/// Changes as soon as close starts, so a pending delete cannot create undo in a later presentation.
+	public private(set) var closeCount = 0
 
 	public static let toastLifetime: Duration = .seconds(3)
 
@@ -145,16 +149,22 @@ public final class StripModel {
 	// MARK: Delete and undo
 
 	public func deleteSelected() async {
-		guard !busy, let id = selectedID, let index = clips.firstIndex(where: { $0.id == id }) else { return }
+		guard storageStatus != .recoveryRequired, !isClosing, !busy, let id = selectedID, let index = clips.firstIndex(where: { $0.id == id }) else { return }
 		busy = true
 		defer { busy = false }
 		let clip = clips[index]
+		let beganBeforeClose = closeCount
 		let visibleBefore = visibleClips
 		let visibleIndex = visibleBefore.firstIndex { $0.id == id } ?? 0
 		do {
 			try await actions.delete(id)
 		} catch {
-			show(.error("Couldn't delete: \(error.localizedDescription)"))
+			showActionError(error, operation: "delete")
+			return
+		}
+		guard closeCount == beganBeforeClose else {
+			clips.removeAll { $0.id == id }
+			reconcileSelection(preferredIndex: visibleIndex)
 			return
 		}
 		animator.run(.delete, { self.removingIDs.insert(id) }, {
@@ -166,11 +176,11 @@ public final class StripModel {
 				self.selectedID = remaining.isEmpty ? nil : remaining[min(visibleIndex, remaining.count - 1)].id
 			}, {})
 		})
+		endUndo(expired: true)
 		undoEntry = (clip, index)
-		cancelUndoDeadline?()
 		cancelUndoDeadline = clock.after(Self.toastLifetime) { [weak self] in
 			guard let self, self.undoEntry?.clip.id == clip.id else { return }
-			self.endUndo()
+			self.endUndo(expired: true)
 		}
 		show(.deleted)
 		announce(Toast.deleted.message)
@@ -186,13 +196,13 @@ public final class StripModel {
 	}
 
 	public func undo() async {
-		guard !busy, let entry = undoEntry else { return }
+		guard storageStatus != .recoveryRequired, !busy, let entry = undoEntry else { return }
 		busy = true
 		defer { busy = false }
 		do {
 			try await actions.restore(entry.clip, entry.index)
 		} catch {
-			show(.error("Couldn't restore: \(error.localizedDescription)"))
+			showActionError(error, operation: "restore")
 			return
 		}
 		endUndo()
@@ -226,24 +236,25 @@ public final class StripModel {
 	private var isPasting = false
 
 	private func paste(id: UUID, plain: Bool) async {
-		guard !isClosing, !isPasting else { return }
+		guard storageStatus != .recoveryRequired, !isClosing, !isPasting else { return }
 		isPasting = true
 		defer { isPasting = false }
 		do {
 			let result = try await actions.paste(id, plain) { [weak self] in self?.beginClose() }
 			if result == .accessibilityRequired { show(.accessibilityRequired) }
 		} catch {
-			show(.error("Couldn't paste: \(error.localizedDescription)"))
+			showActionError(error, operation: "paste")
 		}
 	}
 
 	public func perform(_ action: CardAction, id: UUID) async {
+		guard storageStatus != .recoveryRequired else { return }
 		if selectedID != id { selectedID = id }
 		switch action {
 		case .paste: await paste(id: id, plain: false)
 		case .pastePlain: await paste(id: id, plain: true)
 		case .copy:
-			do { try await actions.copy(id) } catch { show(.error("Couldn't copy: \(error.localizedDescription)")) }
+			do { try await actions.copy(id) } catch { showActionError(error, operation: "copy") }
 		case .delete: await deleteSelected()
 		}
 	}
@@ -285,6 +296,7 @@ public final class StripModel {
 	public func beginClose() {
 		guard cardsMounted, !isClosing else { return }
 		isClosing = true
+		closeCount += 1
 		let generation = presentation
 		onCloseStart()
 		animator.run(.close, { self.appeared = false }, {
@@ -305,6 +317,19 @@ public final class StripModel {
 
 	// MARK: Toasts
 
+	private func showActionError(_ error: Error, operation: String) {
+		switch error as? StripActionError {
+		case .outcomeUnknown:
+			storageStatus = .recoveryRequired
+			show(.error(storageStatus.message))
+		case .undoExpired:
+			endUndo()
+			show(.error("Undo has expired."))
+		case nil:
+			show(.error("Couldn't \(operation): \(error.localizedDescription)"))
+		}
+	}
+
 	private func show(_ newToast: Toast) {
 		cancelToast?()
 		toast = newToast
@@ -314,10 +339,12 @@ public final class StripModel {
 		}
 	}
 
-	private func endUndo() {
+	private func endUndo(expired: Bool = false) {
+		let id = undoEntry?.clip.id
 		undoEntry = nil
 		cancelUndoDeadline?()
 		cancelUndoDeadline = nil
+		if expired, let id { onUndoExpired(id) }
 	}
 
 	private func dismissToast() {

@@ -38,7 +38,7 @@ Right-click a card for Paste, Paste as Plain Text, Copy and Delete. Hold ⌘ to 
 
 ### What is kept
 
-Text, rich text, images, links, files and colors. Images get a thumbnail, links load their title and image once and keep them, and colors (`#RRGGBB`) show a swatch. Deleting a card also deletes its saved files.
+Text, rich text, images, links, files and colors. Images get a thumbnail, links load their title and image once and keep them, and colors (`#RRGGBB`) show a swatch. Deleting a card removes it from history and keeps a short-lived undo snapshot. If redundant files cannot be removed, a cleanup warning stays visible while Copia retries; Erase History never claims all files are gone when cleanup fails.
 
 History is kept for **1 Month** by default (1 Day, 1 Week, 1 Month, 1 Year or Forever in Settings → General). **Erase History** removes everything after you confirm.
 

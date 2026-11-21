@@ -27,6 +27,8 @@ struct ClipIndex<Deletion> {
 
 	func deletion(for id: UUID) -> Deletion? { deleted[id] }
 
+	mutating func takeDeletion(for id: UUID) -> Deletion? { deleted.removeValue(forKey: id) }
+
 	mutating func noteRestored(_ id: UUID, key: String) {
 		mutations += 1
 		keys[id] = key
