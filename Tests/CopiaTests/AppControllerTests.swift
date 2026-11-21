@@ -138,6 +138,15 @@ final class AppRig {
 		#expect(again.paused && again.onboarded)
 	}
 
+	@Test func settingsOpenAsOneToolbarTabbedWindow() throws {
+		let r = try AppRig()
+		let window = r.controller.settings()
+		let tabs = try #require(window.contentViewController as? NSTabViewController)
+		#expect(tabs.tabStyle == .toolbar)
+		#expect(tabs.tabViewItems.map(\.label) == ["General", "Shortcuts", "Privacy"])
+		#expect(r.controller.settings() === window)
+	}
+
 	@Test func loginItemCoversRegisterUnregisterApprovalAndError() throws {
 		let r = try AppRig()
 		r.controller.shell.setLogin(true)

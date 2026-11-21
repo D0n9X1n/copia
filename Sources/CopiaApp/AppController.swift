@@ -353,16 +353,18 @@ public final class AppController {
 	}
 
 	public func openSettings() {
-		if settingsWindow == nil {
-			let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(model: shell, pickApp: Self.pickApp)))
-			window.title = "Copia Settings"
-			window.styleMask = [.titled, .closable]
-			window.isReleasedWhenClosed = false
-			window.center()
-			settingsWindow = window
-		}
+		let window = settings()
+		if !window.isVisible { window.center() }
 		NSApp.activate()
-		settingsWindow?.makeKeyAndOrderFront(nil)
+		window.makeKeyAndOrderFront(nil)
+	}
+
+	/// The one Settings window, made on first use and kept after it closes.
+	func settings() -> NSWindow {
+		if let settingsWindow { return settingsWindow }
+		let window = SettingsView.makeSettingsWindow(model: shell, pickApp: Self.pickApp)
+		settingsWindow = window
+		return window
 	}
 
 	public func openOnboarding() {
