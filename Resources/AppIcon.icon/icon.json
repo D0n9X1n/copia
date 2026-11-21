@@ -1,8 +1,8 @@
 {
   "fill": {
     "linear-gradient": [
-      "display-p3:0.93943,0.56472,0.35133,1.00000",
-      "display-p3:0.84028,0.32147,0.22384,1.00000"
+      "display-p3:0.71440,0.49450,0.97025,1.00000",
+      "display-p3:0.38364,0.15943,0.80706,1.00000"
     ]
   },
   "groups": [
@@ -10,13 +10,18 @@
       "name": "Front",
       "layers": [
         {
-          "name": "Details",
-          "image-name": "card-front-details.svg",
+          "name": "Pegs",
+          "image-name": "pegs.svg",
+          "glass": false
+        },
+        {
+          "name": "Front details",
+          "image-name": "front-details.svg",
           "glass": false
         },
         {
           "name": "Front card",
-          "image-name": "card-front.svg",
+          "image-name": "front-card.svg",
           "glass": true
         }
       ],
@@ -30,13 +35,18 @@
       }
     },
     {
-      "name": "Middle",
+      "name": "Side cards",
       "layers": [
         {
-          "name": "Middle card",
-          "image-name": "card-middle.svg",
+          "name": "Side details",
+          "image-name": "side-details.svg",
+          "glass": false
+        },
+        {
+          "name": "Side cards",
+          "image-name": "side-cards.svg",
           "glass": true,
-          "opacity": 0.85
+          "opacity": 0.84
         }
       ],
       "shadow": {
@@ -45,26 +55,26 @@
       },
       "translucency": {
         "enabled": true,
-        "value": 0.45
+        "value": 0.35
       }
     },
     {
-      "name": "Back",
+      "name": "Line",
       "layers": [
         {
-          "name": "Back card",
-          "image-name": "card-back.svg",
-          "glass": true,
-          "opacity": 0.7
+          "name": "Line",
+          "image-name": "line.svg",
+          "glass": false,
+          "opacity": 0.75
         }
       ],
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.25
+        "opacity": 0.2
       },
       "translucency": {
-        "enabled": true,
-        "value": 0.6
+        "enabled": false,
+        "value": 0
       }
     }
   ],

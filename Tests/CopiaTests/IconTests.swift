@@ -39,12 +39,33 @@ import CopiaFixtures
 	static let assets = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 		.appendingPathComponent("Resources/AppIcon.icon/Assets")
 
-	/// The front card's header is persimmon at 18%, not an opaque band.
-	@Test func theFrontCardHeaderIsAnEighteenPercentPersimmonBand() throws {
-		let svg = try String(contentsOf: Self.assets.appendingPathComponent("card-front-details.svg"), encoding: .utf8)
+	/// Garland keeps the chosen violet header and three ink bars on its front card.
+	@Test func garlandFrontCardHasItsVioletHeaderAndThreeBars() throws {
+		let svg = try String(contentsOf: Self.assets.appendingPathComponent("front-details.svg"), encoding: .utf8)
 		let rects = svg.matches(of: /<rect\b[^>]*>/).map { String($0.output) }
-		let header = try #require(rects.first { $0.contains("fill=\"#FF6A3D\"") }, "no persimmon rect in \(rects)")
-		#expect(header.contains("height=\"104\""))
-		#expect(header.contains("fill-opacity=\"0.18\""), "\(header)")
+		let header = try #require(rects.first { $0.contains("fill=\"#8A3CF0\"") })
+		#expect(header.contains("height=\"74\""))
+		#expect(!header.contains("fill-opacity"))
+		#expect(rects.filter { $0.contains("fill=\"#1D1D1F\"") && $0.contains("fill-opacity=\"0.2\"") }.count == 3)
+	}
+
+	@Test func garlandHasThreeYellowPegsAndACurvedLine() throws {
+		let pegs = try String(contentsOf: Self.assets.appendingPathComponent("pegs.svg"), encoding: .utf8)
+		#expect(pegs.matches(of: /fill="#FFD54A"/).count == 3)
+		let line = try String(contentsOf: Self.assets.appendingPathComponent("line.svg"), encoding: .utf8)
+		#expect(line.contains("M150 268Q512 420 874 268"))
+		#expect(line.contains("stroke-width=\"16\""))
+	}
+
+	@Test func garlandPackageReferencesEveryLayerInFrontToBackOrder() throws {
+		let data = try Data(contentsOf: Self.assets.deletingLastPathComponent().appendingPathComponent("icon.json"))
+		let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+		let groups = try #require(json["groups"] as? [[String: Any]])
+		let layers = groups.flatMap { $0["layers"] as? [[String: Any]] ?? [] }
+		let names = layers.compactMap { $0["image-name"] as? String }
+		#expect(names == ["pegs.svg", "front-details.svg", "front-card.svg", "side-details.svg", "side-cards.svg", "line.svg"])
+		for name in names { #expect(FileManager.default.fileExists(atPath: Self.assets.appendingPathComponent(name).path)) }
+		#expect(layers.filter { $0["glass"] as? Bool == true }.compactMap { $0["image-name"] as? String }
+			== ["front-card.svg", "side-cards.svg"])
 	}
 }

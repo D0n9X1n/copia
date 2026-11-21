@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/media/icon-dark.png">
-  <img src=".github/media/icon-light.png" alt="Copia icon: three stacked cards in a persimmon-to-raspberry gradient, the front one showing two lines of text" width="144" height="144"/>
+  <img src=".github/media/icon-light.png" alt="Copia Garland icon: three cards hanging from a curved line with yellow pegs on a violet gradient" width="144" height="144"/>
 </picture>
 
 # Copia
