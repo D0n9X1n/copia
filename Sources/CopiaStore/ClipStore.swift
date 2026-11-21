@@ -231,6 +231,8 @@ public actor ClipStore {
 				// The blob cannot go back to trash. It is home, so finish the restore rather than leave a blob without a
 				// row for cleanup to delete; a thumbnail that did not come home is asked for again.
 				if (try? insertRestored(deleted, thumbnailHome: movedThumb)) != nil { return }
+				// shortcut: if the database also refuses this insert, the blob stays home without a row and the next
+				// cleanup removes it as an orphan. Closing that needs cleanup to spare home files of keys still in undo.
 				throw failure
 			}
 			if movedThumb { try? files.move(thumbURL(key), to: trashedThumb) }
