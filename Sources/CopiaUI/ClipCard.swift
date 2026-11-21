@@ -40,13 +40,84 @@ struct CardPresentation {
 	/// A pending preview shows the kind symbol at 30% so a card is never blank.
 	var placeholderOpacity: Double { 0.30 }
 
-	/// What a card without its preview shows: the symbol plus a filename or URL.
+	/// What a card without its preview shows: the symbol plus a link's title, a filename or the text.
 	var fallback: String? {
 		guard clip.preview == .failed else { return nil }
-		return clip.url?.absoluteString ?? clip.fileNames.first ?? clip.text
+		return clip.kind == .link ? title : (clip.fileNames.first ?? clip.text)
 	}
 
 	var footer: String { clip.meta }
+
+	/// What the body draws. Rich text stays plain text (with its RTF meta) for this release.
+	enum BodyKind: Equatable { case code, prose, image, link, file, color }
+
+	var bodyKind: BodyKind {
+		switch clip.kind {
+		case .text, .richText: clip.isCode ? .code : .prose
+		case .image: .image
+		case .link: .link
+		case .file: .file
+		case .color: .color
+		}
+	}
+
+	/// The saved image the card decodes: a thumbnail, or a link's site icon.
+	var previewURL: URL? {
+		switch clip.preview {
+		case let .ready(url), let .icon(url): url
+		case .pending, .failed: nil
+		}
+	}
+
+	// MARK: Links
+
+	enum LinkArt: Equatable { case hero(URL), favicon(URL), glyph }
+
+	var linkArt: LinkArt {
+		switch clip.preview {
+		case let .ready(url): .hero(url)
+		case let .icon(url): .favicon(url)
+		case .pending, .failed: .glyph
+		}
+	}
+
+	var faviconSide: CGFloat { 32 }
+	/// A link's title (its URL when the page had none), shown in every preview state.
+	var title: String { clip.text }
+	var titleLines: Int { 2 }
+
+	// MARK: Files
+
+	var fileThumbnailSide: CGFloat { 96 }
+	/// The first file's saved QuickLook thumbnail.
+	var fileThumbnail: URL? {
+		guard clip.kind == .file, case let .ready(url) = clip.preview else { return nil }
+		return url
+	}
+	/// Layers in the offset stack: one per file, at most three.
+	var fileStack: Int { min(max(clip.fileNames.count, 1), 3) }
+	var fileCount: String? { clip.fileNames.count > 1 ? "+\(clip.fileNames.count - 1)" : nil }
+
+	// MARK: Direction
+
+	/// Natural alignment: right-to-left text aligns to the right.
+	var textDirection: LayoutDirection { Self.direction(of: clip.text) }
+
+	/// The direction of the first strong (letter) character, as natural alignment decides it.
+	static func direction(of text: String) -> LayoutDirection {
+		for scalar in text.unicodeScalars.prefix(500) where scalar.properties.isAlphabetic {
+			return isRightToLeft(scalar) ? .rightToLeft : .leftToRight
+		}
+		return .leftToRight
+	}
+
+	private static func isRightToLeft(_ scalar: Unicode.Scalar) -> Bool {
+		switch scalar.value {
+		// Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, Arabic Extended, presentation forms.
+		case 0x0590...0x08FF, 0xFB1D...0xFDFF, 0xFE70...0xFEFF, 0x10800...0x10FFF, 0x1E800...0x1EFFF: true
+		default: false
+		}
+	}
 }
 
 /// One history card: 216×232, header 40 / body 164 / footer 28.
@@ -159,10 +230,7 @@ private struct CardBody: View {
 	/// Bumped when a background decode lands; the image itself lives only in the size-limited cache.
 	@State private var decoded = 0
 
-	private var previewURL: URL? {
-		if case let .ready(url) = clip.preview { return url }
-		return nil
-	}
+	private var previewURL: URL? { presentation.previewURL }
 
 	/// The thumbnail if the cache holds it. Cards never keep their own copy, so the 24 MB cap is the real cap.
 	private var thumbnail: NSImage? {
@@ -182,17 +250,14 @@ private struct CardBody: View {
 	}
 
 	@ViewBuilder private var content: some View {
-		switch clip.kind {
-		case .text, .richText: textBody
+		switch presentation.bodyKind {
+		case .code: codeBody
+		case .prose: proseBody
 		case .image: imageBody
 		case .link: linkBody
 		case .file: fileBody
 		case .color: colorBody
 		}
-	}
-
-	@ViewBuilder private var textBody: some View {
-		if clip.isCode { codeBody } else { proseBody }
 	}
 
 	private var codeBody: some View {
@@ -223,6 +288,8 @@ private struct CardBody: View {
 			.truncationMode(presentation.textTruncation)
 			.multilineTextAlignment(.leading)
 			.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+			// Natural alignment: leading follows the text's own direction.
+			.environment(\.layoutDirection, presentation.textDirection)
 			.padding(12)
 			.mask {
 				LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.82),
@@ -256,14 +323,14 @@ private struct CardBody: View {
 				.padding(10)
 				.background(Checkerboard())
 		} else {
-			placeholder(caption: clip.preview == .failed ? clip.text : nil)
+			placeholder(caption: presentation.fallback)
 				.transition(.opacity)
 		}
 	}
 
 	@ViewBuilder private var linkBody: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			if let image = thumbnail {
+			if case .hero = presentation.linkArt, let image = thumbnail {
 				Image(nsImage: image)
 					.resizable()
 					.aspectRatio(contentMode: .fill)
@@ -272,18 +339,29 @@ private struct CardBody: View {
 			} else {
 				ZStack {
 					RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous).fill(Theme.field)
-					Image(systemName: clip.preview == .pending ? "link" : "globe")
-						.font(.system(size: 30, weight: .regular))
-						.foregroundStyle(Theme.ink.opacity(presentation.placeholderOpacity + 0.15))
+					if case .favicon = presentation.linkArt, let icon = thumbnail {
+						// A saved site icon: a 32 pt favicon, no preview image.
+						Image(nsImage: icon)
+							.resizable()
+							.interpolation(.high)
+							.aspectRatio(contentMode: .fit)
+							.frame(width: presentation.faviconSide, height: presentation.faviconSide)
+							.clipShape(.rect(cornerRadius: 6, style: .continuous))
+					} else {
+						Image(systemName: presentation.symbol)
+							.font(.system(size: 30, weight: .regular))
+							.foregroundStyle(Theme.ink.opacity(presentation.placeholderOpacity + 0.15))
+					}
 				}
 				.frame(width: 192, height: 100)
 			}
-			Text(presentation.fallback ?? clip.text)
+			Text(presentation.title)
 				.font(.system(size: 13, weight: .semibold))
 				.foregroundStyle(Theme.ink)
-				.lineLimit(2)
+				.lineLimit(presentation.titleLines)
 				.truncationMode(.tail)
 				.frame(maxWidth: .infinity, alignment: .leading)
+				.environment(\.layoutDirection, presentation.textDirection)
 		}
 		.padding(12)
 		.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -292,21 +370,21 @@ private struct CardBody: View {
 	@ViewBuilder private var fileBody: some View {
 		VStack(spacing: 10) {
 			ZStack {
-				ForEach(Array(clip.fileNames.prefix(3).enumerated().reversed()), id: \.offset) { offset, name in
-					fileIcon(name)
+				ForEach((0..<presentation.fileStack).reversed(), id: \.self) { offset in
+					fileLayer(offset)
 						.offset(x: CGFloat(offset) * 10, y: CGFloat(-offset) * 6)
 						.opacity(offset == 0 ? 1 : 0.85)
 				}
 			}
-			.frame(height: 96)
+			.frame(height: presentation.fileThumbnailSide)
 			HStack(spacing: 6) {
 				Text(clip.fileNames.first ?? clip.text)
 					.font(.system(size: 12, weight: .medium))
 					.foregroundStyle(Theme.ink)
 					.lineLimit(1)
 					.truncationMode(presentation.fileNameTruncation)
-				if clip.fileNames.count > 1 {
-					Text("+\(clip.fileNames.count - 1)")
+				if let count = presentation.fileCount {
+					Text(count)
 						.font(.system(size: 11, weight: .semibold).monospacedDigit())
 						.foregroundStyle(Theme.ink)
 						.padding(.horizontal, 6).padding(.vertical, 2)
@@ -318,10 +396,25 @@ private struct CardBody: View {
 		.frame(maxWidth: .infinity, maxHeight: .infinity)
 	}
 
-	private func fileIcon(_ name: String) -> some View {
-		let ext = (name as NSString).pathExtension
-		let icon = NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
-		return Image(nsImage: icon).resizable().interpolation(.high).frame(width: 84, height: 84)
+	/// One layer of the file stack: the saved QuickLook thumbnail in front when there is one, else the type icon.
+	@ViewBuilder private func fileLayer(_ offset: Int) -> some View {
+		let side = presentation.fileThumbnailSide
+		if offset == 0, presentation.fileThumbnail != nil, let image = thumbnail {
+			Image(nsImage: image)
+				.resizable()
+				.interpolation(.high)
+				.aspectRatio(contentMode: .fit)
+				.frame(maxWidth: side, maxHeight: side)
+				.clipShape(.rect(cornerRadius: 4, style: .continuous))
+				.shadow(color: .black.opacity(0.18), radius: 1.5, y: 0.5)
+				.frame(width: side, height: side)
+		} else {
+			let names = clip.fileNames.isEmpty ? [clip.text] : clip.fileNames
+			let ext = (names[min(offset, names.count - 1)] as NSString).pathExtension
+			Image(nsImage: NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data))
+				.resizable().interpolation(.high).frame(width: 84, height: 84)
+				.frame(width: side, height: side)
+		}
 	}
 
 	private var colorBody: some View {
