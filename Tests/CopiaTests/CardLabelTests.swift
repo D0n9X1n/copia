@@ -57,13 +57,15 @@ import CopiaFixtures
 
 	/// Real Text accessibility frames, not a duplicated header layout. Yesterday is the longest age label;
 	/// with Rich Text it already needs truncation at 1.4×. At 6× both labels must truncate.
-	@Test func grownHeadersStayInsideTheirCardAndTailTruncateWithoutOverlap() async throws {
+	@Test(arguments: [1.0, 2.0]) func grownHeadersStayInsideTheirCardAndTailTruncateWithoutOverlap(displayScale: CGFloat) async throws {
 		AccessibilityNode.enableInProcess()
 		#expect(Set(Fixtures.mixed.map(\.kind)) == Set(ClipKind.allCases))
 		for growth in [1.4, 6.0] {
 			for var clip in Fixtures.mixed {
 				clip.timestamp = Fixtures.now.addingTimeInterval(-86_400)
-				let host = NSHostingView(rootView: card(clip, growth: growth))
+				// AX and renderer geometry must use the same layout scale, independent of the attached screen.
+				let renderedCard = card(clip, growth: growth).environment(\.displayScale, displayScale)
+				let host = NSHostingView(rootView: renderedCard)
 				let window = NSWindow(contentRect: CGRect(origin: CGPoint(x: -6000, y: -6000), size: Theme.cardSize),
 					styleMask: .borderless, backing: .buffered, defer: false)
 				window.isReleasedWhenClosed = false
@@ -118,7 +120,7 @@ import CopiaFixtures
 				}
 				.frame(width: Theme.cardSize.width, height: Theme.cardSize.height)
 				.environment(\.colorScheme, .light)
-				let r = try render([AnyView(card(clip, growth: growth)), AnyView(reference)])
+				let r = try render([AnyView(renderedCard), AnyView(reference.environment(\.displayScale, displayScale))])
 				#expect(difference(r, x: 40..<204, y: 1..<39) <= 24, "\(type), \(time)")
 			}
 		}
