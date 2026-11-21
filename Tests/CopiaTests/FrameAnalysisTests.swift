@@ -82,6 +82,27 @@ import Testing
 		#expect(luma.pixels[2] > 40 && luma.pixels[2] < 70)
 	}
 
+	@Test func regionDifferenceLooksOnlyInsideTheRegion() {
+		let a = Luma(width: 4, height: 4, fill: 10)
+		var b = a
+		b[0, 0] = 110 // outside rows 2..<4
+		b[3, 3] = 50
+		#expect(a.meanDifference(b, rows: 2..<4, columns: 0..<4) == 5)
+		#expect(a.meanDifference(b, rows: 0..<1, columns: 0..<1) == 100)
+	}
+
+	@Test func bestShiftReportsItsCostEvenWhenItIsHigh() {
+		let match = FrameAnalysis.bestShift(rows: 0..<70, columns: 0..<90, of: Self.reference, in: Self.wallpaper,
+			axis: .vertical, shifts: 0...69, minOverlap: 8)
+		#expect(match != nil)
+		#expect((match?.cost ?? 0) > 4)
+		let frame = Self.moved(Self.reference, by: 9, axis: .vertical, over: Self.wallpaper)
+		let found = FrameAnalysis.bestShift(rows: 0..<70, columns: 0..<90, of: Self.reference, in: frame,
+			axis: .vertical, shifts: 0...69, minOverlap: 8)
+		#expect(found?.shift == 9)
+		#expect(found?.cost == 0)
+	}
+
 	@Test func identicalCropsHashAlikeAndAOnePixelChangeDoesNot() {
 		var other = Self.reference
 		#expect(other.hash() == Self.reference.hash())

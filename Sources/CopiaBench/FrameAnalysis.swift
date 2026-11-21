@@ -44,6 +44,16 @@ struct Luma: Equatable, Sendable {
 		return Double(sum) / Double(pixels.count)
 	}
 
+	/// Mean absolute difference per pixel inside `rows` × `columns`.
+	func meanDifference(_ other: Luma, rows: Range<Int>, columns: Range<Int>) -> Double {
+		guard !rows.isEmpty, !columns.isEmpty else { return 0 }
+		var sum = 0
+		for y in rows {
+			for x in columns { sum += abs(Int(self[x, y]) - Int(other[x, y])) }
+		}
+		return Double(sum) / Double(rows.count * columns.count)
+	}
+
 	/// FNV-1a over the pixels: equal crops hash alike, any change almost surely does not.
 	func hash() -> UInt64 {
 		var h: UInt64 = 0xcbf2_9ce4_8422_2325
@@ -64,14 +74,22 @@ enum FrameAnalysis {
 	/// than `maxCost` (mean absolute luma difference). `step` samples every n-th point across the axis.
 	static func locate(rows: Range<Int>, columns: Range<Int>, of reference: Luma, in frame: Luma, axis: Axis,
 		shifts: ClosedRange<Int>, minOverlap: Int, maxCost: Double, step: Int = 1) -> Int? {
+		guard let best = bestShift(rows: rows, columns: columns, of: reference, in: frame, axis: axis, shifts: shifts,
+			minOverlap: minOverlap, step: step), best.cost <= maxCost else { return nil }
+		return best.shift
+	}
+
+	/// The lowest-cost shift and its cost, however high; nil only when no shift leaves `minOverlap` lines in the frame.
+	static func bestShift(rows: Range<Int>, columns: Range<Int>, of reference: Luma, in frame: Luma, axis: Axis,
+		shifts: ClosedRange<Int>, minOverlap: Int, step: Int = 1) -> (shift: Int, cost: Double)? {
 		var best: (shift: Int, cost: Double)?
+		let lines = axis == .vertical ? rows : columns
+		let limit = axis == .vertical ? frame.height : frame.width
+		let across = axis == .vertical ? columns : rows
 		for shift in shifts {
 			// Lines along the axis that land inside the frame after the shift.
-			let lines = axis == .vertical ? rows : columns
-			let limit = axis == .vertical ? frame.height : frame.width
 			let visible = max(lines.lowerBound, -shift)..<min(lines.upperBound, limit - shift)
 			guard visible.count >= minOverlap else { continue }
-			let across = axis == .vertical ? columns : rows
 			let samples = visible.count * ((across.count + step - 1) / step)
 			let budget = (best?.cost ?? .infinity) * Double(samples)
 			var sum = 0
@@ -85,8 +103,7 @@ enum FrameAnalysis {
 			let cost = Double(sum) / Double(samples)
 			if cost < (best?.cost ?? .infinity) { best = (shift, cost) }
 		}
-		guard let best, best.cost <= maxCost else { return nil }
-		return best.shift
+		return best
 	}
 
 	/// Seconds from `trigger` to the first frame after which every error stays within `tolerance`.
