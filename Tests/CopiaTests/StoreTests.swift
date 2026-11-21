@@ -360,6 +360,36 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(fileCount(dir, "blobs") == 0)
 	}
 
+	/// A recopy of the same content whose row the database refuses must not remove the payload a failed restore left
+	/// home: it is the same bytes and still the undo's only copy. Protection stays, the hourly pass spares it, and the
+	/// undo restores the clip whole once the database accepts rows again.
+	@Test func aFailedRecopyKeepsAFailedRestoresPayload() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
+		try await store.rejectNewRows(true)
+		await #expect(throws: StoreError.self) { try await store.insert(text("keep me")) }
+		try await store.rejectNewRows(false)
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(fileCount(dir, "blobs") == 1)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") == 1)
+		try await store.restore(deleted)
+		try await expectWhole(store, dir, clip)
+	}
+
+	/// A failed insert of new content still leaves no blob behind.
+	@Test func aFailedInsertOfNewContentLeavesNoBlob() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try await store.rejectNewRows(true)
+		await #expect(throws: StoreError.self) { try await store.insert(text("new")) }
+		try await store.rejectNewRows(false)
+		#expect(fileCount(dir, "blobs") == 0)
+		#expect(try await store.ftsKeys().isEmpty)
+		try await store.insert(text("new"))
+		#expect(fileCount(dir, "blobs") == 1)
+	}
+
 	/// Once the clip is back, by a retried restore or a recopy, the key's files are no longer spared: a blob a later
 	/// prune could not remove is cleaned up by the hourly pass.
 	@Test(arguments: ["restore", "recopy"])

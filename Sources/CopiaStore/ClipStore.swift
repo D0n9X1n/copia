@@ -155,7 +155,9 @@ public actor ClipStore {
 		do {
 			try insertRow(clip)
 		} catch {
-			try? files.remove(blobURL(key))
+			// A protected key's blob is a failed restore's payload: same content, so the same bytes, and still the
+			// undo's only copy. It stays, and so does its protection.
+			if !protectedUndo.contains(key) { try? files.remove(blobURL(key)) }
 			throw error
 		}
 		// A recopy of a deleted item ends its undo, so its trashed files go once the new copy is saved.
@@ -465,6 +467,13 @@ public actor ClipStore {
 
 	/// Tests: the next write statement fails, so its transaction rolls back.
 	func failNextWrite() { writeFault = true }
+
+	/// Tests: while on, the database refuses new clip rows only, so an insert fails after its generation and blob write.
+	func rejectNewRows(_ on: Bool) throws {
+		try Self.exec(db, on
+			? "CREATE TEMP TRIGGER IF NOT EXISTS reject_new_rows BEFORE INSERT ON clips BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+			: "DROP TRIGGER IF EXISTS temp.reject_new_rows;")
+	}
 
 	/// Only "no such file" means a file is absent; a permission or I/O failure does not.
 	static func isNoSuchFile(_ error: Error) -> Bool {
