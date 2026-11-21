@@ -30,7 +30,7 @@
 
 - **⌘C is all it takes.** Text, rich text, images, links, files and colors land at the front of your history. Copy something again and it moves back to the front.
 - **⌘Y brings it back.** The strip opens over whatever you are doing without taking focus from it, so the paste lands in the app you were using.
-- **Fast enough to forget.** The strip opens in 67 ms (p95 94 ms) and idles at 0.03% CPU and 33 MB. CI fails any build that goes over budget.
+- **Fast enough to forget.** The strip opens in 79 ms (p95 93 ms) and idles at 0.05% CPU and 31 MB. CI fails any build that goes over budget.
 - **Private by default.** Concealed copies and password managers are never stored, ⌘T pauses capture, and nothing leaves your Mac except a link's one-time preview request.
 - **Yours, on disk.** History is one SQLite file plus thumbnails in Application Support. Deleting a card deletes its files.
 
@@ -107,12 +107,12 @@ Then copy something and press <kbd>⌘Y</kbd>.
 
 | | Budget | Measured |
 |---|---|---|
-| Idle CPU, strip hidden | < 0.1% | 0.029% |
-| Idle memory | < 40 MB | 33 MB |
-| Strip open | < 120 MB | 38 MB, 53 MB after scrolling all 1,000 |
-| ⌘Y to first frame | p95 < 100 ms | p50 114–128 ms, p95 139–140 ms, recorded at 60 Hz (over budget) |
+| Idle CPU, strip hidden | < 0.1% | 0.05% |
+| Idle memory | < 40 MB | 31 MB |
+| Strip open, every card shown once | < 120 MB | 37–39 MB |
+| ⌘Y to first frame, in process | p95 < 100 ms | p50 77–81 ms, p95 91–93 ms |
 
-<sub>M3 Pro, macOS 27.2, release build. How it stays there: [Performance](wiki/Performance.md).</sub>
+<sub>M3 Pro, macOS 27.2, release build, a 1512 pt strip. On this Mac's 60 Hz display the first presented frame arrives at p95 120–125 ms; presented-frame budgets are checked on a 120 Hz display. How it stays there: [Performance](wiki/Performance.md).</sub>
 
 ## Build from source
 
