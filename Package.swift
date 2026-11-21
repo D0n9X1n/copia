@@ -1,0 +1,25 @@
+// swift-tools-version: 6.4
+import PackageDescription
+
+let package = Package(
+	name: "Copia",
+	platforms: [.macOS(.v27)],
+	products: [
+		.executable(name: "Copia", targets: ["Copia"]),
+		.executable(name: "copia-render", targets: ["CopiaRender"]),
+	],
+	dependencies: [
+		.package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "3.1.0"),
+	],
+	targets: [
+		.target(name: "CopiaCore"),
+		.target(
+			name: "CopiaUI",
+			dependencies: ["CopiaCore", .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")]
+		),
+		.target(name: "CopiaFixtures", dependencies: ["CopiaCore"]),
+		.executableTarget(name: "Copia", dependencies: ["CopiaUI", "CopiaFixtures"]),
+		.executableTarget(name: "CopiaRender", dependencies: ["CopiaUI", "CopiaFixtures"]),
+		.testTarget(name: "CopiaTests", dependencies: ["CopiaCore", "CopiaUI", "CopiaFixtures"]),
+	]
+)
