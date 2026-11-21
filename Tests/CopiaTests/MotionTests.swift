@@ -21,4 +21,32 @@ import Testing
 	@Test func everyEventHasAnEntry() {
 		#expect(MotionEvent.allCases.count == 8)
 	}
+
+	@Test func openSlidesUpFromBelowItsFullHeightWithoutAFade() {
+		#expect(StripMotion.openOffset(appeared: false, reduced: false) >= Theme.panelHeight)
+		#expect(StripMotion.openOffset(appeared: true, reduced: false) == 0)
+		#expect(StripMotion.openOpacity(appeared: false, reduced: false) == 1)
+	}
+
+	@Test func reduceMotionOpensAndClosesWithAFadeInPlace() {
+		#expect(StripMotion.openOffset(appeared: false, reduced: true) == 0)
+		#expect(StripMotion.openOpacity(appeared: false, reduced: true) == 0)
+		#expect(StripMotion.openOpacity(appeared: true, reduced: true) == 1)
+		#expect(Motion.value(.open, reduced: true) == .linear(0.15))
+		#expect(Motion.value(.close, reduced: true) == .linear(0.15))
+	}
+
+	@Test func reduceMotionDeletesAndInsertsOnlyCrossfade() {
+		#expect(StripMotion.removingScale(removing: true, reduced: false) == StripMotion.deleteScale)
+		#expect(StripMotion.deleteScale == 0.9)
+		#expect(StripMotion.removingScale(removing: false, reduced: false) == 1)
+		#expect(StripMotion.removingScale(removing: true, reduced: true) == 1)
+		#expect(StripMotion.cardTransition(returning: false, reduced: true) == .crossfade)
+		#expect(StripMotion.cardTransition(returning: true, reduced: true) == .crossfade)
+	}
+
+	@Test func newCopiesSlideInAndUndoReversesTheDelete() {
+		#expect(StripMotion.cardTransition(returning: false, reduced: false) == .slideIn)
+		#expect(StripMotion.cardTransition(returning: true, reduced: false) == .reverseDelete)
+	}
 }

@@ -43,6 +43,8 @@ public struct StripView: View {
 	@State private var position = ScrollPosition(edge: .leading)
 	@State private var scrollX: CGFloat = 0
 	@State private var viewport: CGFloat = 0
+	/// Cards deleted while the strip is open, so an undo brings them back with the reverse of the delete.
+	@State private var departed: Set<UUID> = []
 	@Environment(\.accessibilityReduceTransparency) private var systemReduceTransparency
 	@Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 	@Environment(\.colorSchemeContrast) private var systemContrast
@@ -61,13 +63,13 @@ public struct StripView: View {
 	}
 
 	public var body: some View {
+		let _ = Diagnostics.body()
 		VStack(spacing: 0) {
 			Spacer(minLength: 0)
 			strip
 				.frame(height: Theme.panelHeight)
-				.offset(y: model.appeared ? 0 : (reduceMotion ? 0 : 56))
-				.opacity(model.appeared ? 1 : 0)
-				.scaleEffect(model.appeared || reduceMotion ? 1 : 0.985, anchor: .bottom)
+				.offset(y: StripMotion.openOffset(appeared: model.appeared, reduced: reduceMotion))
+				.opacity(StripMotion.openOpacity(appeared: model.appeared, reduced: reduceMotion))
 		}
 	}
 
@@ -131,6 +133,7 @@ public struct StripView: View {
 				LazyHStack(spacing: Theme.cardGap) {
 					ForEach(Array(visible.enumerated()), id: \.element.id) { index, clip in
 						card(clip, index: index)
+							.transition(transition(for: clip.id))
 					}
 				}
 				.padding(.horizontal, Theme.rowPadding)
@@ -142,12 +145,23 @@ public struct StripView: View {
 			.onScrollGeometryChange(for: CGSize.self) { geo in
 				CGSize(width: geo.contentOffset.x, height: geo.containerSize.width)
 			} action: { _, new in
-				scrollX = new.width == 0 ? scrollX : new.width
 				scrollX = new.width
 				viewport = new.height
 			}
-			.onChange(of: model.selectedID) { _, _ in scrollToSelection(animated: true) }
+			// The index, not the ID: a new copy at the front moves the selection without changing it.
+			.onChange(of: visible.firstIndex { $0.id == model.selectedID }) { _, _ in scrollToSelection(animated: true) }
+			.onChange(of: model.removingIDs) { _, removing in departed.formUnion(removing) }
+			.onChange(of: model.cardsMounted) { _, mounted in if !mounted { departed.removeAll() } }
 			.onAppear { scrollToSelection(animated: false) }
+		}
+	}
+
+	/// How a card enters and leaves. A card deleted this session comes back (undo) with the reverse of its delete.
+	private func transition(for id: UUID) -> AnyTransition {
+		switch StripMotion.cardTransition(returning: departed.contains(id), reduced: reduceMotion) {
+		case .crossfade: .opacity
+		case .slideIn: .asymmetric(insertion: .move(edge: .leading).combined(with: .opacity), removal: .opacity)
+		case .reverseDelete: .scale(scale: StripMotion.deleteScale).combined(with: .opacity)
 		}
 	}
 
@@ -156,7 +170,8 @@ public struct StripView: View {
 		let tint = clip.sourceBundleID == nil ? Theme.neutralTint : sources.tint(for: clip.sourceBundleID)
 		return ClipCard(clip: clip, tint: tint, icon: sources.icon(for: clip.sourceBundleID),
 			badge: model.badge(for: clip.id), hovered: model.hoveredID == clip.id, selected: selected,
-			removing: model.removingIDs.contains(clip.id), now: now(), highlight: model.query, thumbnails: thumbnails)
+			removing: model.removingIDs.contains(clip.id), now: now(), highlight: model.query, thumbnails: thumbnails,
+			animator: model.animator)
 			.background {
 				if selected {
 					RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
@@ -195,8 +210,9 @@ public struct StripView: View {
 		let target = PanelLayout.offset(selectedMinX: PanelLayout.cardMinX(index: index), viewport: viewport,
 			current: scrollX, contentWidth: PanelLayout.contentWidth(count: model.visibleClips.count))
 		guard abs(target - scrollX) > 0.5 else { return }
-		if animated, !reduceMotion, let animation = Motion.value(.lens, reduced: false).animation {
-			withAnimation(animation) { position.scrollTo(x: target) }
+		if animated, !reduceMotion {
+			// Through the Animator, so the curve comes from the Motion table and tests see it.
+			model.animator.run(.lens, { position.scrollTo(x: target) }, {})
 		} else {
 			position.scrollTo(x: target)
 		}

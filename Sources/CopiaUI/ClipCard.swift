@@ -132,17 +132,23 @@ struct ClipCard: View {
 	let now: Date
 	let highlight: String
 	let thumbnails: ThumbnailCache
+	/// Runs the preview fade-in, so it comes from the Motion table and tests see it.
+	let animator: Animator
 
 	@Environment(\.colorSchemeContrast) private var contrast
 	@Environment(\.colorScheme) private var scheme
+	@Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 	@Environment(\.copiaOverrides) private var overrides
 	private var highContrast: Bool { overrides.highContrast ?? (contrast == .increased) }
+	private var reduceMotion: Bool { overrides.reduceMotion ?? systemReduceMotion }
 	private var p: CardPresentation { CardPresentation(clip: clip) }
 
 	var body: some View {
+		let _ = Diagnostics.body()
 		VStack(spacing: 0) {
 			header
-			CardBody(clip: clip, presentation: p, highContrast: highContrast, highlight: highlight, thumbnails: thumbnails)
+			CardBody(clip: clip, presentation: p, highContrast: highContrast, highlight: highlight, thumbnails: thumbnails,
+				animator: animator)
 				.frame(width: Theme.cardSize.width, height: Theme.bodyHeight)
 			footer
 		}
@@ -155,7 +161,7 @@ struct ClipCard: View {
 		}
 		.shadow(color: .black.opacity(selected ? 0.18 : (scheme == .dark ? 0.30 : 0.10)),
 			radius: selected ? 9 : 4, y: selected ? 6 : 2)
-		.scaleEffect(removing ? 0.9 : 1)
+		.scaleEffect(StripMotion.removingScale(removing: removing, reduced: reduceMotion))
 		.opacity(removing ? 0 : 1)
 	}
 
@@ -227,6 +233,7 @@ private struct CardBody: View {
 	let highContrast: Bool
 	let highlight: String
 	let thumbnails: ThumbnailCache
+	let animator: Animator
 	/// Bumped when a background decode lands; the image itself lives only in the size-limited cache.
 	@State private var decoded = 0
 
@@ -245,7 +252,8 @@ private struct CardBody: View {
 			.task(id: previewURL) {
 				guard let url = previewURL, !shown else { return }
 				guard await thumbnails.load(url) != nil else { return }
-				withAnimation(.linear(duration: 0.15)) { decoded += 1 }
+				// The loading fade comes from the Motion table, through the Animator.
+				animator.run(.loading, { decoded += 1 }, {})
 			}
 	}
 
