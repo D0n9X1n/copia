@@ -12,9 +12,11 @@ import SwiftUI
 	/// Alpha (0...1) at each point, in points from the top-left of the rendered image.
 	static func alpha(at points: [CGPoint], removing: Bool = false) throws -> [Double] {
 		_ = NSApplication.shared
-		let renderer = ImageRenderer(content: LensRing(removing: removing)
-			.frame(width: Theme.cardSize.width, height: Theme.cardSize.height)
-			.padding(margin))
+		// Both lenses in one image: a second ImageRenderer of the same view can return the first render's content.
+		func tile(_ removing: Bool) -> some View {
+			LensRing(removing: removing).frame(width: Theme.cardSize.width, height: Theme.cardSize.height).padding(margin)
+		}
+		let renderer = ImageRenderer(content: HStack(spacing: 0) { tile(false); tile(true) })
 		renderer.scale = 1
 		let image = try #require(renderer.cgImage)
 		let (width, height) = (image.width, image.height)
@@ -24,7 +26,7 @@ import SwiftUI
 			bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
 		context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 		return points.map { point in
-			let (x, y) = (Int(point.x), Int(point.y))
+			let (x, y) = (Int(point.x + (removing ? Theme.cardSize.width + 2 * margin : 0)), Int(point.y))
 			return Double(pixels[(y * width + x) * 4 + 3]) / 255
 		}
 	}
