@@ -112,6 +112,18 @@ import CopiaFixtures
 		#expect(StripView.stripOpacity(appeared: model.appeared, closing: model.isClosing, reduced: false) == 0)
 	}
 
+	@Test func theOpenSlideDoesNotRebuildTheStripOrItsCards() async {
+		let host = StripHost(appear: false)
+		defer { host.close() }
+		await host.settle()
+		// No suspension from here on, so no other test can touch the counter.
+		let before = Diagnostics.bodyEvaluations
+		host.model.animateIn()
+		host.window.contentView?.layoutSubtreeIfNeeded()
+		#expect(host.model.appeared)
+		#expect(Diagnostics.bodyEvaluations == before)
+	}
+
 	@Test func stripAndCardBodiesCountTheirEvaluations() {
 		_ = NSApplication.shared
 		let window = NSWindow(contentRect: CGRect(x: -6000, y: -6000, width: 600, height: Theme.panelHeight),

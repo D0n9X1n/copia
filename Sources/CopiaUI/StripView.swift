@@ -66,10 +66,7 @@ public struct StripView: View {
 		let _ = Diagnostics.body()
 		VStack(spacing: 0) {
 			Spacer(minLength: 0)
-			strip
-				.frame(height: Theme.panelHeight)
-				.offset(y: StripMotion.openOffset(appeared: model.appeared, reduced: reduceMotion))
-				.opacity(Self.stripOpacity(appeared: model.appeared, closing: model.isClosing, reduced: reduceMotion))
+			StripSlide(model: model, reduced: reduceMotion) { strip.frame(height: Theme.panelHeight) }
 		}
 	}
 
@@ -257,6 +254,20 @@ public struct StripView: View {
 			.shadow(color: .black.opacity(0.2), radius: 12, y: 4)
 			.transition(.move(edge: .bottom).combined(with: .opacity))
 		}
+	}
+}
+
+/// Moves and fades the strip for open and close. It alone reads the open state, so the slide does not rebuild the
+/// strip or its cards on the first frames after ⌘Y.
+private struct StripSlide<Content: View>: View {
+	let model: StripModel
+	let reduced: Bool
+	@ViewBuilder let content: Content
+
+	var body: some View {
+		content
+			.offset(y: StripMotion.openOffset(appeared: model.appeared, reduced: reduced))
+			.opacity(StripView.stripOpacity(appeared: model.appeared, closing: model.isClosing, reduced: reduced))
 	}
 }
 
