@@ -105,6 +105,27 @@ final class AppRig {
 		#expect(r.controller.model.clips.isEmpty)
 	}
 
+	@Test func aFailedEraseIsShownInSettings() async throws {
+		let r = try AppRig()
+		try await r.copy("kept")
+		let blobs = r.dir.appendingPathComponent("blobs")
+		try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: blobs.path)
+		defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blobs.path) }
+		await r.controller.erase()
+		#expect(r.controller.shell.eraseError != nil)
+		#expect(r.titles().isEmpty)
+	}
+
+	/// A link saved with only its site icon shows that icon; without the file it falls back to the link glyph.
+	@Test func aLinkWithOnlyASiteIconShowsIt() {
+		let s = StoredClip(key: String(repeating: "ab", count: 32), kind: .link, title: "example.com", previewText: "", isCode: false, sourceBundle: nil,
+			sourceName: nil, firstCopied: .now, lastCopied: .now, copyCount: 1, byteSize: 1, meta: "", colorHex: nil,
+			url: "https://example.com", fileNames: [], previewState: .okNoImage, generation: 1)
+		let icon = URL(fileURLWithPath: "/tmp/k.png")
+		#expect(AppController.clip(from: s, thumbnail: icon).preview == .icon(icon))
+		#expect(AppController.clip(from: s, thumbnail: nil).preview == .failed)
+	}
+
 	@Test func searchFindsTextBeyondTheCardPreview() async throws {
 		let r = try AppRig()
 		try await r.copy(String(repeating: "filler ", count: 200) + "needle")

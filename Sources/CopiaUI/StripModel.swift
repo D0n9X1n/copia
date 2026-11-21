@@ -215,8 +215,13 @@ public final class StripModel {
 		await paste(id: visible[position - 1].id, plain: plain)
 	}
 
+	/// One paste at a time: a second would rewrite the clipboard before the first one's ⌘V.
+	private var isPasting = false
+
 	private func paste(id: UUID, plain: Bool) async {
-		guard !isClosing else { return }
+		guard !isClosing, !isPasting else { return }
+		isPasting = true
+		defer { isPasting = false }
 		do {
 			let result = try await actions.paste(id, plain) { [weak self] in self?.beginClose() }
 			if result == .accessibilityRequired { show(.accessibilityRequired) }

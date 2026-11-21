@@ -263,7 +263,8 @@ public final class AppController {
 		let preview: CopiaCore.Preview = switch s.previewState {
 		case .pending: .pending
 		case .ok: thumbnail.map { .ready($0) } ?? (s.kind == .image || s.kind == .file ? .failed : .pending)
-		case .okNoImage, .failed: .failed
+		case .okNoImage: s.kind == .link ? thumbnail.map { .icon($0) } ?? .failed : .failed
+		case .failed: .failed
 		}
 		return Clip(id: ClipDraft.uuid(forKey: s.key), kind: s.kind, text: s.title, isCode: s.isCode,
 			sourceName: s.sourceName, sourceBundleID: s.sourceBundle, timestamp: s.lastCopied, meta: s.meta,
@@ -284,7 +285,12 @@ public final class AppController {
 
 	/// Erases all history after the user confirmed.
 	func erase() async {
-		try? await store.eraseAll()
+		do {
+			try await store.eraseAll()
+			shell.eraseError = nil
+		} catch {
+			shell.eraseError = "Some saved files could not be removed. Quit Copia and delete ~/Library/Application Support/Copia to finish."
+		}
 		index.noteErased()
 		model.cancelUndo(for: index.takeEndedUndos())
 		await reload()

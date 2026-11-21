@@ -211,6 +211,30 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") + fileCount(dir, "trash") == 0)
 	}
 
+	/// A read that fails part-way must not look like an empty history: launch cleanup would then delete every file.
+	@Test func aFailedReadStopsSweepBeforeItRemovesAnything() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("keep me"))
+		await store.failNextStep()
+		await #expect(throws: StoreError.self) { try await store.sweep() }
+		#expect(fileCount(dir, "blobs") == 1)
+		#expect(try await store.fetch(clip.key)?.title == "keep me")
+		await store.failNextStep()
+		await #expect(throws: StoreError.self) { try await store.recent() }
+	}
+
+	/// Erase removes everything it can, then reports a file it could not remove instead of claiming success.
+	@Test func eraseReportsAFileItCouldNotRemove() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (stuck, _) = try await store.insert(text("stuck"))
+		try await store.insert(text("other"))
+		files.failRemoveContaining = stuck.key
+		await #expect(throws: StoreError.filesLeft(1)) { try await store.eraseAll() }
+		#expect(try await store.recent().isEmpty)
+		#expect(fileCount(dir, "blobs") == 1)
+	}
+
 	@Test func searchHandlesShortQueriesAndLiteralSpecialCharacters() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
 		let (a, _) = try await store.insert(text("50% off_today \"quoted\""))

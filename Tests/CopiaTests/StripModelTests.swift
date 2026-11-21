@@ -79,6 +79,40 @@ final class StripRig {
 	}
 }
 
+/// Holds a paste mid-flight so a second request can arrive while the first waits for the target app.
+@MainActor
+final class PasteGate {
+	var waiting: [CheckedContinuation<Void, Never>] = []
+	var started: [UUID] = []
+	func release() { waiting.forEach { $0.resume() }; waiting = [] }
+}
+
+@MainActor
+@Suite struct PasteOverlapTests {
+	/// Two quick pastes (⌘1 then ⌘2) must not both write: the second would replace the first's payload before its ⌘V.
+	@Test func aSecondPasteWhileOneIsInFlightIsIgnored() async {
+		let model = StripModel(clips: Fixtures.mixed, animator: .immediate)
+		let gate = PasteGate()
+		model.actions = StripActions(
+			paste: { id, _, _ in
+				gate.started.append(id)
+				await withCheckedContinuation { gate.waiting.append($0) }
+				return .pasted
+			},
+			copy: { _ in }, delete: { _ in }, restore: { _, _ in }, openAccessibilitySettings: {})
+		model.open()
+		let first = Task { await model.paste(position: 1, plain: false) }
+		while gate.waiting.isEmpty { await Task.yield() }
+		let second = Task { await model.paste(position: 2, plain: false) }
+		for _ in 0..<50 { await Task.yield() }
+		gate.release()
+		await first.value
+		gate.release()
+		await second.value
+		#expect(gate.started == [Fixtures.mixed[0].id])
+	}
+}
+
 @MainActor
 @Suite struct StripModelTests {
 	@Test func arrowsStopAtTheEnds() {

@@ -35,6 +35,8 @@ public enum StoreError: Error, Equatable {
 	case sqlite(String)
 	case missingBlob
 	case alreadyExists
+	/// Erase cleared the history but could not remove this many files.
+	case filesLeft(Int)
 }
 
 /// A stored clip as the store sees it.
@@ -231,12 +233,19 @@ public actor ClipStore {
 		return keys.count
 	}
 
+	/// Clears every row, then every file. A file that cannot be removed is reported, not hidden.
 	public func eraseAll() throws {
 		try transaction {
 			try run("DELETE FROM clips", [])
 			try run("DELETE FROM clips_fts", [])
 		}
-		for dir in [blobs, thumbs, trash] { for url in files.list(dir) { try? files.remove(url) } }
+		var left = 0
+		for dir in [blobs, thumbs, trash] {
+			for url in files.list(dir) {
+				do { try files.remove(url) } catch { left += 1 }
+			}
+		}
+		if left > 0 { throw StoreError.filesLeft(left) }
 	}
 
 	/// Launch cleanup: empty trash, drop files without rows and rows without blobs.
@@ -356,6 +365,19 @@ public actor ClipStore {
 	}
 
 	private var inTransaction = false
+	private var stepFault = false
+
+	/// Tests: the next read step fails as SQLite would on a busy or damaged database.
+	func failNextStep() { stepFault = true }
+
+	/// Steps a read. Any result but a row or the end throws, so a failed read never looks like an empty one.
+	private func nextRow(_ statement: OpaquePointer?) throws -> Bool {
+		let code = stepFault ? SQLITE_IOERR : sqlite3_step(statement)
+		stepFault = false
+		if code == SQLITE_ROW { return true }
+		guard code == SQLITE_DONE else { throw StoreError.sqlite(String(cString: sqlite3_errstr(code))) }
+		return false
+	}
 
 	func transaction(_ body: () throws -> Void) throws {
 		if inTransaction { return try body() }
@@ -400,7 +422,7 @@ public actor ClipStore {
 		let statement = try prepare(sql, values)
 		defer { sqlite3_finalize(statement) }
 		var result: [String] = []
-		while sqlite3_step(statement) == SQLITE_ROW {
+		while try nextRow(statement) {
 			result.append(String(cString: sqlite3_column_text(statement, 0)))
 		}
 		return result
@@ -411,7 +433,7 @@ public actor ClipStore {
 		defer { sqlite3_finalize(statement) }
 		var result: [StoredClip] = []
 		func text(_ i: Int32) -> String? { sqlite3_column_text(statement, i).map { String(cString: $0) } }
-		while sqlite3_step(statement) == SQLITE_ROW {
+		while try nextRow(statement) {
 			result.append(StoredClip(
 				key: text(0) ?? "", kind: ClipKind(rawValue: text(1) ?? "") ?? .text, title: text(2) ?? "",
 				previewText: text(3) ?? "", isCode: sqlite3_column_int(statement, 4) != 0, sourceBundle: text(5), sourceName: text(6),
