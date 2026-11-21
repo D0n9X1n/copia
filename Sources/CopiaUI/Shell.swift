@@ -143,43 +143,32 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
 	}
 }
 
+/// One Settings pane. `makeSettingsWindow` puts the three panes in the window's toolbar tabs.
 public struct SettingsView: View {
 	public static let width: CGFloat = 560
+	/// Each pane's height; the toolbar tabs sit above it.
+	public static let height: CGFloat = 320
 	@Bindable var model: ShellModel
 	let pickApp: () -> String?
-	@State private var tab: SettingsTab = .general
+	let tab: SettingsTab
 	@State private var selectedApp: String?
 
-	public init(model: ShellModel, pickApp: @escaping () -> String? = { nil }, initialTab: SettingsTab = .general) {
+	public init(model: ShellModel, pickApp: @escaping () -> String? = { nil }, tab: SettingsTab = .general) {
 		self.model = model
 		self.pickApp = pickApp
-		_tab = State(initialValue: initialTab)
+		self.tab = tab
 	}
 
 	public var body: some View {
-		VStack(spacing: 0) {
-			Picker("", selection: $tab) {
-				ForEach(SettingsTab.allCases) { t in Label(t.title, systemImage: t.symbol).tag(t) }
+		Group {
+			switch tab {
+			case .general: general
+			case .shortcuts: shortcuts
+			case .privacy: privacy
 			}
-			.pickerStyle(.segmented)
-			.labelsHidden()
-			.padding([.top, .horizontal], 20)
-			Group {
-				switch tab {
-				case .general: general
-				case .shortcuts: shortcuts
-				case .privacy: privacy
-				}
-			}
-			.formStyle(.grouped)
 		}
-		.frame(width: Self.width, height: 360)
-		.confirmationDialog("Erase history?", isPresented: $model.eraseConfirmation) {
-			Button("Erase", role: .destructive) { model.confirmErase() }
-			Button("Cancel", role: .cancel) { model.cancelErase() }
-		} message: {
-			Text("This permanently deletes every saved item and its previews.")
-		}
+		.formStyle(.grouped)
+		.frame(width: Self.width, height: Self.height)
 	}
 
 	private var general: some View {
@@ -199,6 +188,12 @@ public struct SettingsView: View {
 				}
 				Button("Erase History…", role: .destructive) { model.requestErase() }
 			}
+		}
+		.confirmationDialog("Erase history?", isPresented: $model.eraseConfirmation) {
+			Button("Erase", role: .destructive) { model.confirmErase() }
+			Button("Cancel", role: .cancel) { model.cancelErase() }
+		} message: {
+			Text("This permanently deletes every saved item and its previews.")
 		}
 	}
 
