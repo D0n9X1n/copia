@@ -136,6 +136,9 @@ enum RenderRunner {
 		if only.map({ "shell".contains($0) || $0.hasPrefix("1") }) ?? true {
 			manifest += try await renderShell(output: output, screen: screen, stage: visible, wallpaper: wallpaper)
 		}
+		if only.map({ "12-icon-review".contains($0) }) ?? true {
+			manifest.append(try renderIconReview(output: output))
+		}
 		let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
 		try data.write(to: output.appendingPathComponent("manifest.json"))
 	}
@@ -277,6 +280,22 @@ enum RenderRunner {
 			}
 		}
 		return rows
+	}
+
+	/// The app icon from `Resources/AppIcon.icon` at 1024, 128, 32 and 16 px on a light and a dark row, as
+	/// `scripts/render-icon.swift` lays it out. Composed from Icon Composer's exports: no window, no screen capture.
+	static func renderIconReview(output: URL) throws -> [String: Any] {
+		let assets = output.appendingPathComponent("assets")
+		try AppIcons.export(to: assets)
+		let light = try AppIcons.padded(assets.appendingPathComponent("icon-Default.png"), pixels: 1024)
+		let dark = try AppIcons.padded(assets.appendingPathComponent("icon-Dark.png"), pixels: 1024)
+		guard let sheet = IconReview.sheet(light: light, dark: dark) else { throw RenderError.captureFailed("12-icon-review") }
+		let ctx = try AppIcons.context(width: sheet.width, height: sheet.height)
+		ctx.draw(sheet, in: CGRect(x: 0, y: 0, width: sheet.width, height: sheet.height))
+		let url = output.appendingPathComponent("12-icon-review.png")
+		try AppIcons.write(ctx, to: url)
+		print("rendered 12-icon-review")
+		return ["scene": "12-icon-review", "file": url.lastPathComponent]
 	}
 
 	/// A titled window around `view` that always draws as key.

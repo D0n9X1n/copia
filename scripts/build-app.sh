@@ -69,8 +69,9 @@ if [ "$SIGN" = 1 ]; then
 	codesign --verify --deep --strict "$APP"
 fi
 
-lipo -archs "$APP/Contents/MacOS/Copia"
 if [ "$CONFIG" = release ]; then
+	# A release build must hold both slices; a debug build is the host slice only.
+	"$ROOT/scripts/check-archs.sh" "$APP/Contents/MacOS/Copia"
 	rm -f "$DIST/Copia-$VERSION.zip"
 	ditto -c -k --keepParent "$APP" "$DIST/Copia-$VERSION.zip"
 	echo "$DIST/Copia-$VERSION.zip"

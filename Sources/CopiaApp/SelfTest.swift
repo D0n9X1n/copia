@@ -15,10 +15,28 @@ public enum SelfTest {
 		var frontmostBundleID: String?
 		var panelScreen: String?
 		var mouseScreen: String?
-		var stripInsideVisibleFrame: Bool
-		var panelFrameMatchesStrip: Bool
+		var panelFrame: String
+		var visibleFrame: String?
+		var frameProblems: [String]
 		var typedQuery: String
 		var cardsMountedAfterClose: Bool
+	}
+
+	/// The panel must be exactly `PanelLayout.windowFrame(in:)` for its screen's visible frame, and lie inside that frame.
+	/// Half a point of slack allows for backing-scale rounding.
+	static func frameViolations(panel: CGRect, visible: CGRect) -> [String] {
+		let slack: CGFloat = 0.5
+		let expected = PanelLayout.windowFrame(in: visible)
+		func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) <= slack }
+		var problems: [String] = []
+		if !(near(panel.minX, expected.minX) && near(panel.minY, expected.minY)
+			&& near(panel.width, expected.width) && near(panel.height, expected.height)) {
+			problems.append("panel frame \(panel) is not the layout frame \(expected)")
+		}
+		if !visible.insetBy(dx: -slack, dy: -slack).contains(panel) {
+			problems.append("panel frame \(panel) leaves the visible frame \(visible)")
+		}
+		return problems
 	}
 
 	public static func run(controller: AppController, output: URL, hold: Double) async -> Int32 {
@@ -40,7 +58,10 @@ public enum SelfTest {
 				try? await Task.sleep(for: .milliseconds(cycle == 0 && index == 0 ? Int(hold * 1000) : 250))
 				let mouse = NSEvent.mouseLocation
 				let mouseScreen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-				let strip = PanelLayout.stripFrame(in: controller.panel.screen?.visibleFrame ?? .zero)
+				// The frame the strip should fill: the screen it opened on, or the benchmark's override.
+				let visible = controller.visibleFrameOverride ?? controller.panel.screen?.visibleFrame
+				let frameProblems = visible.map { Self.frameViolations(panel: controller.panel.frame, visible: $0) }
+					?? ["panel is on no screen"]
 				// Type one character through the window server's key path, as a user would.
 				let typed = Self.type("q", into: controller.panel)
 				try? await Task.sleep(for: .milliseconds(60))
@@ -51,8 +72,8 @@ public enum SelfTest {
 					panelVisible: controller.panel.isVisible, panelIsKey: controller.panel.isKeyWindow,
 					copiaIsFrontmost: front?.processIdentifier == ownPID, frontmostBundleID: front?.bundleIdentifier,
 					panelScreen: controller.panel.screen?.localizedName, mouseScreen: mouseScreen?.localizedName,
-					stripInsideVisibleFrame: controller.panel.screen.map { $0.visibleFrame.contains(strip) } ?? false,
-					panelFrameMatchesStrip: controller.panel.screen.map { controller.panel.frame.contains(strip) && $0.frame.contains(controller.panel.frame) } ?? false,
+					panelFrame: NSStringFromRect(controller.panel.frame), visibleFrame: visible.map(NSStringFromRect),
+					frameProblems: frameProblems,
 					typedQuery: typed ? query : "<not sent>",
 					cardsMountedAfterClose: false)
 				controller.toggleHistory()
@@ -66,8 +87,7 @@ public enum SelfTest {
 				if !sample.panelIsKey { violations.append("\(tag): panel not key, typing would not reach search") }
 				if sample.copiaIsFrontmost { violations.append("\(tag): Copia became the active app") }
 				if sample.panelScreen != sample.mouseScreen { violations.append("\(tag): opened on \(sample.panelScreen ?? "nil"), mouse on \(sample.mouseScreen ?? "nil")") }
-				if !sample.stripInsideVisibleFrame { violations.append("\(tag): strip outside the visible frame") }
-				if !sample.panelFrameMatchesStrip { violations.append("\(tag): panel frame \(controller.panel.frame) does not hold the strip on its screen") }
+				for problem in sample.frameProblems { violations.append("\(tag): \(problem)") }
 				if sample.typedQuery != "q" { violations.append("\(tag): typing reached \"\(sample.typedQuery)\", not the search") }
 				if sample.cardsMountedAfterClose { violations.append("\(tag): still visible after close") }
 			}
@@ -75,7 +95,7 @@ public enum SelfTest {
 		if let savedMouse { CGWarpMouseCursorPosition(savedMouse) }
 
 		let report: [String: Any] = [
-			"schema": 2,
+			"schema": 3,
 			// A full-screen Space cannot be entered from a script reliably; run the same check by hand over one.
 			"fullScreenSpace": "manual",
 			"displays": NSScreen.screens.count,
