@@ -542,7 +542,6 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 	/// An 8000×8000 PNG (brief:79) through the real capture, store and thumbnail path: its footer gives its size,
 	/// and its saved thumbnail is at most 384 px, enough for a 192 pt card at 2×.
 	@Test func an8000PixelImageIsCapturedStoredAndThumbnailed() async throws {
-		let started = ContinuousClock.now
 		let png = try Self.solidPNG(side: 8000)
 		let pb = FakePasteboard()
 		var drafts: [ClipDraft] = []
@@ -565,7 +564,8 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		let image = try #require(NSBitmapImageRep(data: try Data(contentsOf: thumb)))
 		#expect(max(image.pixelsWide, image.pixelsHigh) <= 384)
 		#expect(image.pixelsWide == image.pixelsHigh)
-		#expect(ContinuousClock.now - started < .seconds(2))
+		#expect(previewer.stats.decodes == 1)
+		#expect(previewer.stats.priorities == [.utility])
 	}
 
 	/// A solid 8-bit grayscale PNG: 64 MB to draw, a few hundred KB encoded.
