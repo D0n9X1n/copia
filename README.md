@@ -110,7 +110,7 @@ Then copy something and press <kbd>⌘Y</kbd>.
 | Idle CPU, strip hidden | < 0.1% | 0.029% |
 | Idle memory | < 40 MB | 33 MB |
 | Strip open | < 120 MB | 38 MB, 53 MB after scrolling all 1,000 |
-| ⌘Y to first frame | p95 < 100 ms | p50 67 ms, p95 94 ms |
+| ⌘Y to first frame | p95 < 100 ms | p50 114–128 ms, p95 139–140 ms, recorded at 60 Hz (over budget) |
 
 <sub>M3 Pro, macOS 27.2, release build. How it stays there: [Performance](wiki/Performance.md).</sub>
 
