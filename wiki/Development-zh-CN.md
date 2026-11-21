@@ -44,8 +44,13 @@ swift build -c release --arch arm64 --arch x86_64
 
 ### 发布
 
+发布版由 GitHub Actions 构建并签名，不会从本地 `dist/` 上传任何文件。
+
 1. CI 通过后合并发布用的拉取请求。
-2. 运行 `scripts/build-app.sh`，并用 `codesign --verify --deep --strict dist/Copia.app` 验证。记录 `spctl -a -vv dist/Copia.app` 的结果。
-3. 把 `dist/Copia-0.0.1.zip` 解压到一个新的临时文件夹，设置隔离属性，在那里打开它，并确认快捷键录制器能显示文字。
-4. 在已签名的应用上手动检查：在文本编辑中复制，然后 ⌘Y 加 ↩ 能粘贴；图片和链接卡片显示已保存的预览；删除卡片会把它的文件从 `~/Library/Application Support/Copia` 中移除；全新的引导在授予辅助功能权限后会更新；登录时启动的状态能读回；重新绑定的快捷键会替换旧的；卡片栏能在全屏应用上方打开。
-5. 打标签 `v0.0.1` 并运行 `gh release create v0.0.1 dist/Copia-0.0.1.zip`。
+2. 推送标签：`git tag v0.0.1 && git push origin v0.0.1`。`.github/workflows/release.yml` 会运行测试、构建通用应用、用 `release` 环境中保存的证书签名并验证，然后把 `Copia-0.0.1.zip` 及其 SHA-256 发布为 GitHub Release。日志中会显示 `spctl -a -vv` 的结果。
+3. 把 zip 下载到一个新的临时文件夹，在那里打开，并确认快捷键录制器能显示文字。
+4. 在这个应用上手动检查：在文本编辑中复制，然后 ⌘Y 加 ↩ 能粘贴；图片和链接卡片显示已保存的预览；删除卡片会把它的文件从 `~/Library/Application Support/Copia` 中移除；全新的引导在授予辅助功能权限后会更新；登录时启动的状态能读回；重新绑定的快捷键会替换旧的；卡片栏能在全屏应用上方打开。
+
+一次性签名设置（在推送第一个标签之前）：在“钥匙串访问”中，只把“Apple Development”证书连同私钥导出为带密码的 `.p12`，然后在终端中运行 `scripts/setup-release-signing.sh path/to/certificate.p12`。它会创建只允许 `v*` 标签使用的 `release` 环境，把证书和密码存为该环境的密钥，并以不回显的方式询问密码。完成后删除 `.p12`。拉取请求和分支构建永远看不到这些密钥；CI 中的构建不签名。
+
+这个构建使用 Apple Development 证书签名，因此各个版本保持同一身份（更新后辅助功能权限仍然有效），但没有经过公证。公证需要付费 Apple Developer Program 提供的 Developer ID 证书。

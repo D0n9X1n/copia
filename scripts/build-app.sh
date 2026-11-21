@@ -5,7 +5,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-VERSION="0.0.1"
+# The release workflow passes the tag's version; local builds default to the current one.
+VERSION="${COPIA_VERSION:-0.0.1}"
 IDENTITY="${COPIA_SIGN_IDENTITY:-Apple Development}"
 SIGN=1
 CONFIG=release
@@ -61,7 +62,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 if [ "$SIGN" = 1 ]; then
-	codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp=none "$APP"
+	# A secure timestamp (release builds) keeps the signature valid after the certificate expires; it needs the network.
+	TIMESTAMP=--timestamp=none
+	[ "${COPIA_TIMESTAMP:-0}" = 1 ] && TIMESTAMP=--timestamp
+	codesign --force --deep --sign "$IDENTITY" --options runtime "$TIMESTAMP" "$APP"
 	codesign --verify --deep --strict "$APP"
 fi
 

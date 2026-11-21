@@ -44,8 +44,13 @@ The icon is an Icon Composer package: three SVG card layers over a persimmon-to-
 
 ### Release
 
+Releases are built and signed by GitHub Actions; nothing is uploaded from a local `dist/`.
+
 1. Merge the release pull request after CI passes.
-2. Run `scripts/build-app.sh` and verify with `codesign --verify --deep --strict dist/Copia.app`. Record `spctl -a -vv dist/Copia.app`.
-3. Unzip `dist/Copia-0.0.1.zip` into a new temporary folder, set the quarantine attribute, open it there and check the Shortcuts recorder shows its labels.
-4. Check by hand on the signed app: copy in TextEdit, then ⌘Y and ↩ pastes it; image and link cards show saved previews; deleting a card removes its files from `~/Library/Application Support/Copia`; a fresh onboarding updates after granting Accessibility; Launch at login reads back; a rebound shortcut replaces the old one; the strip opens over a full-screen app.
-5. Tag `v0.0.1` and run `gh release create v0.0.1 dist/Copia-0.0.1.zip`.
+2. Push a tag: `git tag v0.0.1 && git push origin v0.0.1`. `.github/workflows/release.yml` runs the tests, builds the universal app, signs it with the certificate stored in the `release` environment, verifies it, and publishes `Copia-0.0.1.zip` with its SHA-256 as a GitHub Release. The log shows the `spctl -a -vv` verdict.
+3. Download the zip into a new temporary folder, open it there and check that the Shortcuts recorder shows its labels.
+4. Check by hand on that app: copy in TextEdit, then ⌘Y and ↩ pastes it; image and link cards show saved previews; deleting a card removes its files from `~/Library/Application Support/Copia`; a fresh onboarding updates after granting Accessibility; Launch at login reads back; a rebound shortcut replaces the old one; the strip opens over a full-screen app.
+
+One-time signing setup, before the first tag: in Keychain Access, export only the "Apple Development" certificate with its private key as a `.p12` with a password, then run `scripts/setup-release-signing.sh path/to/certificate.p12` in a terminal. It creates the `release` environment, which only `v*` tags can use, stores the certificate and password as its secrets, and asks for the password without echoing it. Delete the `.p12` afterwards. Pull requests and branch builds never see the secrets; CI builds them unsigned.
+
+The build is signed with an Apple Development certificate, so it keeps one identity across releases (Accessibility stays granted after an update) but is not notarized. Notarization needs a Developer ID certificate from the paid Apple Developer Program.
