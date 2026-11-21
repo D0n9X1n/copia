@@ -204,11 +204,45 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 	@Test func eraseRemovesEverything() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
 		let (clip, _) = try await store.insert(text("a1"))
-		try await store.insert(text("b2"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		let (other, _) = try await store.insert(text("b2"))
+		try await store.setPreview(key: other.key, generation: other.generation, state: .ok, image: Data([2]))
 		_ = try await store.delete(clip.key)
+		#expect(fileCount(dir, "thumbs") == 1)
+		#expect(fileCount(dir, "trash") == 2)
 		try await store.eraseAll()
 		#expect(try await store.recent().isEmpty)
+		#expect(try await store.ftsKeys().isEmpty)
 		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") + fileCount(dir, "trash") == 0)
+	}
+
+	/// Checked in the FTS table itself: search joins on the clips table, so it would hide a leftover entry.
+	@Test func deletePruneAndEraseLeaveNoFtsEntry() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (deleted, _) = try await store.insert(text("deleted one", at: 1_000))
+		let (expired, _) = try await store.insert(text("expired one", at: 100))
+		let (kept, _) = try await store.insert(text("kept one", at: 1_000))
+		#expect(Set(try await store.ftsKeys()) == [deleted.key, expired.key, kept.key])
+		_ = try await store.delete(deleted.key)
+		#expect(Set(try await store.ftsKeys()) == [expired.key, kept.key])
+		try await store.prune(before: Date(timeIntervalSince1970: 500))
+		#expect(try await store.ftsKeys() == [kept.key])
+		try await store.eraseAll()
+		#expect(try await store.ftsKeys().isEmpty)
+	}
+
+	@Test func pruneRemovesAnExpiredClipsThumbnail() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (old, _) = try await store.insert(text("old", at: 100))
+		try await store.setPreview(key: old.key, generation: old.generation, state: .ok, image: Data([1]))
+		let (new, _) = try await store.insert(text("new", at: 1_000))
+		try await store.setPreview(key: new.key, generation: new.generation, state: .ok, image: Data([2]))
+		#expect(fileCount(dir, "thumbs") == 2)
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 500)) == 1)
+		#expect(await store.thumbnail(for: old.key) == nil)
+		#expect(await store.thumbnail(for: new.key) != nil)
+		#expect(fileCount(dir, "thumbs") == 1)
+		#expect(fileCount(dir, "blobs") == 1)
 	}
 
 	/// A read that fails part-way must not look like an empty history: launch cleanup would then delete every file.

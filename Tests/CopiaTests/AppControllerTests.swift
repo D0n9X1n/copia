@@ -53,6 +53,10 @@ final class AppRig {
 
 	func titles() -> [String] { controller.model.clips.map(\.text) }
 
+	func fileCount(_ sub: String) -> Int {
+		(try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent(sub).path).count) ?? 0
+	}
+
 	deinit {
 		try? FileManager.default.removeItem(at: dir)
 		UserDefaults.standard.removePersistentDomain(forName: suite)
@@ -139,10 +143,15 @@ final class AppRig {
 	@Test func retentionPrunesOnTheInjectedClockEveryHour() async throws {
 		let r = try AppRig()
 		try await r.copy("old")
+		let clip = try #require(try await r.controller.store.recent().first)
+		try await r.controller.store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		#expect(r.fileCount("blobs") == 1 && r.fileCount("thumbs") == 1)
 		#expect(AppController.retentionInterval == 3_600)
 		r.controller.now = { Date.now.addingTimeInterval(40 * 86_400) }
 		await r.controller.retentionTick()
 		#expect(r.titles().isEmpty)
+		#expect(r.fileCount("blobs") == 0 && r.fileCount("thumbs") == 0)
+		#expect(try await r.controller.store.ftsKeys().isEmpty)
 	}
 
 	@Test func settingsPersist() throws {

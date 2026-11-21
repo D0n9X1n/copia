@@ -384,6 +384,9 @@ public actor ClipStore {
 	/// Tests: the next read step fails as SQLite would on a busy or damaged database.
 	func failNextStep() { stepFault = true }
 
+	/// Tests: every id in the FTS table, read directly (search joins on `clips`, so it would hide a leftover entry).
+	func ftsKeys() throws -> [String] { try strings("SELECT id FROM clips_fts", []) }
+
 	/// Steps a read. Any result but a row or the end throws, so a failed read never looks like an empty one.
 	private func nextRow(_ statement: OpaquePointer?) throws -> Bool {
 		let code = stepFault ? SQLITE_IOERR : sqlite3_step(statement)
