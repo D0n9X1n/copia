@@ -187,6 +187,23 @@ final class FakePasteboard: PasteboardSource {
 		#expect(slept == [Paster.settleMilliseconds])
 	}
 
+	/// The whole wait, settle included, stays within 300 ms: a target first seen at 290 ms has no room left to settle.
+	@Test func theWaitIncludingTheSettleNeverPasses300Milliseconds() async {
+		var slept: [Int] = []
+		var polls = 0
+		let late = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 29 ? 1 : 2 }, activate: {},
+			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+		#expect(slept.reduce(0, +) <= 300)
+		#expect(!late)
+
+		slept = []; polls = 0
+		let justInTime = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 27 ? 1 : 2 }, activate: {},
+			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+		#expect(justInTime)
+		#expect(slept.reduce(0, +) == 300)
+		#expect(slept.last == Paster.settleMilliseconds)
+	}
+
 	@Test func aTargetThatNeverComesForwardIsNotPastedInto() async {
 		var sent = false
 		let paster = Paster(pasteboard: pasteboard(), isTrusted: { true }, postPaste: { sent = true }, waitForFront: { _ in false })
