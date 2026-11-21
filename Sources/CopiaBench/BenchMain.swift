@@ -33,6 +33,12 @@ enum Bench {
 		return result == 0 ? Double(info.ri_phys_footprint) / 1_048_576 : -1
 	}
 
+	/// One to four sentences by index, so neighbouring text cards differ in length and a card that slides one slot
+	/// never matches its neighbour's slot (the delete and undo settle measures rely on this).
+	nonisolated static func seedText(_ i: Int) -> String {
+		"Benchmark history item \(i) —" + String(repeating: " The quick brown fox jumps over the lazy dog.", count: i % 4 + 1)
+	}
+
 	static func seed(_ store: ClipStore, assets: URL) async throws {
 		let images = try FixtureAssets.prepare(in: assets)
 		var pngs: [Data] = []
@@ -48,7 +54,7 @@ enum Bench {
 				data.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian, Array.init))
 				item = PasteboardItemData([(PasteboardTypes.png, data)])
 			} else {
-				item = PasteboardItemData([(PasteboardTypes.string, Data("Benchmark history item \(i) — the quick brown fox jumps over the lazy dog.".utf8))])
+				item = PasteboardItemData([(PasteboardTypes.string, Data(seedText(i).utf8))])
 			}
 			let draft = ClipDraft(items: [item], sourceBundleID: "com.apple.Notes", sourceName: "Notes",
 				copiedAt: base.addingTimeInterval(TimeInterval(i)))
