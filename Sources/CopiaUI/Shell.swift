@@ -18,6 +18,9 @@ public enum PermissionGlyph: Equatable, Sendable {
 
 	public var isGranted: Bool { self == .granted }
 	public var symbol: String { isGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill" }
+	public var label: String { isGranted ? "Access enabled" : "Access needed" }
+	/// Light mode deepens the system green and orange so the cut-out mark keeps 3:1 against the window.
+	public var tintHex: (light: UInt32, dark: UInt32) { isGranted ? (0x1A7F37, 0x30D158) : (0xB25000, 0xFF9F0A) }
 }
 
 /// Permission state shown in onboarding and Settings.
@@ -360,10 +363,16 @@ public struct OnboardingView: View {
 	private func next() { model.onboardingStep = min(model.onboardingStep + 1, OnboardingStep.allCases.count - 1) }
 
 	private func status(_ glyph: PermissionGlyph) -> some View {
-		Image(systemName: glyph.symbol)
-			.font(.system(size: 56))
-			.foregroundStyle(glyph.isGranted ? Color.green : Color.orange)
-			.contentTransition(.symbolEffect(.replace))
+		let tint = Theme.dynamic(glyph.tintHex.light, glyph.tintHex.dark)
+		return VStack(spacing: 10) {
+			Image(systemName: glyph.symbol)
+				.font(.system(size: 56))
+				.foregroundStyle(tint)
+				.contentTransition(.symbolEffect(.replace))
+				.accessibilityHidden(true)
+			Text(glyph.label).font(.system(size: 13, weight: .semibold))
+		}
+		.accessibilityElement(children: .combine)
 	}
 
 	private func page<Actions: View>(title: String, detail: String, hero: AnyView, @ViewBuilder actions: () -> Actions) -> some View {

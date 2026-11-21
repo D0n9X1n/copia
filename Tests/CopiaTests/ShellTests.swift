@@ -154,6 +154,23 @@ import SwiftUI
 		#expect(PermissionGlyph.granted.isGranted && !PermissionGlyph.needed.isGranted)
 	}
 
+	/// The check and the exclamation mark are cut out of the fill, so the fill must stand 3:1 off the window it sits on.
+	@Test func statusFillsReachNonTextContrastInBothModes() {
+		for dark in [false, true] {
+			let window = ShellThemeTests.resolved(.windowBackgroundColor, dark: dark)
+			for glyph in [PermissionGlyph.granted, .needed] {
+				let fill = Theme.rgb(dark ? glyph.tintHex.dark : glyph.tintHex.light)
+				#expect(Theme.contrast(fill, window) >= 3, "\(glyph) \(dark ? "dark" : "light")")
+			}
+		}
+	}
+
+	/// The state is said in words too, not only by colour and shape.
+	@Test func statusIsSpelledOut() {
+		#expect(PermissionGlyph.granted.label == "Access enabled")
+		#expect(PermissionGlyph.needed.label == "Access needed")
+	}
+
 	@Test func pasteboardEveryState() {
 		let expected: [(PermissionState.Pasteboard, PermissionGlyph)] = [(.unset, .needed), (.ask, .needed), (.allow, .granted), (.deny, .needed)]
 		for (state, glyph) in expected {
