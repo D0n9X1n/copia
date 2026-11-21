@@ -91,6 +91,28 @@ public enum Fixtures {
 		sourceName: "Photos", sourceBundleID: "com.apple.Photos", timestamp: ago(25), meta: "4032×3024 · JPEG",
 		preview: .pending)
 
+	/// Every mixed and extreme clip with its footer label 40% longer, as after translation (the brief's extremes list).
+	/// The original label is kept as the prefix and padded with pseudo-localized text, so a cut shows where it happened.
+	public static let expandedLabels: [Clip] = (mixed + extremes).enumerated().map { index, clip in
+		var expanded = clip
+		expanded.id = id(5, index)
+		expanded.meta = longer(clip.meta)
+		return expanded
+	}
+
+	/// `text` padded to at least 140% of its length.
+	static func longer(_ text: String) -> String {
+		let target = Int((Double(text.count) * 1.4).rounded(.up))
+		let filler = Array(" ţŕåñšļåţéđ ļåƀéļ ŵîţĥ ɱöŕé ŵöŕđš")
+		var out = text
+		var i = 0
+		while out.count < target {
+			out.append(filler[i % filler.count])
+			i += 1
+		}
+		return out
+	}
+
 	/// Ten thousand distinct text clips for lazy-row and scroll tests.
 	public static let tenThousand: [Clip] = (0..<10_000).map { i in
 		Clip(id: id(4, i), kind: .text, text: "History item \(i + 1)", sourceName: "Notes",

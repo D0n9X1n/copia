@@ -17,7 +17,7 @@ import CopiaFixtures
 }
 
 @Test func fixtureFamiliesHaveDisjointIDs() {
-	let families = [Fixtures.mixed, Fixtures.extremes, [Fixtures.failed, Fixtures.pending]]
+	let families = [Fixtures.mixed, Fixtures.extremes, [Fixtures.failed, Fixtures.pending], Fixtures.expandedLabels]
 	let all = families.flatMap { $0.map(\.id) }
 	#expect(Set(all).count == all.count)
 }
