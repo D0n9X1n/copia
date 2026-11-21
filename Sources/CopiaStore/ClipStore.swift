@@ -15,9 +15,10 @@ public protocol FileOps: Sendable {
 public struct LiveFileOps: FileOps {
 	public init() {}
 	public func write(_ data: Data, to url: URL) throws { try data.write(to: url, options: .atomic) }
+	/// rename(2): replaces the destination atomically, and leaves it alone when the source is missing, so moving a
+	/// file that is not there never removes an undo copy already in trash. Every store move stays on one volume.
 	public func move(_ from: URL, to: URL) throws {
-		if FileManager.default.fileExists(atPath: to.path) { try FileManager.default.removeItem(at: to) }
-		try FileManager.default.moveItem(at: from, to: to)
+		guard rename(from.path, to.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 	}
 	/// Only "no such file" counts as done; any other failure (permissions, I/O) is reported.
 	public func remove(_ url: URL) throws {
@@ -188,9 +189,14 @@ public actor ClipStore {
 		guard let clip = try fetch(key) else { return nil }
 		var moved: [(file: URL, trashed: URL)] = []
 		do {
-			for (file, trashed) in [(blobURL(key), trashURL(key, "plist")), (thumbURL(key), trashURL(key, "png"))] where files.exists(file) {
-				try files.move(file, to: trashed)
-				moved.append((file, trashed))
+			for (file, trashed) in [(blobURL(key), trashURL(key, "plist")), (thumbURL(key), trashURL(key, "png"))] {
+				do {
+					try files.move(file, to: trashed)
+					moved.append((file, trashed))
+				} catch let error where Self.isNoSuchFile(error) && !files.exists(file) {
+					// Only a file that is really not there is skipped: no thumbnail yet, or a blob already in trash.
+					// A file the store cannot reach fails with a permission error and fails the delete.
+				}
 			}
 			try transaction {
 				try run("DELETE FROM clips WHERE id=?", [.text(key)])
@@ -426,6 +432,13 @@ public actor ClipStore {
 
 	/// Tests: the next write statement fails, so its transaction rolls back.
 	func failNextWrite() { writeFault = true }
+
+	/// Only "no such file" means a file is absent; a permission or I/O failure does not.
+	static func isNoSuchFile(_ error: Error) -> Bool {
+		if let e = error as? POSIXError { return e.code == .ENOENT }
+		if let e = error as? CocoaError { return e.code == .fileNoSuchFile || e.code == .fileReadNoSuchFile }
+		return false
+	}
 
 	/// Tests: every id in the FTS table, read directly (search joins on `clips`, so it would hide a leftover entry).
 	func ftsKeys() throws -> [String] { try strings("SELECT id FROM clips_fts", []) }
