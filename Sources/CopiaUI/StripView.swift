@@ -125,6 +125,9 @@ public struct StripView: View {
 
 	@ViewBuilder private var content: some View {
 		let visible = model.visibleClips
+		let rows = visible.enumerated().map { slot, clip in
+			(key: StripMotion.cardKey(id: clip.id, slot: slot, reduced: reduceMotion), slot: slot, clip: clip)
+		}
 		if model.clips.isEmpty {
 			emptyState(symbol: "list.clipboard", title: "Nothing copied yet",
 				detail: "Copy anything with ⌘C and it appears here.")
@@ -133,9 +136,9 @@ public struct StripView: View {
 		} else {
 			ScrollView(.horizontal) {
 				LazyHStack(spacing: Theme.cardGap) {
-					ForEach(Array(visible.enumerated()), id: \.element.id) { index, clip in
-						card(clip, index: index)
-							.transition(transition(for: clip.id))
+					ForEach(rows, id: \.key) { row in
+						card(row.clip, index: row.slot)
+							.transition(transition(for: row.clip.id))
 					}
 				}
 				.padding(.horizontal, Theme.rowPadding)
@@ -176,19 +179,9 @@ public struct StripView: View {
 			animator: model.animator)
 			.background {
 				if selected {
-					// The halo fills the gap and edges the accent ring outside, so the ring reaches 3:1 on any glass.
-					ZStack {
-						RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
-							.fill(Theme.lensHalo)
-						RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-							.strokeBorder(Color.accentColor, lineWidth: 3)
-							.padding(Theme.lensHaloWidth)
-					}
-					.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
-					.matchedGeometryEffect(id: "lens", in: lensSpace)
+					LensRing().matchedGeometryEffect(id: "lens", in: lensSpace)
 				}
 			}
-			.id(clip.id)
 			.focusEffectDisabled()
 			.onHover { inside in
 				if inside { model.hoveredID = clip.id } else if model.hoveredID == clip.id { model.hoveredID = nil }
@@ -257,6 +250,20 @@ public struct StripView: View {
 			.shadow(color: .black.opacity(0.2), radius: 12, y: 4)
 			.transition(.move(edge: .bottom).combined(with: .opacity))
 		}
+	}
+}
+
+/// The selection lens: an accent ring edged by a halo, so the ring reaches 3:1 on any glass. Sits behind the card.
+struct LensRing: View {
+	var body: some View {
+		ZStack {
+			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
+				.fill(Theme.lensHalo)
+			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+				.strokeBorder(Color.accentColor, lineWidth: 3)
+				.padding(Theme.lensHaloWidth)
+		}
+		.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
 	}
 }
 

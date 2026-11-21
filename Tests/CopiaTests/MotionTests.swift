@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import CopiaUI
 
 @Suite struct MotionTests {
@@ -43,6 +44,16 @@ import Testing
 		#expect(StripMotion.removingScale(removing: true, reduced: true) == 1)
 		#expect(StripMotion.cardTransition(returning: false, reduced: true) == .crossfade)
 		#expect(StripMotion.cardTransition(returning: true, reduced: true) == .crossfade)
+	}
+
+	@Test func reduceMotionNeighboursCrossfadeToTheirNewSlotInsteadOfSliding() {
+		let id = UUID()
+		// A card whose slot changes gets a new identity, so it fades out in place and fades in at the new slot.
+		#expect(StripMotion.cardKey(id: id, slot: 2, reduced: true) != StripMotion.cardKey(id: id, slot: 1, reduced: true))
+		#expect(StripMotion.cardKey(id: id, slot: 1, reduced: true) == StripMotion.cardKey(id: id, slot: 1, reduced: true))
+		// With motion, a card keeps its identity and slides.
+		#expect(StripMotion.cardKey(id: id, slot: 2, reduced: false) == StripMotion.cardKey(id: id, slot: 1, reduced: false))
+		#expect(StripMotion.cardKey(id: id, slot: 0, reduced: false) != StripMotion.cardKey(id: UUID(), slot: 0, reduced: false))
 	}
 
 	@Test func newCopiesSlideInAndUndoReversesTheDelete() {

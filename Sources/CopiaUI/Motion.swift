@@ -67,6 +67,18 @@ public enum StripMotion {
 	public static func cardTransition(returning: Bool, reduced: Bool) -> CardTransition {
 		reduced ? .crossfade : (returning ? .reverseDelete : .slideIn)
 	}
+
+	/// A card's identity in the row.
+	public struct CardKey: Hashable, Sendable {
+		let id: UUID
+		let slot: Int?
+	}
+
+	/// Under Reduce Motion the slot is part of the identity: a card that changes slot crossfades out of the old one
+	/// and into the new one instead of sliding across.
+	public static func cardKey(id: UUID, slot: Int, reduced: Bool) -> CardKey {
+		CardKey(id: id, slot: reduced ? slot : nil)
+	}
 }
 
 /// Runs a state change under its table animation, then calls `completion`. Tests inject a recording spy.
