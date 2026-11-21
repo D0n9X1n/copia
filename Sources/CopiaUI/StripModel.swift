@@ -49,6 +49,8 @@ public final class StripModel {
 	public static let searchDelay: Duration = .milliseconds(120)
 	@ObservationIgnored private var undoEntry: (clip: Clip, index: Int)?
 	@ObservationIgnored private var cancelToast: ToastClock.Cancel?
+	/// Undo lasts 3 s from the delete, whatever toast is shown meanwhile.
+	@ObservationIgnored private var cancelUndoDeadline: ToastClock.Cancel?
 	@ObservationIgnored private var busy = false
 	@ObservationIgnored private var presentation = 0
 
@@ -165,6 +167,11 @@ public final class StripModel {
 			}, {})
 		})
 		undoEntry = (clip, index)
+		cancelUndoDeadline?()
+		cancelUndoDeadline = clock.after(Self.toastLifetime) { [weak self] in
+			guard let self, self.undoEntry?.clip.id == clip.id else { return }
+			self.endUndo()
+		}
 		show(.deleted)
 		announce(Toast.deleted.message)
 	}
@@ -174,7 +181,7 @@ public final class StripModel {
 	/// Ends the pending undo if it is for one of `ids`: the item was copied again or history was erased.
 	public func cancelUndo(for ids: Set<UUID>) {
 		guard let entry = undoEntry, ids.contains(entry.clip.id) else { return }
-		undoEntry = nil
+		endUndo()
 		if toast == .deleted { dismissToast() }
 	}
 
@@ -188,7 +195,7 @@ public final class StripModel {
 			show(.error("Couldn't restore: \(error.localizedDescription)"))
 			return
 		}
-		undoEntry = nil
+		endUndo()
 		dismissToast()
 		animator.run(.undo, {
 			self.removingIDs.remove(entry.clip.id)
@@ -291,7 +298,7 @@ public final class StripModel {
 		isClosing = false
 		commandHeld = false
 		hoveredID = nil
-		undoEntry = nil
+		endUndo()
 		dismissToast()
 		onCloseFinish()
 	}
@@ -304,8 +311,13 @@ public final class StripModel {
 		cancelToast = clock.after(Self.toastLifetime) { [weak self] in
 			guard let self, self.toast == newToast else { return }
 			self.toast = nil
-			if newToast == .deleted { self.undoEntry = nil }
 		}
+	}
+
+	private func endUndo() {
+		undoEntry = nil
+		cancelUndoDeadline?()
+		cancelUndoDeadline = nil
 	}
 
 	private func dismissToast() {

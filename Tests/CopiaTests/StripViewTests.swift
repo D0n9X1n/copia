@@ -87,6 +87,43 @@ import CopiaFixtures
 		}
 	}
 
+	@Test func closingSlidesDownAndFadesWhileOpeningOnlySlides() {
+		// Open with motion: a slide, no fade. Open with Reduce Motion: a fade in place.
+		#expect(StripView.stripOpacity(appeared: false, closing: false, reduced: false) == 1)
+		#expect(StripView.stripOpacity(appeared: true, closing: false, reduced: false) == 1)
+		#expect(StripView.stripOpacity(appeared: false, closing: false, reduced: true) == 0)
+		// Close: the strip fades out as it slides down, with or without Reduce Motion.
+		#expect(StripView.stripOpacity(appeared: false, closing: true, reduced: false) == 0)
+		#expect(StripView.stripOpacity(appeared: false, closing: true, reduced: true) == 0)
+	}
+
+	@Test func theCloseAnimationChangesTheStripToItsClosingState() {
+		let model = StripModel(clips: Fixtures.mixed)
+		var seen: (appeared: Bool, closing: Bool)?
+		model.animator = Animator { event, change, _ in
+			change()
+			if event == .close { seen = (model.appeared, model.isClosing) }
+		}
+		model.open()
+		model.animateIn()
+		model.beginClose()
+		// Inside the close animation the strip is not appeared and is closing: it slides down and fades.
+		#expect(seen?.appeared == false && seen?.closing == true)
+		#expect(StripView.stripOpacity(appeared: model.appeared, closing: model.isClosing, reduced: false) == 0)
+	}
+
+	@Test func theOpenSlideDoesNotRebuildTheStripOrItsCards() async {
+		let host = StripHost(appear: false)
+		defer { host.close() }
+		await host.settle()
+		// No suspension from here on, so no other test can touch the counter.
+		let before = Diagnostics.bodyEvaluations
+		host.model.animateIn()
+		host.window.contentView?.layoutSubtreeIfNeeded()
+		#expect(host.model.appeared)
+		#expect(Diagnostics.bodyEvaluations == before)
+	}
+
 	@Test func stripAndCardBodiesCountTheirEvaluations() {
 		_ = NSApplication.shared
 		let window = NSWindow(contentRect: CGRect(x: -6000, y: -6000, width: 600, height: Theme.panelHeight),

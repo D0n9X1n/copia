@@ -30,7 +30,7 @@ The bench picks its path at launch and writes it to the report as `path`:
 - **⌘Y to first frame, proxy.** The time from the toggle call until the panel is on screen and visible, its cards are mounted, a layer with committed contents lies in the row's leading card slot, and one more transaction has completed.
 - **Hidden strip.** `Diagnostics` counts SwiftUI body evaluations (StripView and ClipCard), displays and draws of the panel's counting root layer, and display-link ticks. Copia owns no display link, so that counter stays at 0 by construction. All three must stay at 0 over the idle window, with no Copia window visible. A positive control then forces a redraw while the strip is hidden (it changes a value the strip's body reads, lays out, and displays the root layer). Both the body and layer counters must rise, or the bench fails.
 - **Scroll smoothness.** A display link owned by the bench scrolls the row at 4,000 pt/s for 5 s, about 90 cards, so new cards and thumbnails are realised during the scroll. Each presented frame's card row is hashed. A frame is new when its hash differs from the previous frame's, and the window's edges count as frame intervals, so a stall at either end is caught. The same scroll at 0 pt/s is the frozen-row control and must fail the check.
-- **Motion settle.** Each motion is recorded three times with Reduce Motion forced off and three times with it forced on. The settle time runs from one refresh before the first visibly changed frame to the first frame after which the motion stays within 1% of its final frame, and the median must be ≤ the analytic settle time + 20 ms. "Within 1%" uses the measure that fits each motion. Open, delete and undo track how far the moving content is from its final position, as a fraction of its travel. The lens tracks the ring's position between two cards. Fades and crossfades track the luma distance to the final frame, as a fraction of the largest distance in the trial. The analytic time comes from the `Motion` table: the time each curve last sits more than 1% from its target, and for a delete, the fade plus the reflow it starts. The report also gives each time measured from the Animator call (`fromTriggerMs`), which adds the compositor's latency to the screen.
+- **Motion settle.** Each motion is recorded three times with Reduce Motion forced off and three times with it forced on. The settle time runs from one refresh before the first visibly changed frame to the first frame after which the motion stays within 1% of its final frame, and the median must be ≤ the analytic settle time + 20 ms. "Within 1%" uses the measure that fits each motion. Open, delete and undo track how far the moving content is from its final position, as a fraction of its travel. The lens tracks the ring's position between two cards. Fades and crossfades track the luma distance to the final frame, as a fraction of the largest distance in the trial. The analytic time comes from the `Motion` table: the time each curve last sits more than 1% from its target, and for a delete, the fade plus the reflow it starts. The report also gives each time measured from the Animator call (`fromTriggerMs`), which adds the compositor's latency to the screen. Neighbouring text clips have one to four sentences, so a card that slides one slot never matches its neighbour's slot.
 
 ### Recording scope
 
@@ -41,34 +41,32 @@ The bench picks its path at launch and writes it to the report as `path`:
 
 ### Results
 
-Measured with the default run (60 s idle, 50 opens, 3 motion rounds) on an M3 Pro, macOS 27.2, release build, the strip 2908 pt wide on a 60 Hz 5848 × 2448 display. One proxy run (`--no-sck`) and two recorded runs; "over" marks a missed budget:
+Measured with the default run (60 s idle, 50 opens, 3 motion rounds) on an M3 Pro, macOS 27.2, release build, the strip 2908 pt wide on a 60 Hz 5848 × 2448 display. Two proxy runs (`--no-sck`) and two recorded runs; "over" marks a missed budget:
 
-| Metric | Proxy | Recorded, run 1 | Recorded, run 2 |
-|---|---|---|---|
-| Idle CPU | 0.039% | 0.037% | 0.044% |
-| Idle memory | 32.5 MB | 32.5 MB | 33.2 MB |
-| Strip open, after scrolling all 1,000 clips | 54.2 MB | 49.2 MB | 49.3 MB |
-| ⌘Y to first frame | p50 60.9 ms, p95 93.6 ms | p50 111.1 ms, p95 136.1 ms (over) | p50 104.9 ms, p95 140.5 ms (over) |
-| Hidden strip: bodies, layer displays, display-link ticks | 0, 0, 0; control rose | 0, 0, 0; control rose | 0, 0, 0; control rose |
-| Scroll: new content, on-time intervals | skipped | 75.3%, 93.2% (over) | 95.4%, 94.0% (over) |
-| Frozen-row control | skipped | 0%, 74.5% (fails, as required) | 5.0%, 14.3% (fails, as required) |
+| Metric | Proxy, run 1 | Proxy, run 2 | Recorded, run 1 | Recorded, run 2 |
+|---|---|---|---|---|
+| Idle CPU | 0.058% | 0.056% | 0.044% | 0.059% |
+| Idle memory | 32.1 MB | 32.0 MB | 32.2 MB | 32.2 MB |
+| Strip open, after scrolling all 1,000 clips | 49.0 MB | 49.0 MB | 49.1 MB | 49.3 MB |
+| ⌘Y to first frame | p50 86.9 ms, p95 97.6 ms | p50 84.8 ms, p95 99.1 ms | p50 113.6 ms, p95 138.5 ms (over) | p50 128.1 ms, p95 139.7 ms (over) |
+| Hidden strip: bodies, layer displays, display-link ticks | 0, 0, 0; control rose | 0, 0, 0; control rose | 0, 0, 0; control rose | 0, 0, 0; control rose |
+| Scroll: new content, on-time intervals | skipped | skipped | 94.7%, 94.7% (over) | 96.4%, 94.0% (over) |
+| Frozen-row control | skipped | skipped | 5.0%, 23.8% (fails, as required) | 5.6%, 0% (fails, as required) |
 
 Motion settle, median of three, in ms:
 
 | Motion | Limit | Run 1 | Run 2 |
 |---|---|---|---|
-| Open | 253.6 | 250.0 | 266.7 (over) |
-| Open, Reduce Motion | 168.5 | 166.7 | 150.0 |
-| Close | 198.9 | 216.7 (over) | 216.7 (over) |
-| Close, Reduce Motion | 168.5 | 200.0 (over) | 200.0 (over) |
-| Lens | 199.6 | 200.0 (over) | 216.7 (over) |
+| Open | 253.6 | 266.7 (over) | 250.0 |
+| Open, Reduce Motion | 168.5 | 166.7 | 166.7 |
+| Close | 198.9 | 200.0 (over) | 200.0 (over) |
+| Close, Reduce Motion | 168.5 | 216.7 (over) | 200.0 (over) |
+| Lens | 199.6 | 183.3 | 200.0 (over) |
 | Lens, Reduce Motion | 20.0 | 16.7 | 16.7 |
-| Delete | 464.9 | 283.3 | 300.0 |
+| Delete | 464.9 | 300.0 | 300.0 |
 | Delete, Reduce Motion | 318.5 | 166.7 | 166.7 |
-| Undo | 205.7 | 200.0 | 200.0 |
-| Undo, Reduce Motion | 168.5 | 166.7 | 183.3 (over) |
-
-On the same machine, the proxy before it also waited for the first card's committed contents measured p50 83.3 ms and p95 99.4 ms, so the proxy is not slower.
+| Undo | 205.7 | 216.7 (over) | 233.3 (over) |
+| Undo, Reduce Motion | 168.5 | 183.3 (over) | 183.3 (over) |
 
 ### What keeps it light
 
@@ -93,8 +91,7 @@ Options: `--idle SECONDS` (default 60), `--opens N` (default 50), `--width POINT
 - The proxy cannot see presented frames. On the same machine it reads lower than the recorded ⌘Y time, which includes the window server's first composite and the slide until the first card is visible.
 - Settle times are quantised to the display's refresh interval, 16.7 ms at 60 Hz, so a 20 ms margin leaves room for about one frame.
 - The recorded checks run only locally; CI lists them under `skipped`.
-- The recorded ⌘Y time is over budget at 60 Hz: the panel's first composite reaches the screen 85–135 ms after the toggle, and the slide must bring the first card's top into view. The proxy cannot see this.
-- In the scroll, some presented frames repeat the previous card row (5–25%), and about 6% of frame intervals are longer than 1.5 refreshes.
-- Close settles one to two frames late in both modes, and the lens zero to one frame over a limit just under 200 ms.
-- Delete, in both modes, settles well under its analytic time. The cards beside the deleted one are near-identical text, so the reflow changes few pixels, and the measure may call it settled early. Treat the delete result as unverified.
-- An open's first visible frame comes after its animation has started, so the open settle time can read short, most visibly with Reduce Motion.
+- The recorded ⌘Y time is over budget at 60 Hz. In a profiled open, the toggle returns after about 12 ms. The first SwiftUI pass (about 13 cards mounted, text laid out, the lazy row placed) keeps the main thread busy until about 45 ms, when the slide starts. The panel's first frame reaches the screen about 50 ms later, and the slide needs about 20 ms more to bring the first card's top into view. Neither the row's length (100 or 1,000 clips) nor the card shadow changes this. The slide no longer rebuilds the strip and its cards, but p95 did not move.
+- In the scroll, 4–5% of presented frames repeat the previous card row, about one per new card, and about 6% of frame intervals are longer than 1.5 refreshes. The bench's display link was never late and the longest main-thread pass was about 15 ms, so the repeats come from committing and drawing each new card, not from the driver. Removing the card shadow did not change them.
+- Close and undo settle one to three frames late in both modes; open and the lens are borderline.
+- Delete settles well under its analytic time because the neighbours start sliding about 6 ms after the delete, not after the 0.2 s fade: the fade's completion fires almost at once (cause not yet found). The measure follows the sliding cards, so this is the app's behaviour, not the measure's.

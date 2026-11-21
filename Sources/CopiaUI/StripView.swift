@@ -66,11 +66,15 @@ public struct StripView: View {
 		let _ = Diagnostics.body()
 		VStack(spacing: 0) {
 			Spacer(minLength: 0)
-			strip
-				.frame(height: Theme.panelHeight)
-				.offset(y: StripMotion.openOffset(appeared: model.appeared, reduced: reduceMotion))
-				.opacity(StripMotion.openOpacity(appeared: model.appeared, reduced: reduceMotion))
+			StripSlide(model: model, reduced: reduceMotion) { strip.frame(height: Theme.panelHeight) }
 		}
+	}
+
+	/// Opening slides up without a fade (Reduce Motion fades in place). Closing slides down and fades out together,
+	/// on the close curve: `isClosing` is set before the animated change, so the fade starts from full opacity.
+	static func stripOpacity(appeared: Bool, closing: Bool, reduced: Bool) -> Double {
+		if closing { return appeared ? 1 : 0 }
+		return StripMotion.openOpacity(appeared: appeared, reduced: reduced)
 	}
 
 	@ViewBuilder private var strip: some View {
@@ -179,7 +183,7 @@ public struct StripView: View {
 			animator: model.animator)
 			.background {
 				if selected {
-					LensRing().matchedGeometryEffect(id: "lens", in: lensSpace)
+					LensRing(removing: model.removingIDs.contains(clip.id)).matchedGeometryEffect(id: "lens", in: lensSpace)
 				}
 			}
 			.focusEffectDisabled()
@@ -253,21 +257,40 @@ public struct StripView: View {
 	}
 }
 
-/// The selection lens: an accent ring edged by a halo, so the ring reaches 3:1 on any glass. Sits behind the card.
-/// The halo is a band, not a fill: it covers the gap and tucks 1 pt under the card, so a card fading out (delete)
-/// shows the glass behind it, not a solid block.
+/// Moves and fades the strip for open and close. It alone reads the open state, so the slide does not rebuild the
+/// strip or its cards on the first frames after ⌘Y.
+private struct StripSlide<Content: View>: View {
+	let model: StripModel
+	let reduced: Bool
+	@ViewBuilder let content: Content
+
+	var body: some View {
+		content
+			.offset(y: StripMotion.openOffset(appeared: model.appeared, reduced: reduced))
+			.opacity(StripView.stripOpacity(appeared: model.appeared, closing: model.isClosing, reduced: reduced))
+	}
+}
+
+/// The selection lens (brief): a 3 pt accent stroke over a 12% accent fill, radius 21, 5 pt outside the card, behind it.
+/// A halo edges the stroke outside so it stays visible on any glass. It fades with a deleting card, so the fill never
+/// shows as a block where the card was.
 struct LensRing: View {
-	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
+	var removing = false
+	static let fillOpacity = 0.12
 
 	var body: some View {
 		ZStack {
+			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+				.fill(Color.accentColor.opacity(Self.fillOpacity))
+				.padding(Theme.lensHaloWidth)
 			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
-				.strokeBorder(Theme.lensHalo, lineWidth: Self.band)
+				.strokeBorder(Theme.lensHalo, lineWidth: Theme.lensHaloWidth)
 			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
 				.strokeBorder(Color.accentColor, lineWidth: 3)
 				.padding(Theme.lensHaloWidth)
 		}
 		.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
+		.opacity(removing ? 0 : 1)
 	}
 }
 
