@@ -313,6 +313,68 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		await #expect(throws: StoreError.alreadyExists) { try await store.restore(deleted) }
 	}
 
+	/// Restore's thumbnail move fails, its blob cannot go back to trash, and the fallback insert fails too: the restore
+	/// throws with the blob home and no row, the only copy of an undo that is still valid.
+	private func failRestoreCompletely(_ store: ClipStore, _ dir: URL, _ faulty: FaultyFiles) async throws -> (StoredClip, DeletedClip) {
+		let (clip, _) = try await store.insert(text("keep me"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		let deleted = try #require(try await store.delete(clip.key))
+		faulty.failMoveContaining = "trash/\(clip.key).png"
+		faulty.failMoveFromContaining = "blobs/\(clip.key).plist"
+		await store.failNextWrite()
+		await #expect(throws: (any Error).self) { try await store.restore(deleted) }
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(fileCount(dir, "blobs") == 1 && fileCount(dir, "trash") == 1)
+		return (clip, deleted)
+	}
+
+	/// The hourly pass must not remove that blob, and retrying the undo restores the clip whole (B1:31).
+	@Test func aRestoreThatCannotFinishOrRollBackKeepsItsPayloadForARetry() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") == 1)
+		try await store.restore(deleted)
+		try await expectWhole(store, dir, clip)
+		#expect(try await store.fetch(clip.key)?.previewState == .ok)
+	}
+
+	/// Emptying trash (strip close), a sweep (launch) and an erase each end the undo: the payload a failed restore left
+	/// home goes, the undo is refused, and the key's files are ordinary orphans again.
+	@Test(arguments: ["emptyTrash", "sweep", "eraseAll"])
+	func endingTheUndoRemovesAFailedRestoresPayload(pass: String) async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
+		switch pass {
+		case "emptyTrash": await store.emptyTrash()
+		case "sweep": try await store.sweep()
+		default: try await store.eraseAll()
+		}
+		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") + fileCount(dir, "trash") == 0)
+		await #expect(throws: StoreError.missingBlob) { try await store.restore(deleted) }
+		#expect(try await store.fetch(clip.key) == nil)
+		try Data([1]).write(to: dir.appendingPathComponent("blobs/\(clip.key).plist"))
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") == 0)
+	}
+
+	/// Once the clip is back, by a retried restore or a recopy, the key's files are no longer spared: a blob a later
+	/// prune could not remove is cleaned up by the hourly pass.
+	@Test(arguments: ["restore", "recopy"])
+	func protectionEndsWhenTheClipIsBack(how: String) async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, deleted) = try await failRestoreCompletely(store, dir, faulty)
+		if how == "restore" { try await store.restore(deleted) } else { try await store.insert(text("keep me")) }
+		faulty.failRemoveContaining = "blobs/\(clip.key).plist"
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 1_900_000_000)) == 1)
+		#expect(fileCount(dir, "blobs") == 1)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") + fileCount(dir, "thumbs") == 0)
+	}
+
 	/// Undo after its trashed thumbnail was lost brings back a whole clip that asks for a new preview,
 	/// never a final preview state without its image.
 	@Test func restoreWithoutItsTrashedThumbnailAsksForANewPreview() async throws {

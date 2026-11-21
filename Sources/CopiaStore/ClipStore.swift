@@ -160,6 +160,7 @@ public actor ClipStore {
 		}
 		// A recopy of a deleted item ends its undo, so its trashed files go once the new copy is saved.
 		for ext in ["plist", "png"] { try? files.remove(trashURL(key, ext)) }
+		protectedUndo.remove(key)
 		return (clip, true)
 	}
 
@@ -217,8 +218,10 @@ public actor ClipStore {
 		guard try fetch(key) == nil else { throw StoreError.alreadyExists }
 		let trashedBlob = trashURL(key, "plist")
 		let trashedThumb = trashURL(key, "png")
-		guard files.exists(trashedBlob) else { throw StoreError.missingBlob }
-		try files.move(trashedBlob, to: blobURL(key))
+		// A retry finds the payload where an earlier failed restore left it: home, and spared from cleanup.
+		let blobHome = protectedUndo.contains(key) && files.exists(blobURL(key))
+		guard blobHome || files.exists(trashedBlob) else { throw StoreError.missingBlob }
+		if !blobHome { try files.move(trashedBlob, to: blobURL(key)) }
 		var movedThumb = false
 		do {
 			if files.exists(trashedThumb) { try files.move(trashedThumb, to: thumbURL(key)); movedThumb = true }
@@ -230,15 +233,21 @@ public actor ClipStore {
 			} catch {
 				// The blob cannot go back to trash. It is home, so finish the restore rather than leave a blob without a
 				// row for cleanup to delete; a thumbnail that did not come home is asked for again.
-				if (try? insertRestored(deleted, thumbnailHome: movedThumb)) != nil { return }
-				// shortcut: if the database also refuses this insert, the blob stays home without a row and the next
-				// cleanup removes it as an orphan. Closing that needs cleanup to spare home files of keys still in undo.
+				if (try? insertRestored(deleted, thumbnailHome: movedThumb)) != nil { protectedUndo.remove(key); return }
+				// Neither finished nor rolled back: the blob is home without a row and is this undo's only payload.
+				// Cleanup spares it and a retry uses it, until the undo ends (emptyTrash, sweep, erase, recopy).
+				protectedUndo.insert(key)
 				throw failure
 			}
+			protectedUndo.remove(key)
 			if movedThumb { try? files.move(thumbURL(key), to: trashedThumb) }
 			throw failure
 		}
+		protectedUndo.remove(key)
 	}
+
+	/// Keys whose undo payload a failed restore left home without a row. In memory only: launch starts without any.
+	private var protectedUndo: Set<String> = []
 
 	/// Inserts a restored clip's row with a new generation. A thumbnail it had that is not home makes its preview pending.
 	private func insertRestored(_ deleted: DeletedClip, thumbnailHome: Bool) throws {
@@ -254,6 +263,9 @@ public actor ClipStore {
 	public func emptyTrash() {
 		guard let keys = try? Set(strings("SELECT id FROM clips", [])), let listed = try? files.list(trash) else { return }
 		emptyTrash(listed, live: keys)
+		// Emptying trash ends every undo, including one whose payload a failed restore left home.
+		for key in protectedUndo.subtracting(keys) { try? files.remove(blobURL(key)); try? files.remove(thumbURL(key)) }
+		protectedUndo.removeAll()
 	}
 
 	/// Moves each trash file whose key has a live row back to its empty home path, then removes every other trash
@@ -301,6 +313,7 @@ public actor ClipStore {
 			try run("DELETE FROM clips", [])
 			try run("DELETE FROM clips_fts", [])
 		}
+		protectedUndo.removeAll()
 		var left = 0
 		for dir in [blobs, thumbs, trash] {
 			guard let urls = try? files.list(dir) else { left += 1; continue }
@@ -316,7 +329,9 @@ public actor ClipStore {
 	public func removeOrphans() throws {
 		let keys = Set(try strings("SELECT id FROM clips", []))
 		emptyTrash(((try? files.list(trash)) ?? []).filter { keys.contains($0.deletingPathExtension().lastPathComponent) }, live: keys)
-		for url in try files.list(blobs) + files.list(thumbs) where !keys.contains(url.deletingPathExtension().lastPathComponent) {
+		// A failed restore's payload stays while its undo is valid.
+		let kept = keys.union(protectedUndo)
+		for url in try files.list(blobs) + files.list(thumbs) where !kept.contains(url.deletingPathExtension().lastPathComponent) {
 			try? files.remove(url)
 		}
 	}
@@ -328,6 +343,8 @@ public actor ClipStore {
 		// A blob that still cannot move home is in trash, not lost: its row stays.
 		let stuck = emptyTrash(try files.list(trash), live: keys)
 		let blobFiles = try files.list(blobs), thumbFiles = try files.list(thumbs)
+		// Launch ends every undo: a failed restore's payload is an orphan like any other.
+		protectedUndo.removeAll()
 		for url in blobFiles + thumbFiles where !keys.contains(url.deletingPathExtension().lastPathComponent) {
 			try? files.remove(url)
 		}
