@@ -1,6 +1,7 @@
 import Testing
 import AppKit
 import SwiftUI
+import CopiaFixtures
 @testable import CopiaUI
 
 @MainActor
@@ -17,6 +18,137 @@ import SwiftUI
 			#expect(item.image?.tiffRepresentation == expected, "\(item.label) should use \(symbol)")
 		}
 		#expect(tabs.selectedTabViewItemIndex == 2)
+	}
+
+	@Test func toolbarButtonsKeepReadableTitlesAndNativeSelectionActions() throws {
+		_ = NSApplication.shared
+		let window = SettingsView.makeSettingsWindow(model: ShellModel(), initialTab: .privacy)
+		defer { window.orderOut(nil) }
+		let tabs = try #require(window.contentViewController as? NSTabViewController)
+		let toolbar = try #require(window.toolbar)
+		let items = toolbar.items.filter { SettingsTab(rawValue: $0.itemIdentifier.rawValue) != nil }
+		#expect(items.map(\.label) == SettingsTab.allCases.map(\.title))
+		let buttons = try items.map { try #require($0.view as? NSButton, "Tab titles need explicit, accessible ink") }
+		#expect(toolbar.displayMode == .iconOnly, "The button owns its label; no second system-grey toolbar label")
+		let nativeDelegate = try #require(toolbar.delegate)
+		#expect(tabs.tabView.delegate === tabs)
+
+		func checkSelection(_ index: Int) {
+			#expect(tabs.selectedTabViewItemIndex == index)
+			#expect(toolbar.selectedItemIdentifier == items[index].itemIdentifier)
+			for (i, button) in buttons.enumerated() {
+				#expect(button.state == (i == index ? .on : .off))
+				#expect(button.accessibilityRole() == .radioButton)
+				#expect((button.accessibilityValue() as? NSNumber)?.intValue == (i == index ? 1 : 0))
+			}
+		}
+		checkSelection(2)
+		for (i, button) in buttons.enumerated() {
+			#expect(button.isEnabled && button.isAccessibilityEnabled())
+			#expect(button.accessibilityLabel() == items[i].label)
+			#expect(button.imagePosition == .imageAbove)
+			#expect(button.image?.tiffRepresentation == tabs.tabViewItems[i].image?.tiffRepresentation)
+			#expect(button.attributedTitle.string == items[i].label)
+			button.performClick(nil)
+			checkSelection(i)
+			button.performClick(nil)
+			checkSelection(i) // Clicking the selected tab must not turn it off.
+		}
+		_ = buttons[0].accessibilityPerformPress()
+		checkSelection(0)
+		tabs.selectedTabViewItemIndex = 1
+		checkSelection(1)
+		tabs.tabView.selectNextTabViewItem(nil)
+		checkSelection(2)
+		tabs.tabView.selectPreviousTabViewItem(nil)
+		checkSelection(1)
+
+		for dark in [false, true] {
+			window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+			for button in buttons {
+				let color = try #require(button.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
+				let ink = ShellThemeTests.resolved(color, dark: dark)
+				for surface in ShellThemeTests.surfaces(dark: dark) {
+					#expect(Theme.contrast(ink, surface) >= 4.5, "\(button.title) \(dark ? "dark" : "light")")
+				}
+			}
+		}
+		#expect(toolbar.delegate === nativeDelegate, "Keep AppKit in charge of the toolbar")
+		#expect(window.frame.width == 560)
+	}
+
+	@Test func toolbarPreventsDisplayModeCustomizationFromRestoringGreyLabels() throws {
+		_ = NSApplication.shared
+		let window = SettingsView.makeSettingsWindow(model: ShellModel())
+		let toolbar = try #require(window.toolbar)
+		#expect(toolbar.displayMode == .iconOnly)
+		#expect(!toolbar.allowsDisplayModeCustomization)
+	}
+
+	@Test func windowToolbarExposesTabButtonsWithSelectionAndPressActions() throws {
+		AccessibilityNode.enableInProcess()
+		let window = SettingsView.makeSettingsWindow(model: ShellModel(), initialTab: .privacy)
+		defer { window.orderOut(nil) }
+		// The real window exposes its installed toolbar without ordering an unrelated test window front.
+		window.contentView?.layoutSubtreeIfNeeded()
+		let tabs = try #require(window.contentViewController as? NSTabViewController)
+		let toolbar = try #require(AccessibilityNode(window).all.first { $0.role == NSAccessibility.Role.toolbar.rawValue })
+		func exposedTabs() -> [AccessibilityNode] {
+			toolbar.all.filter { SettingsTab(rawValue: $0.label) != nil }
+		}
+		func checkSelection(_ index: Int) throws {
+			let nodes = exposedTabs()
+			#expect(nodes.map(\.label) == SettingsTab.allCases.map(\.title))
+			#expect(tabs.selectedTabViewItemIndex == index)
+			for (i, node) in nodes.enumerated() {
+				#expect(node.role == NSAccessibility.Role.radioButton.rawValue, "\(node.label) is a mutually exclusive tab, not a checkbox")
+				// NSAccessibilityRadioButton defines selection through AXValue, not AXSelected.
+				let element = try #require(node.object as? any NSAccessibilityProtocol)
+				#expect((element.accessibilityValue() as? NSNumber)?.intValue == (i == index ? 1 : 0))
+			}
+		}
+		try checkSelection(2)
+		let general = try #require(exposedTabs().first { $0.label == "General" }?.object as? any NSAccessibilityProtocol)
+		// Stock AppKit toolbar items return false even after sending AXPress; test the resulting selection.
+		_ = general.accessibilityPerformPress()
+		try checkSelection(0)
+		_ = general.accessibilityPerformPress()
+		try checkSelection(0)
+		tabs.selectedTabViewItemIndex = 1
+		try checkSelection(1)
+		tabs.tabView.selectNextTabViewItem(nil)
+		try checkSelection(2)
+	}
+
+	@Test func loginAndEraseErrorsRenderAtAAContrastInBothAppearances() async throws {
+		AccessibilityNode.enableInProcess()
+		for dark in [false, true] {
+			let model = ShellModel()
+			model.login = .error("Could not enable login.")
+			model.eraseError = "Could not erase history."
+			let window = SettingsView.makeSettingsWindow(model: model)
+			defer { window.orderOut(nil) }
+			window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+			window.setFrameOrigin(CGPoint(x: -6000, y: -6000))
+			window.alphaValue = 0
+			window.orderFrontRegardless()
+			try await Task.sleep(for: .milliseconds(150))
+			let view = try #require(window.contentView)
+			view.layoutSubtreeIfNeeded()
+			let rep = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+			view.cacheDisplay(in: view.bounds, to: rep)
+			let image = try #require(rep.cgImage)
+			let bitmap = ContrastCheck.Bitmap(image)
+			let screen = view.convert(view.bounds, to: nil)
+			let origin = window.convertToScreen(screen)
+			for message in ["Could not enable login.", "Could not erase history."] {
+				let node = try #require(AccessibilityNode(view).all.first { $0.value == message || $0.label == message })
+				let box = CGRect(x: node.frame.minX - origin.minX, y: origin.maxY - node.frame.maxY,
+					width: node.frame.width, height: node.frame.height)
+				let ratio = ContrastCheck.text(in: bitmap, box: box, scale: CGFloat(image.width) / view.bounds.width)
+				#expect(ratio >= 4.5, "\(dark ? "dark" : "light") \(message): \(ratio):1")
+			}
+		}
 	}
 
 	@Test func windowIs560PointsWide() {

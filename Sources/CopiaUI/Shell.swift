@@ -202,7 +202,7 @@ public struct SettingsView: View {
 					set: { model.setLogin($0) }))
 				switch model.login {
 				case .requiresApproval: Text("Approve Copia in System Settings → General → Login Items.").font(.callout).foregroundStyle(ShellTheme.secondary)
-				case let .error(message): Text(message).font(.callout).foregroundStyle(.red)
+				case let .error(message): Text(message).font(.callout).foregroundStyle(ShellTheme.error)
 				default: EmptyView()
 				}
 			}
@@ -211,7 +211,7 @@ public struct SettingsView: View {
 					ForEach(Retention.allCases, id: \.self) { Text($0.title).tag($0) }
 				}
 				Button("Erase History…", role: .destructive) { model.requestErase() }
-				if let message = model.eraseError { Text(message).font(.callout).foregroundStyle(.red) }
+				if let message = model.eraseError { Text(message).font(.callout).foregroundStyle(ShellTheme.error) }
 			}
 		}
 		.confirmationDialog("Erase history?", isPresented: $model.eraseConfirmation) {
