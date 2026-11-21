@@ -112,3 +112,33 @@ import SwiftUI
 		#expect(spy.erases == 0)
 	}
 }
+
+/// The status menu, checked without a live status bar.
+@MainActor
+@Suite struct MenuTests {
+	@Test func titlesKeyEquivalentsAndActions() {
+		let items = MenuBarController.items(paused: false)
+		#expect(items.map { $0.isSeparatorItem ? "-" : $0.title } == ["Open History", "Pause Capture", "-", "Settings…", "Quit"])
+		let rows = items.filter { !$0.isSeparatorItem }
+		#expect(rows.map(\.keyEquivalent) == ["y", "t", ",", "q"])
+		#expect(rows.allSatisfy { $0.keyEquivalentModifierMask == .command })
+		#expect(rows.map(\.action) == [#selector(MenuBarController.history), #selector(MenuBarController.pause),
+			#selector(MenuBarController.openSettings), #selector(MenuBarController.quitApp)])
+	}
+
+	@Test func pausedMenuOffersResume() {
+		#expect(MenuBarController.items(paused: true)[1].title == "Resume Capture")
+	}
+
+	@Test func setPausedDimsTheIconAndTogglesTheTitle() {
+		let menu = NSMenu()
+		MenuBarController.items(paused: false).forEach(menu.addItem)
+		let button = NSStatusBarButton(frame: .zero)
+		MenuBarController.show(paused: true, in: menu, button: button)
+		#expect(button.appearsDisabled)
+		#expect(menu.items[1].title == "Resume Capture")
+		MenuBarController.show(paused: false, in: menu, button: button)
+		#expect(!button.appearsDisabled)
+		#expect(menu.items[1].title == "Pause Capture")
+	}
+}

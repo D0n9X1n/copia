@@ -78,42 +78,49 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 	public let item: NSStatusItem
 	public let menu = NSMenu()
 	let actions: Actions
-	private let pauseItem: NSMenuItem
 	private var shortcutsWereEnabled = true
 
 	public init(actions: Actions, statusBar: NSStatusBar = .system) {
 		self.actions = actions
 		item = statusBar.statusItem(withLength: NSStatusItem.variableLength)
-		pauseItem = NSMenuItem(title: "Pause Capture", action: nil, keyEquivalent: "t")
 		super.init()
 		let image = NSImage(systemSymbolName: "list.clipboard", accessibilityDescription: "Copia")
 		image?.isTemplate = true
 		item.button?.image = image
-		let open = NSMenuItem(title: "Open History", action: #selector(history), keyEquivalent: "y")
-		pauseItem.action = #selector(pause)
-		let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
-		let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
-		for menuItem in [open, pauseItem, settings, quit] {
+		for menuItem in Self.items(paused: false) {
 			menuItem.target = self
-			menuItem.keyEquivalentModifierMask = .command
+			menu.addItem(menuItem)
 		}
-		open.setShortcut(for: .copiaHistory)
-		pauseItem.setShortcut(for: .copiaPause)
-		menu.addItem(open)
-		menu.addItem(pauseItem)
-		menu.addItem(.separator())
-		menu.addItem(settings)
-		menu.addItem(quit)
+		// The global shortcuts replace the ⌘Y/⌘T fallbacks and follow the user's recordings.
+		menu.items.first { $0.action == #selector(history) }?.setShortcut(for: .copiaHistory)
+		menu.items.first { $0.action == #selector(pause) }?.setShortcut(for: .copiaPause)
 		menu.delegate = self
 		item.menu = menu
 	}
 
+	/// The menu rows, in order, with their titles, ⌘ fallbacks and actions. The caller sets the target.
+	static func items(paused: Bool) -> [NSMenuItem] {
+		let rows = [
+			NSMenuItem(title: "Open History", action: #selector(history), keyEquivalent: "y"),
+			NSMenuItem(title: pauseTitle(paused: paused), action: #selector(pause), keyEquivalent: "t"),
+			NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","),
+			NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"),
+		]
+		rows.forEach { $0.keyEquivalentModifierMask = .command }
+		return [rows[0], rows[1], .separator(), rows[2], rows[3]]
+	}
+
+	static func pauseTitle(paused: Bool) -> String { paused ? "Resume Capture" : "Pause Capture" }
+
+	/// Dims the status icon while paused and offers Resume in place of Pause.
+	static func show(paused: Bool, in menu: NSMenu, button: NSStatusBarButton?) {
+		button?.appearsDisabled = paused
+		menu.items.first { $0.action == #selector(pause) }?.title = pauseTitle(paused: paused)
+	}
+
 	public var button: NSStatusBarButton { item.button! }
 
-	public func setPaused(_ paused: Bool) {
-		button.appearsDisabled = paused
-		pauseItem.title = paused ? "Resume Capture" : "Pause Capture"
-	}
+	public func setPaused(_ paused: Bool) { Self.show(paused: paused, in: menu, button: item.button) }
 
 	public func menuWillOpen(_ menu: NSMenu) {
 		shortcutsWereEnabled = KeyboardShortcuts.isEnabled
