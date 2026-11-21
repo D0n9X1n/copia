@@ -19,8 +19,9 @@ public struct LiveFileOps: FileOps {
 		if FileManager.default.fileExists(atPath: to.path) { try FileManager.default.removeItem(at: to) }
 		try FileManager.default.moveItem(at: from, to: to)
 	}
+	/// Only "no such file" counts as done; any other failure (permissions, I/O) is reported.
 	public func remove(_ url: URL) throws {
-		if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+		do { try FileManager.default.removeItem(at: url) } catch CocoaError.fileNoSuchFile {}
 	}
 	public func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
 	public func list(_ directory: URL) throws -> [URL] {
@@ -128,8 +129,6 @@ public actor ClipStore {
 				[.real(draft.copiedAt.timeIntervalSince1970), .int(existing.copyCount), .text(key)])
 			return (existing, false)
 		}
-		// A recopy of a deleted item ends its undo, so its trashed files go now.
-		for ext in ["plist", "png"] where files.exists(trashURL(key, ext)) { try? files.remove(trashURL(key, ext)) }
 		let text = Capture.plainText(draft)
 		let kind = Capture.kind(of: draft)
 		let fileURLs = Capture.fileURLs(draft)
@@ -155,6 +154,8 @@ public actor ClipStore {
 			try? files.remove(blobURL(key))
 			throw error
 		}
+		// A recopy of a deleted item ends its undo, so its trashed files go once the new copy is saved.
+		for ext in ["plist", "png"] { try? files.remove(trashURL(key, ext)) }
 		return (clip, true)
 	}
 
@@ -249,6 +250,15 @@ public actor ClipStore {
 			}
 		}
 		if left > 0 { throw StoreError.filesLeft(left) }
+	}
+
+	/// The hourly pass: removes blob and thumbnail files that have no row, left by a delete, prune or erase whose
+	/// removal failed. Trash is left alone, so an open undo survives.
+	public func removeOrphans() throws {
+		let keys = Set(try strings("SELECT id FROM clips", []))
+		for url in try files.list(blobs) + files.list(thumbs) where !keys.contains(url.deletingPathExtension().lastPathComponent) {
+			try? files.remove(url)
+		}
 	}
 
 	/// Launch cleanup: empty trash, drop files without rows and rows without blobs.

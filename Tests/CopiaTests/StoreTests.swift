@@ -246,6 +246,56 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		await #expect(throws: StoreError.self) { try await store.eraseAll() }
 	}
 
+	/// A folder that lists but cannot be searched must not make a failed removal look like a file already gone.
+	@Test func eraseReportsFilesInAFolderItCannotSearch() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try await store.insert(text("secret"))
+		let blobs = dir.appendingPathComponent("blobs").path
+		try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: blobs)
+		defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blobs) }
+		await #expect(throws: StoreError.self) { try await store.eraseAll() }
+	}
+
+	/// Removing a file the folder will not let us reach is a failure, not "already gone".
+	@Test func liveRemoveReportsAFileItCannotReach() throws {
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-rm-\(UUID().uuidString)")
+		try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+		defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path); try? FileManager.default.removeItem(at: dir) }
+		let file = dir.appendingPathComponent("a.plist")
+		try Data("x".utf8).write(to: file)
+		try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: dir.path)
+		#expect(throws: (any Error).self) { try LiveFileOps().remove(file) }
+		try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+		try LiveFileOps().remove(dir.appendingPathComponent("never-existed"))
+	}
+
+	/// A recopy that fails to save must not have thrown away the undo copy first.
+	@Test func aFailedRecopyKeepsTheUndo() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("again"))
+		let gone = try #require(try await store.delete(clip.key))
+		files.failWriteContaining = "blobs"
+		await #expect(throws: (any Error).self) { try await store.insert(text("again")) }
+		try await store.restore(gone)
+		#expect(try await store.fetch(clip.key)?.title == "again")
+	}
+
+	/// Files left by a failed delete, prune or erase have no row; the hourly pass removes them and leaves undo copies alone.
+	@Test func removeOrphansClearsLeftoversButKeepsTrash() async throws {
+		let files = FaultyFiles()
+		let (store, dir) = try tempStore(files: files); defer { try? FileManager.default.removeItem(at: dir) }
+		let (stuck, _) = try await store.insert(text("stuck"))
+		let (undoable, _) = try await store.insert(text("undoable"))
+		files.failMoveContaining = stuck.key; files.failRemoveContaining = stuck.key
+		_ = try await store.delete(stuck.key)
+		_ = try await store.delete(undoable.key)
+		#expect(fileCount(dir, "blobs") == 1)
+		try await store.removeOrphans()
+		#expect(fileCount(dir, "blobs") == 0)
+		#expect(fileCount(dir, "trash") == 1)
+	}
+
 	/// Erase removes everything it can, then reports a file it could not remove instead of claiming success.
 	@Test func eraseReportsAFileItCouldNotRemove() async throws {
 		let files = FaultyFiles()

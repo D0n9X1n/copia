@@ -277,9 +277,10 @@ public final class AppController {
 		_ = try? await store.prune(before: cutoff)
 	}
 
-	/// The hourly retention pass.
+	/// The hourly retention pass, which also retries any file a delete, prune or erase could not remove.
 	func retentionTick() async {
 		await prune()
+		try? await store.removeOrphans()
 		await reload()
 	}
 
