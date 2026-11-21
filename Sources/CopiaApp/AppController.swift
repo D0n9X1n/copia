@@ -210,7 +210,7 @@ public final class AppController {
 		panel.show(on: screen, visibleFrame: visibleFrameOverride)
 		focus.focus()
 		CopiaDebug.log("opened visible=\(panel.isVisible) key=\(panel.isKeyWindow) frame=\(panel.frame)")
-		DispatchQueue.main.async { [weak self] in self?.model.animateIn() }
+		model.animateIn()
 	}
 
 	private func keyEquivalent(_ event: NSEvent) -> Bool {
