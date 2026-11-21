@@ -2,34 +2,75 @@ import AppKit
 import ImageIO
 import LinkPresentation
 import QuickLookThumbnailing
+import Synchronization
 import UniformTypeIdentifiers
 import CopiaCore
 import CopiaStore
 
-/// Fetches a link's title and image. Tests supply a fake that counts calls.
-public protocol LinkFetching: Sendable {
-	func fetch(_ url: URL) async throws -> (title: String?, image: Data?)
+/// A link's title, preview image and site icon, each optional.
+public struct LinkPreview: Sendable {
+	public var title: String?
+	public var image: Data?
+	public var icon: Data?
+	public init(title: String? = nil, image: Data? = nil, icon: Data? = nil) {
+		self.title = title
+		self.image = image
+		self.icon = icon
+	}
 }
 
-/// LinkPresentation with a 10 s timeout; the image is reduced to a ≤480 px PNG.
+/// Fetches a link's preview. Tests supply a fake that counts calls.
+public protocol LinkFetching: Sendable {
+	func fetch(_ url: URL) async throws -> LinkPreview
+}
+
+/// LinkPresentation with a 10 s timeout; images are reduced to ≤480 px PNGs. The icon is loaded only without an image.
 public struct LiveLinkFetcher: LinkFetching {
 	public init() {}
 	@MainActor
-	public func fetch(_ url: URL) async throws -> (title: String?, image: Data?) {
+	public func fetch(_ url: URL) async throws -> LinkPreview {
 		let provider = LPMetadataProvider()
 		provider.timeout = 10
 		let metadata = try await provider.startFetchingMetadata(for: url)
-		let title = metadata.title
-		var image: Data?
-		if let imageProvider = metadata.imageProvider {
-			image = await withCheckedContinuation { continuation in
-				_ = imageProvider.loadDataRepresentation(for: .image) { data, _ in
-					continuation.resume(returning: data.flatMap { Previewer.thumbnailPNG(from: $0) })
-				}
+		let image = await Self.load(metadata.imageProvider)
+		return LinkPreview(title: metadata.title, image: image, icon: image == nil ? await Self.load(metadata.iconProvider) : nil)
+	}
+
+	@MainActor
+	static func load(_ provider: NSItemProvider?) async -> Data? {
+		guard let provider else { return nil }
+		return await withCheckedContinuation { continuation in
+			_ = provider.loadDataRepresentation(for: .image) { data, _ in
+				continuation.resume(returning: data.flatMap { Previewer.thumbnailPNG(from: $0) })
 			}
 		}
-		return (title, image)
 	}
+}
+
+/// Draws a file's thumbnail. Tests supply a fake.
+public protocol FileThumbnailing: Sendable {
+	func thumbnail(for url: URL) async throws -> Data
+}
+
+/// QuickLookThumbnailing at 96 pt, 2x.
+public struct LiveFileThumbnails: FileThumbnailing {
+	public init() {}
+	public func thumbnail(for url: URL) async throws -> Data {
+		let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 192, height: 192), scale: 2,
+			representationTypes: .thumbnail)
+		let thumb = try await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
+		guard let png = Previewer.pngData(thumb.cgImage) else { throw CocoaError(.fileReadCorruptFile) }
+		return png
+	}
+}
+
+/// What preview work ran, for the one-decode and utility-QoS checks.
+public final class PreviewStats: Sendable {
+	private let state = Mutex<(decodes: Int, priorities: [TaskPriority])>((0, []))
+	public var decodes: Int { state.withLock { $0.decodes } }
+	public var priorities: [TaskPriority] { state.withLock { $0.priorities } }
+	func decoded() { state.withLock { $0.decodes += 1 } }
+	func ran(at priority: TaskPriority) { state.withLock { $0.priorities.append(priority) } }
 }
 
 /// Makes each clip's preview once, off the main thread, and saves it through the store.
@@ -38,12 +79,15 @@ public struct LiveLinkFetcher: LinkFetching {
 public final class Previewer {
 	let store: ClipStore
 	let links: LinkFetching
+	let files: FileThumbnailing
+	public let stats = PreviewStats()
 	public var onSaved: () -> Void = {}
 	private var inFlight = Set<String>()
 
-	public init(store: ClipStore, links: LinkFetching = LiveLinkFetcher()) {
+	public init(store: ClipStore, links: LinkFetching = LiveLinkFetcher(), files: FileThumbnailing = LiveFileThumbnails()) {
 		self.store = store
 		self.links = links
+		self.files = files
 	}
 
 	public func generate(for clip: StoredClip) {
@@ -52,8 +96,11 @@ public final class Previewer {
 		inFlight.insert(token)
 		let store = self.store
 		let links = self.links
+		let files = self.files
+		let stats = self.stats
 		Task.detached(priority: .utility) {
-			let (state, title, image) = await Self.make(for: clip, store: store, links: links)
+			stats.ran(at: Task.currentPriority)
+			let (state, title, image) = await Self.make(for: clip, store: store, links: links, files: files, stats: stats)
 			_ = try? await store.setPreview(key: clip.key, generation: clip.generation, state: state, title: title, image: image)
 			await MainActor.run {
 				self.inFlight.remove(token)
@@ -67,32 +114,30 @@ public final class Previewer {
 		for clip in (try? await store.pending()) ?? [] { generate(for: clip) }
 	}
 
-	nonisolated static func make(for clip: StoredClip, store: ClipStore, links: LinkFetching) async
-		-> (PreviewState, String?, Data?) {
+	nonisolated static func make(for clip: StoredClip, store: ClipStore, links: LinkFetching, files: FileThumbnailing,
+		stats: PreviewStats) async -> (PreviewState, String?, Data?) {
 		switch clip.kind {
 		case .image:
 			guard let items = try? await store.items(for: clip.key),
-				let data = items.first?.data(for: PasteboardTypes.png) ?? items.first?.data(for: PasteboardTypes.tiff),
-				let png = thumbnailPNG(from: data)
+				let data = items.first?.data(for: PasteboardTypes.png) ?? items.first?.data(for: PasteboardTypes.tiff)
 			else { return (.failed, nil, nil) }
+			stats.decoded()
+			guard let png = thumbnailPNG(from: data) else { return (.failed, nil, nil) }
 			return (.ok, nil, png)
 		case .link:
 			guard let url = clip.url.flatMap(URL.init(string:)) else { return (.failed, nil, nil) }
 			do {
 				let result = try await links.fetch(url)
-				return (result.image == nil ? .okNoImage : .ok, result.title, result.image)
+				// Without a preview image the site icon is saved as the thumbnail; the state says which it is.
+				return (result.image == nil ? .okNoImage : .ok, result.title, result.image ?? result.icon)
 			} catch {
 				return (.failed, nil, nil)
 			}
 		case .file:
 			guard let items = try? await store.items(for: clip.key),
 				let path = items.first?.data(for: PasteboardTypes.fileURL).flatMap({ String(data: $0, encoding: .utf8) }),
-				let url = URL(string: path)
-			else { return (.failed, nil, nil) }
-			let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 192, height: 192), scale: 2,
-				representationTypes: .thumbnail)
-			guard let thumb = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request),
-				let png = pngData(thumb.cgImage)
+				let url = URL(string: path),
+				let png = try? await files.thumbnail(for: url)
 			else { return (.failed, nil, nil) }
 			return (.ok, nil, png)
 		case .text, .richText, .color:
@@ -100,7 +145,7 @@ public final class Previewer {
 		}
 	}
 
-	/// Decodes at display size (≤480 px) and encodes PNG. shortcut: PNG for all thumbnails (alpha-safe); switch opaque ones to HEIC if disk use matters.
+	/// Decodes at display size (≤480 px) and encodes PNG, which keeps alpha and is lossless at this size.
 	nonisolated static func thumbnailPNG(from data: Data) -> Data? {
 		guard let source = CGImageSourceCreateWithData(data as CFData, nil),
 			let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [

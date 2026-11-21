@@ -106,6 +106,7 @@ public actor ClipStore {
 
 	func blobURL(_ key: String) -> URL { blobs.appendingPathComponent("\(key).plist") }
 	func thumbURL(_ key: String) -> URL { thumbs.appendingPathComponent("\(key).png") }
+	func trashURL(_ key: String, _ ext: String) -> URL { trash.appendingPathComponent("\(key).\(ext)") }
 	public func thumbnail(for key: String) -> URL? {
 		let url = thumbURL(key)
 		return files.exists(url) ? url : nil
@@ -124,6 +125,8 @@ public actor ClipStore {
 				[.real(draft.copiedAt.timeIntervalSince1970), .int(existing.copyCount), .text(key)])
 			return (existing, false)
 		}
+		// A recopy of a deleted item ends its undo, so its trashed files go now.
+		for ext in ["plist", "png"] where files.exists(trashURL(key, ext)) { try? files.remove(trashURL(key, ext)) }
 		let text = Capture.plainText(draft)
 		let kind = Capture.kind(of: draft)
 		let fileURLs = Capture.fileURLs(draft)
@@ -178,9 +181,10 @@ public actor ClipStore {
 			try run("DELETE FROM clips WHERE id=?", [.text(key)])
 			try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
 		}
-		// If a move fails the files are orphans, and the launch sweep removes them.
-		try? files.move(blobURL(key), to: trash.appendingPathComponent("\(key).plist"))
-		if files.exists(thumbURL(key)) { try? files.move(thumbURL(key), to: trash.appendingPathComponent("\(key).png")) }
+		// A file that cannot move to trash is removed instead: the delete still frees it, only its undo is lost.
+		for (file, trashed) in [(blobURL(key), trashURL(key, "plist")), (thumbURL(key), trashURL(key, "png"))] where files.exists(file) {
+			do { try files.move(file, to: trashed) } catch { try? files.remove(file) }
+		}
 		return DeletedClip(clip: clip)
 	}
 
@@ -188,8 +192,8 @@ public actor ClipStore {
 	public func restore(_ deleted: DeletedClip) throws {
 		let key = deleted.clip.key
 		guard try fetch(key) == nil else { throw StoreError.alreadyExists }
-		let trashedBlob = trash.appendingPathComponent("\(key).plist")
-		let trashedThumb = trash.appendingPathComponent("\(key).png")
+		let trashedBlob = trashURL(key, "plist")
+		let trashedThumb = trashURL(key, "png")
 		guard files.exists(trashedBlob) else { throw StoreError.missingBlob }
 		try files.move(trashedBlob, to: blobURL(key))
 		var movedThumb = false
@@ -259,8 +263,9 @@ public actor ClipStore {
 
 	// MARK: Read
 
-	public func recent(limit: Int = 5_000) throws -> [StoredClip] {
-		try query("SELECT * FROM clips ORDER BY last_copied DESC LIMIT ?", [.int(limit)])
+	/// Every clip, newest first. History is bounded by retention, not by a count.
+	public func recent() throws -> [StoredClip] {
+		try query("SELECT * FROM clips ORDER BY last_copied DESC", [])
 	}
 
 	public func fetch(_ key: String) throws -> StoredClip? {
@@ -298,7 +303,7 @@ public actor ClipStore {
 
 	// MARK: Rows
 
-	private func insertRow(_ c: StoredClip) throws {
+	func insertRow(_ c: StoredClip) throws {
 		try transaction {
 			try run("""
 				INSERT INTO clips (id, kind, title, preview_text, is_code, source_bundle, source_name, first_copied, last_copied,
@@ -352,7 +357,7 @@ public actor ClipStore {
 
 	private var inTransaction = false
 
-	private func transaction(_ body: () throws -> Void) throws {
+	func transaction(_ body: () throws -> Void) throws {
 		if inTransaction { return try body() }
 		try Self.exec(db, "BEGIN IMMEDIATE")
 		inTransaction = true

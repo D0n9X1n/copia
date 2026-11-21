@@ -20,6 +20,18 @@ private func draft(_ items: PasteboardItemData..., at date: Date = .distantPast)
 		#expect(Capture.kind(of: draft(item((PasteboardTypes.string, "#ff6a3d")))) == .color)
 	}
 
+	@Test func rtfOrHTMLWithoutAStringIsKeptWithItsText() {
+		let rtf = draft(item((PasteboardTypes.rtf, "{\\rtf1\\ansi Quarterly \\b review\\b0}")))
+		#expect(Capture.decide(types: [PasteboardTypes.rtf], draft: rtf, candidates: [], ignoredApps: []) == .keep)
+		#expect(Capture.plainText(rtf) == "Quarterly review")
+		#expect(Capture.kind(of: rtf) == .richText)
+		let html = draft(item((PasteboardTypes.html, "<p>Ship <b>it</b> &amp; go</p>")))
+		#expect(Capture.decide(types: [PasteboardTypes.html], draft: html, candidates: [], ignoredApps: []) == .keep)
+		#expect(Capture.plainText(html) == "Ship it & go")
+		let blank = draft(item((PasteboardTypes.rtf, "{\\rtf1\\ansi   }")))
+		#expect(Capture.decide(types: [PasteboardTypes.rtf], draft: blank, candidates: [], ignoredApps: []) == .skipEmpty)
+	}
+
 	@Test func colorDetectionFollowsPasteRules() {
 		#expect(Capture.colorHex("#1A2B3C") == "#1A2B3C")
 		#expect(Capture.colorHex("1a2b3c") == "#1A2B3C")

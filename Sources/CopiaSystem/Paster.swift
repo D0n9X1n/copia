@@ -26,8 +26,7 @@ public final class Paster {
 	public func write(_ items: [PasteboardItemData], plain: Bool) {
 		let source = Bundle.main.bundleIdentifier ?? "app.copia.Copia"
 		let objects: [NSPasteboardItem] = items.compactMap { item in
-			let reps = plain ? item.representations.filter { $0.type == PasteboardTypes.string || $0.type == PasteboardTypes.fileURL }
-				: item.representations
+			let reps = plain ? Self.plainRepresentations(item) : item.representations
 			guard !reps.isEmpty else { return nil }
 			let out = NSPasteboardItem()
 			for rep in reps { out.setData(rep.data, forType: NSPasteboard.PasteboardType(rep.type)) }
@@ -37,6 +36,13 @@ public final class Paster {
 		}
 		pasteboard.clearContents()
 		pasteboard.writeObjects(objects)
+	}
+
+	/// Plain text only: the item's string, else the text of its rich text, else its file's path.
+	static func plainRepresentations(_ item: PasteboardItemData) -> [(type: String, data: Data)] {
+		var text = Capture.plainText(ClipDraft(items: [item], copiedAt: .now))
+		if text.isEmpty, let url = Capture.fileURLs(ClipDraft(items: [item], copiedAt: .now)).first { text = url.path }
+		return text.isEmpty ? [] : [(type: PasteboardTypes.string, data: Data(text.utf8))]
 	}
 
 	/// Copies, then pastes into `target` once it is frontmost. Calls `beginClose` before sending ⌘V.

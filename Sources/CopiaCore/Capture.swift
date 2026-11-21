@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Pure capture rules: what to keep, what kind it is, and how it is shown.
 public enum Capture {
@@ -25,9 +25,29 @@ public enum Capture {
 		return .keep
 	}
 
+	/// Each item's text: its string, else the text of its RTF, else of its HTML.
 	public static func plainText(_ draft: ClipDraft) -> String {
-		draft.items.compactMap { $0.data(for: PasteboardTypes.string).flatMap { String(data: $0, encoding: .utf8) } }
-			.joined(separator: "\n")
+		draft.items.compactMap { item in
+			if let data = item.data(for: PasteboardTypes.string) { return String(data: data, encoding: .utf8) }
+			if let data = item.data(for: PasteboardTypes.rtf) {
+				// The RTF reader is thread-safe; only the HTML importer needs the main thread.
+				return NSAttributedString(rtf: data, documentAttributes: nil)?.string
+					.trimmingCharacters(in: .whitespacesAndNewlines)
+			}
+			if let data = item.data(for: PasteboardTypes.html) { return String(data: data, encoding: .utf8).map(htmlText) }
+			return nil
+		}
+		.joined(separator: "\n")
+	}
+
+	/// Tags dropped and common entities decoded. AppKit's HTML importer needs the main thread and WebKit, so it is not used.
+	static func htmlText(_ html: String) -> String {
+		var text = html.replacingOccurrences(of: "<(br|/p|/div|/li|/h[1-6])[^>]*>", with: "\n", options: [.regularExpression, .caseInsensitive])
+		text = text.replacingOccurrences(of: "<[^>]*>", with: "", options: .regularExpression)
+		for (entity, char) in [("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
+			text = text.replacingOccurrences(of: entity, with: char)
+		}
+		return text.trimmingCharacters(in: .whitespacesAndNewlines)
 	}
 
 	public static func fileURLs(_ draft: ClipDraft) -> [URL] {

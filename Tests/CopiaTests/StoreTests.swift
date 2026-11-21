@@ -8,6 +8,7 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 	let live = LiveFileOps()
 	var failMoveContaining: String?
 	var failWriteContaining: String?
+	var failRemoveContaining: String?
 	func write(_ data: Data, to url: URL) throws {
 		if let f = failWriteContaining, url.path.contains(f) { failWriteContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.write(data, to: url)
@@ -16,7 +17,10 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 		if let f = failMoveContaining, from.path.contains(f) || to.path.contains(f) { failMoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.move(from, to: to)
 	}
-	func remove(_ url: URL) throws { try live.remove(url) }
+	func remove(_ url: URL) throws {
+		if let f = failRemoveContaining, url.path.contains(f) { failRemoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
+		try live.remove(url)
+	}
 	func exists(_ url: URL) -> Bool { live.exists(url) }
 	func list(_ directory: URL) -> [URL] { live.list(directory) }
 }
@@ -110,11 +114,56 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
 		let (clip, _) = try await store.insert(text("orphan"))
 		faulty.failMoveContaining = "blobs"
+		faulty.failRemoveContaining = "blobs"
 		_ = try await store.delete(clip.key)
 		#expect(try await store.fetch(clip.key) == nil)
 		#expect(fileCount(dir, "blobs") == 1)
 		try await store.sweep()
 		#expect(fileCount(dir, "blobs") == 0)
+	}
+
+	@Test func aFailedMoveToTrashStillLeavesNoFilesBehind() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("orphan"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		faulty.failMoveContaining = "thumbs"
+		_ = try await store.delete(clip.key)
+		#expect(try await store.fetch(clip.key) == nil)
+		#expect(fileCount(dir, "blobs") == 0)
+		#expect(fileCount(dir, "thumbs") == 0)
+	}
+
+	@Test func recopyingADeletedItemEmptiesItsTrash() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("again"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		_ = try await store.delete(clip.key)
+		#expect(fileCount(dir, "trash") == 2)
+		try await store.insert(text("again"))
+		#expect(fileCount(dir, "trash") == 0)
+		#expect(fileCount(dir, "blobs") == 1)
+	}
+
+	@Test func recentReturnsEveryClip() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try await store.seedRows((0..<5_001).map { i in
+			StoredClip(key: "k\(i)", kind: .text, title: "clip \(i)", previewText: "", isCode: false, sourceBundle: nil, sourceName: nil,
+				firstCopied: Date(timeIntervalSince1970: Double(i)), lastCopied: Date(timeIntervalSince1970: Double(i)), copyCount: 1,
+				byteSize: 1, meta: "", colorHex: nil, url: nil, fileNames: [], previewState: .ok, generation: i)
+		})
+		let all = try await store.recent()
+		#expect(all.count == 5_001)
+		#expect(all.last?.title == "clip 0")
+	}
+
+	@Test func aColorRoundTrips() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("#ff6a3d"))
+		let stored = try #require(try await store.fetch(clip.key))
+		#expect(stored.kind == .color)
+		#expect(stored.colorHex == "#FF6A3D")
+		#expect(try await store.items(for: clip.key).first?.data(for: PasteboardTypes.string) == Data("#ff6a3d".utf8))
 	}
 
 	@Test func faultDuringRestoreRollsBackCompletely() async throws {
@@ -173,5 +222,12 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(try await store.search("_t") == [a.key])
 		#expect(try await store.search("\"quoted\"") == [a.key])
 		#expect(try await store.search("zz%").isEmpty)
+	}
+}
+
+extension ClipStore {
+	/// Rows only, in one transaction: enough for read-path tests without thousands of blob writes.
+	func seedRows(_ clips: [StoredClip]) throws {
+		try transaction { for clip in clips { try insertRow(clip) } }
 	}
 }

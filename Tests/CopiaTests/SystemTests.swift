@@ -1,5 +1,6 @@
 import Testing
 import AppKit
+import Synchronization
 import CopiaCore
 @testable import CopiaStore
 @testable import CopiaSystem
@@ -135,6 +136,23 @@ final class FakePasteboard: PasteboardSource {
 		#expect(!types.contains(PasteboardTypes.html))
 	}
 
+	@Test func plainTextOfFilesIsTheirPaths() {
+		let pb = pasteboard()
+		let files = [PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/Design%20Review.key".utf8))]),
+			PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/b.txt".utf8))])]
+		Paster(pasteboard: pb).write(files, plain: true)
+		let types = Set((pb.types ?? []).map(\.rawValue))
+		#expect(!types.contains(PasteboardTypes.fileURL))
+		#expect(pb.pasteboardItems?.compactMap { $0.string(forType: .string) } == ["/tmp/Design Review.key", "/tmp/b.txt"])
+	}
+
+	@Test func plainTextOfRichTextWithoutAStringIsItsText() {
+		let pb = pasteboard()
+		Paster(pasteboard: pb).write([PasteboardItemData([(PasteboardTypes.html, Data("<p>Ship <b>it</b></p>".utf8))])], plain: true)
+		#expect(pb.string(forType: .string) == "Ship it")
+		#expect(!Set((pb.types ?? []).map(\.rawValue)).contains(PasteboardTypes.html))
+	}
+
 	@Test func pasteClosesBeforeSendingAndReportsPasted() async {
 		var log: [String] = []
 		let paster = Paster(pasteboard: pasteboard(), isTrusted: { true }, postPaste: { log.append("cmdV") },
@@ -181,10 +199,35 @@ final class FakePasteboard: PasteboardSource {
 /// Counts fetches so "fetched once" is provable.
 final class CountingLinks: LinkFetching, @unchecked Sendable {
 	var calls = 0
-	var result: Result<(String?, Data?), Error> = .success(("A title", nil))
-	func fetch(_ url: URL) async throws -> (title: String?, image: Data?) {
+	var result: Result<LinkPreview, Error> = .success(LinkPreview(title: "A title"))
+	func fetch(_ url: URL) async throws -> LinkPreview {
 		calls += 1
 		return try result.get()
+	}
+}
+
+/// Holds the first fetch until released, so a test can delete and restore while it is in flight.
+final class GatedLinks: LinkFetching, Sendable {
+	private let state = Mutex<(calls: Int, gate: CheckedContinuation<Void, Never>?)>((0, nil))
+	var calls: Int { state.withLock { $0.calls } }
+	func fetch(_ url: URL) async throws -> LinkPreview {
+		let call = state.withLock { $0.calls += 1; return $0.calls }
+		guard call == 1 else { return LinkPreview(title: "Fresh") }
+		await withCheckedContinuation { continuation in state.withLock { $0.gate = continuation } }
+		return LinkPreview(title: "Stale")
+	}
+	func release() { state.withLock { $0.gate?.resume(); $0.gate = nil } }
+	var waiting: Bool { state.withLock { $0.gate != nil } }
+}
+
+/// QuickLook stand-in: counts calls and succeeds or fails on demand.
+final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
+	var calls = 0
+	var fail = false
+	func thumbnail(for url: URL) async throws -> Data {
+		calls += 1
+		if fail { throw CocoaError(.fileReadUnknown) }
+		return Data([0x89, 0x50, 0x4E, 0x47])
 	}
 }
 
@@ -229,6 +272,89 @@ final class CountingLinks: LinkFetching, @unchecked Sendable {
 		let (clip, _) = try await store.insert(link())
 		Previewer(store: store, links: links).generate(for: clip)
 		#expect(try await waitForState(store, clip.key) == .failed)
+	}
+
+	func tempStore() throws -> (ClipStore, URL) {
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-prev-\(UUID().uuidString)")
+		return (try ClipStore(directory: dir), dir)
+	}
+
+	func pngData(_ side: Int) throws -> Data {
+		let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4,
+			hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+		return try #require(rep.representation(using: .png, properties: [:]))
+	}
+
+	@Test func anImageIsDecodedOnceAtUtilityQoS() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let previewer = Previewer(store: store, links: CountingLinks())
+		let (clip, _) = try await store.insert(ClipDraft(items: [PasteboardItemData([(PasteboardTypes.png, try pngData(900))])], copiedAt: .now))
+		previewer.generate(for: clip)
+		previewer.generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		#expect(previewer.stats.decodes == 1)
+		#expect(previewer.stats.priorities == [.utility])
+		#expect(await store.thumbnail(for: clip.key) != nil)
+	}
+
+	@Test func aLinkWithOnlyASiteIconSavesTheIcon() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let links = CountingLinks()
+		links.result = .success(LinkPreview(title: "Copia", icon: try pngData(64)))
+		let (clip, _) = try await store.insert(link())
+		Previewer(store: store, links: links).generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .okNoImage)
+		#expect(await store.thumbnail(for: clip.key) != nil)
+	}
+
+	@Test func aFileThumbnailIsSavedAndReusedAfterARestart() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let thumbs = CountingThumbnails()
+		let file = ClipDraft(items: [PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/Design%20Review.key".utf8))])], copiedAt: .now)
+		let (clip, _) = try await store.insert(file)
+		Previewer(store: store, links: CountingLinks(), files: thumbs).generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		#expect(thumbs.calls == 1)
+		let reopened = try ClipStore(directory: dir)
+		let again = Previewer(store: reopened, links: CountingLinks(), files: thumbs)
+		await again.resumePending()
+		if let stored = try await reopened.fetch(clip.key) { again.generate(for: stored) }
+		try await Task.sleep(for: .milliseconds(50))
+		#expect(thumbs.calls == 1)
+		#expect(await reopened.thumbnail(for: clip.key) != nil)
+	}
+
+	@Test func aFileQuickLookCannotDrawFailsAndKeepsNoThumbnail() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let thumbs = CountingThumbnails()
+		thumbs.fail = true
+		let file = ClipDraft(items: [PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/x.bin".utf8))])], copiedAt: .now)
+		let (clip, _) = try await store.insert(file)
+		Previewer(store: store, links: CountingLinks(), files: thumbs).generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .failed)
+		#expect(await store.thumbnail(for: clip.key) == nil)
+		#expect(try await store.fetch(clip.key)?.fileNames == ["x.bin"])
+	}
+
+	@Test func deleteAndUndoDuringAFetchKeepsOnlyTheFreshResult() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let links = GatedLinks()
+		let previewer = Previewer(store: store, links: links)
+		var saves = 0
+		previewer.onSaved = { saves += 1 }
+		let (clip, _) = try await store.insert(link())
+		previewer.generate(for: clip)
+		while !links.waiting { try await Task.sleep(for: .milliseconds(5)) }
+		let deleted = try #require(try await store.delete(clip.key))
+		try await store.restore(deleted)
+		let restored = try #require(try await store.fetch(clip.key))
+		#expect(restored.generation != clip.generation)
+		previewer.generate(for: restored)
+		#expect(try await waitForState(store, clip.key) == .okNoImage)
+		links.release()
+		while saves < 2 { try await Task.sleep(for: .milliseconds(5)) }
+		#expect(try await store.fetch(clip.key)?.title == "Fresh")
+		#expect(links.calls == 2)
 	}
 
 	@Test func imageThumbnailIsAtMost480Pixels() throws {
