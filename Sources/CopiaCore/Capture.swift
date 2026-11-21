@@ -111,6 +111,12 @@ public struct ActivationLog: Sendable {
 		return seen
 	}
 
+	/// Closes the window at a poll with no copy, without asking which app is frontmost: the last activation is.
+	public mutating func roll() {
+		if let last = activatedSince.last { frontmostAtLastPoll = last }
+		activatedSince = []
+	}
+
 	/// The source is only known when exactly one app (other than Copia) was frontmost.
 	public static func source(of candidates: [String], excluding own: String?) -> String? {
 		let others = candidates.filter { $0 != own }

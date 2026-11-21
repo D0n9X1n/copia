@@ -11,7 +11,9 @@ final class FakePasteboard: PasteboardSource {
 	var typeIdentifiers: Set<String> = []
 	var items: [PasteboardItemData] = []
 	var reads = 0
-	func readItems() -> [PasteboardItemData] { reads += 1; return items }
+	/// Runs inside `readItems`, so a test can change the pasteboard mid-read.
+	var onRead: () -> Void = {}
+	func readItems() -> [PasteboardItemData] { reads += 1; onRead(); return items }
 	func copy(_ text: String, extraTypes: Set<String> = []) {
 		changeCount += 1
 		items = [PasteboardItemData([(PasteboardTypes.string, Data(text.utf8))])]
@@ -81,6 +83,33 @@ final class FakePasteboard: PasteboardSource {
 		pb.copy("after"); w.tick()
 		#expect(drafts().count == 1)
 	}
+
+	@Test func aCopyThatLandsDuringTheReadIsNotStoredUnderTheOldTypes() {
+		let pb = FakePasteboard()
+		let (w, drafts) = make(pb)
+		pb.copy("plain")
+		pb.onRead = { pb.onRead = {}; pb.copy("secret", extraTypes: ["org.nspasteboard.ConcealedType"]) }
+		w.tick()
+		#expect(drafts().isEmpty)
+		w.tick()
+		#expect(drafts().isEmpty)
+		#expect(w.lastDecision == .skipPrivate)
+	}
+
+	@Test func anIgnoredAppVisitedEarlierDoesNotBlockALaterCopy() {
+		let pb = FakePasteboard()
+		var front = "com.apple.TextEdit"
+		let (w, drafts) = make(pb, front: { front })
+		front = "com.1password.1password"
+		w.appActivated(front)
+		w.tick()
+		front = "com.apple.TextEdit"
+		w.appActivated(front)
+		w.tick(); w.tick()
+		pb.copy("hello"); w.tick()
+		#expect(drafts().count == 1)
+		#expect(drafts().first?.sourceBundleID == "com.apple.TextEdit")
+	}
 }
 
 @MainActor
@@ -124,6 +153,20 @@ final class FakePasteboard: PasteboardSource {
 		#expect(result == .accessibilityRequired)
 		#expect(!sent && !closed)
 		#expect(pb.string(forType: .string) == "hi")
+	}
+
+	@Test func aTargetThatLosesFrontDuringTheSettleDelayIsNotPastedInto() async {
+		var front: pid_t = 1
+		let ok = await Paster.activateAndWait(pid: 1, frontmost: { front }, activate: {},
+			sleep: { ms in if ms == Paster.settleMilliseconds { front = 2 } })
+		#expect(!ok)
+	}
+
+	@Test func aTargetThatStaysFrontIsPastedInto() async {
+		var slept: [Int] = []
+		let ok = await Paster.activateAndWait(pid: 1, frontmost: { 1 }, activate: {}, sleep: { slept.append($0) })
+		#expect(ok)
+		#expect(slept == [Paster.settleMilliseconds])
 	}
 
 	@Test func aTargetThatNeverComesForwardIsNotPastedInto() async {

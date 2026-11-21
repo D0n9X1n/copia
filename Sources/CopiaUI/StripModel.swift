@@ -128,7 +128,8 @@ public final class StripModel {
 			return
 		}
 		animator.run(.delete, { self.removingIDs.insert(id) }, {
-			self.removingIDs.remove(id)
+			// An undo during the animation already put the card back.
+			guard self.removingIDs.remove(id) != nil else { return }
 			self.animator.run(.reflow, {
 				self.clips.removeAll { $0.id == id }
 				let remaining = visibleBefore.filter { $0.id != id }
@@ -155,6 +156,7 @@ public final class StripModel {
 		undoEntry = nil
 		dismissToast()
 		animator.run(.undo, {
+			self.removingIDs.remove(entry.clip.id)
 			if !self.clips.contains(where: { $0.id == entry.clip.id }) {
 				self.clips.insert(entry.clip, at: min(entry.index, self.clips.count))
 			}

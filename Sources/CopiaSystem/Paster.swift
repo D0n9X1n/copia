@@ -50,15 +50,27 @@ public final class Paster {
 		return .pasted
 	}
 
+	/// How long the target must stay frontmost before ⌘V is sent.
+	public static let settleMilliseconds = 30
+
 	/// Reactivates the target if needed and waits up to 300 ms for it to be frontmost.
 	public static func activateAndWait(_ app: NSRunningApplication) async -> Bool {
-		if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier { app.activate() }
+		await activateAndWait(pid: app.processIdentifier,
+			frontmost: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+			activate: { app.activate() },
+			sleep: { try? await Task.sleep(for: .milliseconds($0)) })
+	}
+
+	/// The target must still be frontmost after the settle delay; a switch during it would send ⌘V to another app.
+	static func activateAndWait(pid: pid_t, frontmost: () -> pid_t?, activate: () -> Void,
+		sleep: (Int) async -> Void) async -> Bool {
+		if frontmost() != pid { activate() }
 		for _ in 0..<30 {
-			if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
-				try? await Task.sleep(for: .milliseconds(30))
-				return true
+			if frontmost() == pid {
+				await sleep(settleMilliseconds)
+				return frontmost() == pid
 			}
-			try? await Task.sleep(for: .milliseconds(10))
+			await sleep(10)
 		}
 		return false
 	}

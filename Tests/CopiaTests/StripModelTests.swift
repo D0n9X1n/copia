@@ -143,6 +143,23 @@ final class StripRig {
 		#expect(r.model.selectedID == nil)
 	}
 
+	@Test func undoDuringTheDeleteAnimationKeepsTheCard() async {
+		let r = StripRig()
+		var pending: [@MainActor () -> Void] = []
+		r.model.animator = Animator { event, change, completion in
+			change()
+			if event == .delete { pending.append(completion) } else { completion() }
+		}
+		let id = Fixtures.mixed[3].id
+		r.model.select(id)
+		await r.model.deleteSelected()
+		await r.model.undo()
+		pending.forEach { $0() }
+		#expect(r.model.clips.contains { $0.id == id })
+		#expect(!r.model.removingIDs.contains(id))
+		#expect(r.model.selectedID == id)
+	}
+
 	@Test func undoClearsAHidingSearch() async {
 		let r = StripRig()
 		r.model.select(Fixtures.mixed[2].id)

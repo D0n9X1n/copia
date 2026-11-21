@@ -95,10 +95,10 @@ public final class PasteboardWatcher {
 	/// One poll. Called by the timer; tests call it directly.
 	public func tick() {
 		let change = source.changeCount
-		guard change != lastChange else { return }
+		// Every poll closes the window, so only apps in front since the previous poll can count as the source.
+		guard change != lastChange else { log.roll(); return }
 		lastChange = change
-		let current = frontmost()
-		let candidates = log.candidatesAndReset(currentFrontmost: current)
+		let candidates = log.candidatesAndReset(currentFrontmost: frontmost())
 		guard !paused else { return }
 		let types = source.typeIdentifiers
 		// Check the type list before reading any data, so concealed content is never read.
@@ -106,7 +106,10 @@ public final class PasteboardWatcher {
 		guard decision == .skipEmpty else { lastDecision = decision; return }
 		let own = Bundle.main.bundleIdentifier
 		let sourceID = ActivationLog.source(of: candidates, excluding: own)
-		let draft = ClipDraft(items: source.readItems(), sourceBundleID: sourceID,
+		let items = source.readItems()
+		// A copy that landed during the read was checked against the old types; drop it and let the next poll judge it.
+		guard source.changeCount == change else { return }
+		let draft = ClipDraft(items: items, sourceBundleID: sourceID,
 			sourceName: sourceID.flatMap(appName), copiedAt: now())
 		decision = Capture.decide(types: types, draft: draft, candidates: candidates, ignoredApps: ignoredApps)
 		lastDecision = decision

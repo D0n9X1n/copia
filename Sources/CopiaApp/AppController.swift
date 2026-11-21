@@ -45,8 +45,8 @@ public final class AppController {
 	let paster = Paster()
 	let prefs: Preferences
 	private var menu: MenuBarController?
-	private var keys: [UUID: String] = [:]
-	private var deleted: [UUID: DeletedClip] = [:]
+	private var index = ClipIndex<DeletedClip>()
+	private var reloads = 0
 	private var target: NSRunningApplication?
 	private var retentionTimer: Timer?
 	private var settingsWindow: NSWindow?
@@ -111,29 +111,29 @@ public final class AppController {
 			guard let self else { return }
 			panel.hide()
 			thumbnails.removeAll()
-			deleted.removeAll()
+			index.clearDeletions()
 			Task { await self.store.emptyTrash() }
 		}
 		model.actions = StripActions(
 			paste: { [weak self] id, plain, beginClose in
-				guard let self, let key = keys[id] else { return .copied }
+				guard let self, let key = index.keys[id] else { return .copied }
 				let items = try await store.items(for: key)
 				return await paster.paste(items, plain: plain, target: target, beginClose: beginClose)
 			},
 			copy: { [weak self] id in
-				guard let self, let key = keys[id] else { return }
+				guard let self, let key = index.keys[id] else { return }
 				paster.write(try await store.items(for: key), plain: false)
 			},
 			delete: { [weak self] id in
-				guard let self, let key = keys[id] else { return }
-				if let gone = try await store.delete(key) { deleted[id] = gone }
+				guard let self, let key = index.keys[id] else { return }
+				if let gone = try await store.delete(key) { index.noteDeleted(id, gone) }
 			},
 			restore: { [weak self] _, _ in },
 			openAccessibilitySettings: { Permissions.requestAccessibility(); Permissions.openAccessibilitySettings() })
 		model.actions.restore = { [weak self] clip, _ in
-			guard let self, let gone = deleted[clip.id] else { return }
+			guard let self, let gone = index.deletion(for: clip.id) else { return }
 			try await store.restore(gone)
-			deleted[clip.id] = nil
+			index.noteRestored(clip.id, key: gone.clip.key)
 			if let restored = try await store.fetch(gone.clip.key) { previewer.generate(for: restored) }
 		}
 		watcher.onDraft = { [weak self] draft in
@@ -198,19 +198,25 @@ public final class AppController {
 		}
 	}
 
+	/// Shows the store's current history. The newest reload wins, and one that raced a delete or restore fetches again.
 	public func reload() async {
-		guard let stored = try? await store.recent() else { return }
-		var map: [UUID: String] = [:]
-		var clips: [Clip] = []
-		for s in stored {
-			let id = ClipDraft.uuid(forKey: s.key)
-			map[id] = s.key
-			clips.append(Self.clip(from: s, thumbnail: await store.thumbnail(for: s.key)))
+		reloads += 1
+		let mine = reloads
+		while true {
+			let fetchedAt = index.mutations
+			guard let stored = try? await store.recent() else { return }
+			var map: [UUID: String] = [:]
+			var clips: [Clip] = []
+			for s in stored {
+				let id = ClipDraft.uuid(forKey: s.key)
+				map[id] = s.key
+				clips.append(Self.clip(from: s, thumbnail: await store.thumbnail(for: s.key)))
+			}
+			guard mine == reloads else { return }
+			guard index.apply(map, fetchedAt: fetchedAt) else { continue }
+			model.applySnapshot(clips)
+			return
 		}
-		keys = map
-		// A recopy of a deleted item ends its undo.
-		for id in deleted.keys where map[id] != nil { deleted[id] = nil }
-		model.applySnapshot(clips)
 	}
 
 	static func clip(from s: StoredClip, thumbnail: URL?) -> Clip {
@@ -265,7 +271,7 @@ public final class AppController {
 			guard let self else { return }
 			Task {
 				try? await self.store.eraseAll()
-				self.deleted.removeAll()
+				self.index.noteErased()
 				await self.reload()
 			}
 		}
