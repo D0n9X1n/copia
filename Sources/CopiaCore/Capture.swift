@@ -110,31 +110,39 @@ public enum Capture {
 	}
 }
 
-/// The apps that were frontmost between two polls. Activations are logged as they happen.
+/// Every app activation with its timestamp. A poll's window runs from the previous poll to this one, and its
+/// candidates are the apps frontmost at any time in it: the one in front when it opened, then each activated in it.
 public struct ActivationLog: Sendable {
-	private var frontmostAtLastPoll: String?
-	private var activatedSince: [String] = []
+	/// Sorted by time; equal times keep the order they were logged in.
+	private var entries: [(bundleID: String, at: Date)] = []
+	private var windowStart: Date
 
-	public init(frontmost: String? = nil) { frontmostAtLastPoll = frontmost }
-
-	public mutating func activated(_ bundleID: String) {
-		activatedSince.append(bundleID)
+	public init(frontmost: String? = nil, at time: Date) {
+		windowStart = time
+		if let frontmost { entries = [(frontmost, time)] }
 	}
 
-	/// Every app that could have made the copy seen at this poll. Resets the window.
-	public mutating func candidatesAndReset(currentFrontmost: String?) -> [String] {
+	public mutating func activated(_ bundleID: String, at time: Date) {
+		let index = entries.lastIndex { $0.at <= time }.map { $0 + 1 } ?? 0
+		entries.insert((bundleID, time), at: index)
+	}
+
+	/// Every app that could have made the copy seen at the poll at `now`, then closes the window there.
+	/// The poll's own reading of the frontmost app counts as an activation at `now`.
+	public mutating func candidates(until now: Date, currentFrontmost: String?) -> [String] {
+		if let currentFrontmost { activated(currentFrontmost, at: now) }
+		let opening = entries.last { $0.at <= windowStart }.map(\.bundleID)
+		let during = entries.filter { $0.at > windowStart && $0.at <= now }.map(\.bundleID)
 		var seen: [String] = []
-		for id in [frontmostAtLastPoll].compactMap({ $0 }) + activatedSince + [currentFrontmost].compactMap({ $0 })
-		where !seen.contains(id) { seen.append(id) }
-		frontmostAtLastPoll = currentFrontmost
-		activatedSince = []
+		for id in [opening].compactMap({ $0 }) + during where !seen.contains(id) { seen.append(id) }
+		roll(at: now)
 		return seen
 	}
 
-	/// Closes the window at a poll with no copy, without asking which app is frontmost: the last activation is.
-	public mutating func roll() {
-		if let last = activatedSince.last { frontmostAtLastPoll = last }
-		activatedSince = []
+	/// Closes the window at a poll with no copy. Keeps the app in front at `now` and anything stamped later.
+	public mutating func roll(at now: Date) {
+		if let base = entries.lastIndex(where: { $0.at <= now }) { entries.removeFirst(base) }
+		windowStart = now
 	}
 
 	/// The source is only known when exactly one app (other than Copia) was frontmost.

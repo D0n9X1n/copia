@@ -60,7 +60,7 @@ public final class PasteboardWatcher {
 		self.frontmost = frontmost
 		self.appName = appName
 		lastChange = source.changeCount
-		log = ActivationLog(frontmost: frontmost())
+		log = ActivationLog(frontmost: frontmost(), at: now())
 	}
 
 	public func start() {
@@ -84,21 +84,23 @@ public final class PasteboardWatcher {
 		observer = nil
 	}
 
-	public func appActivated(_ bundleID: String) { log.activated(bundleID) }
+	/// Logs an activation at the time it is reported.
+	public func appActivated(_ bundleID: String) { log.activated(bundleID, at: now()) }
 
 	public func setPaused(_ value: Bool) {
 		paused = value
 		// Resuming starts from the current contents, so anything copied while paused is never captured.
-		if !value { lastChange = source.changeCount; _ = log.candidatesAndReset(currentFrontmost: frontmost()) }
+		if !value { lastChange = source.changeCount; _ = log.candidates(until: now(), currentFrontmost: frontmost()) }
 	}
 
 	/// One poll. Called by the timer; tests call it directly.
 	public func tick() {
 		let change = source.changeCount
+		let pollTime = now()
 		// Every poll closes the window, so only apps in front since the previous poll can count as the source.
-		guard change != lastChange else { log.roll(); return }
+		guard change != lastChange else { log.roll(at: pollTime); return }
 		lastChange = change
-		let candidates = log.candidatesAndReset(currentFrontmost: frontmost())
+		let candidates = log.candidates(until: pollTime, currentFrontmost: frontmost())
 		guard !paused else { return }
 		let types = source.typeIdentifiers
 		// Check the type list before reading any data, so concealed content is never read.
