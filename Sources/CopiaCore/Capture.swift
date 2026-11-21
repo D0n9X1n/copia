@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 
 /// Pure capture rules: what to keep, what kind it is, and how it is shown.
 public enum Capture {
@@ -53,6 +54,25 @@ public enum Capture {
 		return text.trimmingCharacters(in: .whitespacesAndNewlines)
 	}
 
+	/// The first item's image data, PNG before TIFF.
+	public static func imageData(_ draft: ClipDraft) -> Data? {
+		draft.items.lazy.compactMap { $0.data(for: PasteboardTypes.png) ?? $0.data(for: PasteboardTypes.tiff) }.first
+	}
+
+	/// "8000×8000 · PNG": pixel size and format from the image header, without decoding the pixels.
+	static func imageSize(_ data: Data) -> String? {
+		guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+			let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+			let width = props[kCGImagePropertyPixelWidth] as? Int, let height = props[kCGImagePropertyPixelHeight] as? Int
+		else { return nil }
+		let format: String? = switch CGImageSourceGetType(source).map({ $0 as String }) {
+		case PasteboardTypes.png: "PNG"
+		case PasteboardTypes.tiff: "TIFF"
+		default: nil
+		}
+		return (["\(width)×\(height)"] + [format].compactMap { $0 }).joined(separator: " · ")
+	}
+
 	public static func fileURLs(_ draft: ClipDraft) -> [URL] {
 		draft.items.compactMap { item in
 			item.data(for: PasteboardTypes.fileURL).flatMap { String(data: $0, encoding: .utf8) }.flatMap(URL.init(string:))
@@ -100,12 +120,13 @@ public enum Capture {
 	}
 
 	/// Footer text, e.g. "1,204 chars", "3 files", "example.com".
-	public static func meta(kind: ClipKind, text: String, files: [URL], byteSize: Int, url: URL?) -> String {
+	/// An image shows its pixel size and format, read from `image`'s header, else its byte size.
+	public static func meta(kind: ClipKind, text: String, files: [URL], byteSize: Int, url: URL?, image: Data? = nil) -> String {
 		let size = ByteCountFormatter.string(fromByteCount: Int64(byteSize), countStyle: .file)
 		switch kind {
 		case .text: return "\(text.count.formatted()) chars"
 		case .richText: return "\(text.count.formatted()) chars · RTF"
-		case .image: return size
+		case .image: return image.flatMap(imageSize) ?? size
 		case .link: return url?.host() ?? "Link"
 		case .file: return files.count == 1 ? "1 file" : "\(files.count.formatted()) files"
 		case .color: return "Hex color"

@@ -539,13 +539,56 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		#expect(previewer.stats.decodes == 2)
 	}
 
-	@Test func imageThumbnailIsAtMost480Pixels() throws {
+	/// An 8000×8000 PNG (brief:79) through the real capture, store and thumbnail path: its footer gives its size,
+	/// and its saved thumbnail is at most 384 px, enough for a 192 pt card at 2×.
+	@Test func an8000PixelImageIsCapturedStoredAndThumbnailed() async throws {
+		let started = ContinuousClock.now
+		let png = try Self.solidPNG(side: 8000)
+		let pb = FakePasteboard()
+		var drafts: [ClipDraft] = []
+		let watcher = PasteboardWatcher(source: pb, frontmost: { "com.apple.Preview" }, appName: { _ in "Preview" })
+		watcher.onDraft = { drafts.append($0) }
+		pb.changeCount += 1
+		pb.items = [PasteboardItemData([(PasteboardTypes.png, png)])]
+		pb.typeIdentifiers = [PasteboardTypes.png]
+		watcher.tick()
+		let draft = try #require(drafts.first)
+
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let previewer = Previewer(store: store, links: CountingLinks())
+		let (clip, _) = try await store.insert(draft)
+		#expect(clip.kind == .image)
+		#expect(clip.meta == "8000×8000 · PNG")
+		previewer.generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		let thumb = try #require(await store.thumbnail(for: clip.key))
+		let image = try #require(NSBitmapImageRep(data: try Data(contentsOf: thumb)))
+		#expect(max(image.pixelsWide, image.pixelsHigh) <= 384)
+		#expect(image.pixelsWide == image.pixelsHigh)
+		#expect(ContinuousClock.now - started < .seconds(2))
+	}
+
+	/// A solid 8-bit grayscale PNG: 64 MB to draw, a few hundred KB encoded.
+	static func solidPNG(side: Int) throws -> Data {
+		guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side,
+			space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { throw CocoaError(.featureUnsupported) }
+		ctx.setFillColor(gray: 0.5, alpha: 1)
+		ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+		let out = NSMutableData()
+		guard let image = ctx.makeImage(), let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil)
+		else { throw CocoaError(.featureUnsupported) }
+		CGImageDestinationAddImage(dest, image, nil)
+		guard CGImageDestinationFinalize(dest) else { throw CocoaError(.featureUnsupported) }
+		return out as Data
+	}
+
+	@Test func imageThumbnailIsAtMost384Pixels() throws {
 		let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2000, pixelsHigh: 1000, bitsPerSample: 8, samplesPerPixel: 4,
 			hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
 		let png = try #require(rep.representation(using: .png, properties: [:]))
 		let thumb = try #require(Previewer.thumbnailPNG(from: png))
 		let out = try #require(NSBitmapImageRep(data: thumb))
-		#expect(max(out.pixelsWide, out.pixelsHigh) <= 480)
+		#expect(max(out.pixelsWide, out.pixelsHigh) <= 384)
 		#expect(out.hasAlpha)
 	}
 }

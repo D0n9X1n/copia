@@ -147,7 +147,8 @@ public actor ClipStore {
 		let clip = StoredClip(key: key, kind: kind, title: title, previewText: String((text + " " + fileNames.joined(separator: " ")).prefix(4_000)),
 			isCode: kind == .text && Capture.looksLikeCode(text), sourceBundle: draft.sourceBundleID, sourceName: draft.sourceName,
 			firstCopied: draft.copiedAt, lastCopied: draft.copiedAt, copyCount: 1, byteSize: draft.byteSize,
-			meta: Capture.meta(kind: kind, text: text, files: fileURLs, byteSize: draft.byteSize, url: url),
+			meta: Capture.meta(kind: kind, text: text, files: fileURLs, byteSize: draft.byteSize, url: url,
+				image: kind == .image ? Capture.imageData(draft) : nil),
 			colorHex: kind == .color ? Capture.colorHex(text) : nil, url: url?.absoluteString, fileNames: fileNames,
 			previewState: [.image, .link, .file].contains(kind) ? .pending : .ok, generation: try nextGeneration())
 		try files.write(Self.encode(draft.items), to: blobURL(key))
