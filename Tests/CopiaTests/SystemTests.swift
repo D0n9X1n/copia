@@ -112,6 +112,47 @@ final class FakePasteboard: PasteboardSource {
 		#expect(drafts().first?.sourceBundleID == "com.apple.TextEdit")
 	}
 
+	/// The reviewer's sequence: the wall clock steps back while an ignored app comes to the front and stays there.
+	@Test func anIgnoredAppInFrontIsSkippedWhenTheWallClockStepsBack() {
+		let pb = FakePasteboard()
+		var wall = Date(timeIntervalSince1970: 100)
+		var front = "com.apple.TextEdit"
+		var drafts: [ClipDraft] = []
+		let w = PasteboardWatcher(source: pb, ignoredApps: ["com.1password.1password"], now: { wall }, frontmost: { front },
+			appName: { _ in "App" })
+		w.onDraft = { drafts.append($0) }
+		wall = Date(timeIntervalSince1970: 99.8)
+		front = "com.1password.1password"
+		w.appActivated(front)
+		pb.copy("secret")
+		wall = Date(timeIntervalSince1970: 99.9)
+		w.tick()
+		#expect(drafts.isEmpty)
+		#expect(w.lastDecision == .skipIgnoredApp)
+	}
+
+	/// Activation windows run on a monotonic clock: an ignored app in front only between polls still skips the copy
+	/// when the wall clock steps back.
+	@Test func activationWindowsIgnoreAWallClockThatStepsBack() {
+		let pb = FakePasteboard()
+		var wall = Date(timeIntervalSince1970: 100)
+		var uptime: TimeInterval = 1
+		var front = "com.apple.TextEdit"
+		var drafts: [ClipDraft] = []
+		let w = PasteboardWatcher(source: pb, ignoredApps: ["com.1password.1password"], now: { wall }, uptime: { uptime },
+			frontmost: { front }, appName: { _ in "App" })
+		w.onDraft = { drafts.append($0) }
+		wall = Date(timeIntervalSince1970: 99.8); uptime = 2
+		front = "com.1password.1password"; w.appActivated(front)
+		pb.copy("secret")
+		uptime = 3
+		front = "com.apple.TextEdit"; w.appActivated(front)
+		wall = Date(timeIntervalSince1970: 99.9); uptime = 4
+		w.tick()
+		#expect(drafts.isEmpty)
+		#expect(w.lastDecision == .skipIgnoredApp)
+	}
+
 	/// Rich text captured from the pasteboard shows its plain text with an "RTF" footer (Amendment 5).
 	@Test func capturedRichTextIsSavedWithAnRTFFooter() async throws {
 		let pb = FakePasteboard()
