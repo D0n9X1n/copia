@@ -188,7 +188,11 @@ enum Bench {
 				print("HOLDING pid=\(getpid())"); fflush(stdout)
 				try? await Task.sleep(for: .seconds(hold))
 			}
-			for _ in 0..<controller.model.visibleClips.count { controller.model.move(1) }
+			// Step the selection through every card, pausing a frame every few cards so the row scrolls and realises each one.
+			for step in 0..<controller.model.visibleClips.count {
+				controller.model.move(1)
+				if step % 4 == 3 { try? await Task.sleep(for: .milliseconds(17)) }
+			}
 			try? await Task.sleep(for: .milliseconds(500))
 			var openFootprint = footprintMB()
 			controller.toggleHistory()
@@ -249,12 +253,12 @@ enum Bench {
 						}
 					}
 					report["motionSettle"] = motionReport
-					if BenchPlan.gatesPresentedFrames(refreshHz: refreshHz) {
-						checks += presented
-					} else {
+					let routed = BenchPlan.route(presented: presented, refreshHz: refreshHz)
+					checks += routed.gated
+					if !routed.reported.isEmpty {
 						report["reportedOnly"] = [
 							"reason": "main display at \(Int(refreshHz)) Hz; presented-frame checks gate at 120 Hz (Amendment 11)",
-							"checks": presented.map { ["check": $0.0, "passes": $0.1] as [String: Any] },
+							"checks": routed.reported.map { ["check": $0.0, "passes": $0.1] as [String: Any] },
 						] as [String: Any]
 					}
 				} catch {

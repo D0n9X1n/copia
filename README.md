@@ -109,7 +109,7 @@ Then copy something and press <kbd>⌘Y</kbd>.
 |---|---|---|
 | Idle CPU, strip hidden | < 0.1% | 0.05% |
 | Idle memory | < 40 MB | 31 MB |
-| Strip open, every card shown once | < 120 MB | 37–39 MB |
+| Strip open, after scrolling through every card | < 120 MB | 34 MB, 92 MB after scrolling all 1,000 |
 | ⌘Y to first frame, in process | p95 < 100 ms | p50 77–81 ms, p95 91–93 ms |
 
 <sub>M3 Pro, macOS 27.2, release build, a 1512 pt strip. On this Mac's 60 Hz display the first presented frame arrives at p95 120–125 ms; presented-frame budgets are checked on a 120 Hz display. How it stays there: [Performance](wiki/Performance.md).</sub>

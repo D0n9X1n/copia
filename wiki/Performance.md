@@ -28,7 +28,7 @@ The bench picks its path at launch and writes it to the report as `path`:
 
 ### How each budget is measured
 
-- **Idle CPU and memory.** After one warm-up open and close, the strip stays hidden for the idle window. CPU is `getrusage` time over wall time, and memory is `phys_footprint`. Open memory is read after scrolling through every card once, before any recording starts.
+- **Idle CPU and memory.** After one warm-up open and close, the strip stays hidden for the idle window. CPU is `getrusage` time over wall time, and memory is `phys_footprint`. Open memory is read after stepping the selection through every card, pausing a frame every four cards so the row scrolls and realises each one, before any recording starts.
 - **⌘Y to first presented frame.** The time from the toggle call to the first captured frame whose first-card header (its top 16 pt, at least 8 pt of it visible) matches the settled open frame. Before each open, the first clip is selected, so the first card sits at the leading edge.
 - **⌘Y to first frame, in process.** The time from the toggle call until the panel is on screen and visible, its cards are mounted, a layer with committed contents lies in the row's leading card slot, and one more transaction has completed.
 - **Hidden strip.** `Diagnostics` counts SwiftUI body evaluations (StripView and ClipCard), displays and draws of the panel's counting root layer, and display-link ticks. Copia owns no display link, so that counter stays at 0 by construction. All three must stay at 0 over the idle window, with no Copia window visible. A positive control then forces a redraw while the strip is hidden (it changes a value the strip's body reads, lays out, and displays the root layer). Both the body and layer counters must rise, or the bench fails.
@@ -50,7 +50,8 @@ Measured with the default run (60 s idle, 50 opens, 3 motion rounds) on an M3 Pr
 |---|---|---|---|---|
 | Idle CPU | 0.054% | 0.056% | 0.052% | 0.053% |
 | Idle memory | 30.7 MB | 30.8 MB | 30.8 MB | 30.5 MB |
-| Strip open, every card shown once | 37.8 MB | 38.8 MB | 36.7 MB | 38.0 MB |
+| Strip open, before scrolling | 34 MB | 34 MB | 34 MB | 34 MB |
+| Strip open, after scrolling all 1,000 cards | 92 MB in a later run (the earlier runs above stepped the selection without letting the row scroll) | | | |
 | ⌘Y to first frame, in process | p50 79.0 ms, p95 91.8 ms | p50 80.6 ms, p95 91.5 ms | p50 76.7 ms, p95 90.7 ms | p50 77.8 ms, p95 92.7 ms |
 | Hidden strip: bodies, layer displays, display-link ticks | 0, 0, 0; control rose | 0, 0, 0; control rose | 0, 0, 0; control rose | 0, 0, 0; control rose |
 | Frozen-row control | skipped | skipped | fails, as required | fails, as required |
@@ -64,7 +65,7 @@ Presented frames, reported at 60 Hz (gated only at 120 Hz):
 | Open, normal / Reduce Motion | 253.6 / 168.5 ms | 250.0 / 150.0 | 250.0 / 150.0 |
 | Close | 198.9 / 168.5 ms | 216.7 / 200.0 | 200.0 / 200.0 |
 | Lens | 199.6 / 20.0 ms | 216.7 / 16.7 | 200.0 / 16.7 |
-| Delete | 464.9 / 318.5 ms | 300.0 / 183.3 | 300.0 / 183.3 |
+| Delete (limits before Amendment 14's overlap budget) | 464.9 / 318.5 ms | 300.0 / 183.3 | 300.0 / 183.3 |
 | Undo | 205.7 / 168.5 ms | 216.7 / 183.3 | 216.7 / 183.3 |
 
 ### What keeps it light

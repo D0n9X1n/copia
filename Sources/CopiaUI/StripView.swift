@@ -7,10 +7,13 @@ public struct CopiaOverrides: Sendable, Equatable {
 	public var reduceTransparency: Bool?
 	public var highContrast: Bool?
 	public var reduceMotion: Bool?
-	public init(reduceTransparency: Bool? = nil, highContrast: Bool? = nil, reduceMotion: Bool? = nil) {
+	/// Lengthens the card's header labels by this factor, standing in for a longer translation (the brief's 40% check).
+	public var labelGrowth: Double?
+	public init(reduceTransparency: Bool? = nil, highContrast: Bool? = nil, reduceMotion: Bool? = nil, labelGrowth: Double? = nil) {
 		self.reduceTransparency = reduceTransparency
 		self.highContrast = highContrast
 		self.reduceMotion = reduceMotion
+		self.labelGrowth = labelGrowth
 	}
 }
 

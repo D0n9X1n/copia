@@ -24,6 +24,11 @@ enum BenchPlan {
 	/// they are measured and reported (Amendment 11). Half a hertz of slack absorbs a refresh measured as 119.9 Hz.
 	static func gatesPresentedFrames(refreshHz: Double) -> Bool { refreshHz >= 119.5 }
 
+	/// Splits presented-frame checks into those that gate the run and those only reported, by the display's refresh.
+	static func route(presented: [(String, Bool)], refreshHz: Double) -> (gated: [(String, Bool)], reported: [(String, Bool)]) {
+		gatesPresentedFrames(refreshHz: refreshHz) ? (presented, []) : ([], presented)
+	}
+
 	/// The strip width every run measures at, a 14-inch MacBook Pro's screen, so local and CI results compare (Amendment 11).
 	static let referenceWidth = 1_512.0
 

@@ -32,6 +32,17 @@ import Testing
 		#expect(!BenchPlan.gatesPresentedFrames(refreshHz: 60))
 	}
 
+	@Test func presentedFailuresGateAt120HzAndAreOnlyReportedBelow() {
+		let presented = [("presentedOpenP95ms < 100.0", false), ("scrollSmoothness", true), ("motionSettle.close", false)]
+		let fast = BenchPlan.route(presented: presented, refreshHz: 120)
+		#expect(fast.gated.map(\.0) == presented.map(\.0))
+		#expect(fast.gated.filter { !$0.1 }.count == 2)
+		#expect(fast.reported.isEmpty)
+		let slow = BenchPlan.route(presented: presented, refreshHz: 60)
+		#expect(slow.gated.isEmpty)
+		#expect(slow.reported.map(\.0) == presented.map(\.0))
+	}
+
 	@Test func theOpenGateRunsAtTheReferenceWidthUnlessAWidthIsGiven() {
 		#expect(BenchPlan.referenceWidth == 1_512)
 		#expect(BenchPlan.stripWidth(requested: nil, screen: 2_924) == 1_512)

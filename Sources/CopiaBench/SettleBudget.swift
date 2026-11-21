@@ -20,24 +20,16 @@ enum SettleBudget {
 		}
 	}
 
-	/// The analytic settle time of one event. A delete fades the card, then reflows its neighbours when the fade completes.
+	/// The analytic settle time of one event. A delete fades the card while its neighbours reflow (Amendment 14), so it
+	/// settles when the slower of the two does.
 	static func analytic(_ event: MotionEvent, reduced: Bool) -> Double {
 		let curve = Motion.value(event, reduced: reduced)
 		guard event == .delete else { return settle(curve) }
-		return logicalDuration(curve) + settle(Motion.value(.reflow, reduced: reduced))
+		return max(settle(curve), settle(Motion.value(.reflow, reduced: reduced)))
 	}
 
 	static func limit(_ event: MotionEvent, reduced: Bool) -> Double {
 		analytic(event, reduced: reduced) + margin
-	}
-
-	/// When a curve's completion fires (`.logicallyComplete`): the end of a timed curve.
-	private static func logicalDuration(_ curve: MotionCurve) -> Double {
-		switch curve {
-		case .none: 0
-		case let .linear(duration), let .easeIn(duration), let .easeInOut(duration): duration
-		case .spring: settle(curve)
-		}
 	}
 
 	/// The unit time at which a monotonic curve reaches 1 - tolerance.

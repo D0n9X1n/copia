@@ -175,13 +175,13 @@ struct ClipCard: View {
 				}
 			}
 			.frame(width: 20, height: 20)
-			Text(p.typeLabel)
+			Text(Self.grown(p.typeLabel, by: overrides.labelGrowth))
 				.font(.system(size: 13, weight: .semibold))
 				.foregroundStyle(Theme.ink)
 				.lineLimit(1)
 				.truncationMode(.tail)
 			Spacer(minLength: 4)
-			Text(Self.relative(clip.timestamp, now: now))
+			Text(Self.grown(Self.relative(clip.timestamp, now: now), by: overrides.labelGrowth))
 				.font(.system(size: 11, weight: .medium).monospacedDigit())
 				.foregroundStyle(Theme.ink)
 				.lineLimit(1)
@@ -212,6 +212,13 @@ struct ClipCard: View {
 		}
 		.padding(.horizontal, 12)
 		.frame(height: Theme.footerHeight)
+	}
+
+	/// `label` lengthened to `factor` times its length by repeating its letters after it, or unchanged when nil.
+	nonisolated static func grown(_ label: String, by factor: Double?) -> String {
+		guard let factor, factor > 1, !label.isEmpty else { return label }
+		let extra = Int((Double(label.count) * (factor - 1)).rounded(.up))
+		return label + String(String(repeating: label.lowercased(), count: extra / label.count + 1).prefix(extra))
 	}
 
 	nonisolated static func relative(_ date: Date, now: Date) -> String {
