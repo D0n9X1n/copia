@@ -32,7 +32,9 @@ jobs:
           python3 scripts/check-wiki.py --self-test
 
       - name: Script self-tests
-        run: scripts/test-check-archs.sh
+        run: |
+          scripts/test-check-archs.sh
+          scripts/test-setup-release-signing.sh
 
       - name: Build (universal, release)
         run: swift build -c release --arch arm64 --arch x86_64
