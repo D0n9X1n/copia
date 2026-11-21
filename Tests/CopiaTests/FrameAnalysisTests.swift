@@ -51,6 +51,13 @@ import Testing
 			shifts: 0...69, minOverlap: 8, maxCost: 4) == nil)
 	}
 
+	@Test func shiftsThatPushTheWholeTemplateOutOfTheFrameAreSkipped() {
+		// Rows 40..<70 shifted by 60 or more land entirely below a 70-row frame.
+		let frame = Self.moved(Self.reference, by: 12, axis: .vertical, over: Self.wallpaper)
+		#expect(FrameAnalysis.locate(rows: 40..<70, columns: 0..<90, of: Self.reference, in: frame, axis: .vertical,
+			shifts: -80...80, minOverlap: 8, maxCost: 4) == 12)
+	}
+
 	@Test func settleTimeRunsFromTheTriggerToTheFrameThatStaysSettled() {
 		let times = [0.0, 0.010, 0.020, 0.030, 0.040, 0.050]
 		let errors = [1.0, 0.5, 0.005, 0.02, 0.0, 0.001]
@@ -62,6 +69,26 @@ import Testing
 		#expect(FrameAnalysis.settleTime(times: [0, 0.01], errors: [1, 0.2], trigger: 0, tolerance: 0.01) == nil)
 		#expect(FrameAnalysis.settleTime(times: [0, 0.01], errors: [0, 0], trigger: 0, tolerance: 0.01) == nil)
 		#expect(FrameAnalysis.settleTime(times: [], errors: [], trigger: 0, tolerance: 0.01) == nil)
+	}
+
+	@Test func motionStartsOneRefreshBeforeItsFirstVisibleChangeButNeverBeforeTheTrigger() {
+		let times = [0.0, 0.050, 0.0667, 0.0833]
+		#expect(abs(FrameAnalysis.motionStart(times: times, changed: [false, false, true, true], trigger: 0.01, refresh: 1.0 / 60)
+			- (0.0667 - 1.0 / 60)) < 1e-9)
+		#expect(FrameAnalysis.motionStart(times: times, changed: [false, true, true, true], trigger: 0.045, refresh: 1.0 / 60) == 0.045)
+		#expect(FrameAnalysis.motionStart(times: times, changed: [false, false, false, false], trigger: 0.01, refresh: 1.0 / 60) == 0.01)
+		// A change before the trigger is not this motion's.
+		#expect(FrameAnalysis.motionStart(times: times, changed: [true, false, false, true], trigger: 0.01, refresh: 1.0 / 60)
+			== 0.0833 - 1.0 / 60)
+	}
+
+	@Test func changedPixelsCountsOnlyClearDifferencesInTheRegion() {
+		let a = Luma(width: 10, height: 10, fill: 100)
+		var b = a
+		b[1, 1] = 120
+		b[2, 2] = 104 // below the threshold
+		b[9, 9] = 200 // outside the region
+		#expect(a.changedPixels(b, rows: 0..<5, columns: 0..<5, threshold: 8) == 1)
 	}
 
 	@Test func centroidFindsTheColumnsThatDifferFromTheBackground() {

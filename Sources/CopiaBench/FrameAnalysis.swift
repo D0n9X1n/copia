@@ -54,6 +54,15 @@ struct Luma: Equatable, Sendable {
 		return Double(sum) / Double(rows.count * columns.count)
 	}
 
+	/// Pixels inside `rows` × `columns` that differ from `other` by more than `threshold`.
+	func changedPixels(_ other: Luma, rows: Range<Int>, columns: Range<Int>, threshold: Int) -> Int {
+		var count = 0
+		for y in rows {
+			for x in columns where abs(Int(self[x, y]) - Int(other[x, y])) > threshold { count += 1 }
+		}
+		return count
+	}
+
 	/// FNV-1a over the pixels: equal crops hash alike, any change almost surely does not.
 	func hash() -> UInt64 {
 		var h: UInt64 = 0xcbf2_9ce4_8422_2325
@@ -88,8 +97,9 @@ enum FrameAnalysis {
 		let across = axis == .vertical ? columns : rows
 		for shift in shifts {
 			// Lines along the axis that land inside the frame after the shift.
-			let visible = max(lines.lowerBound, -shift)..<min(lines.upperBound, limit - shift)
-			guard visible.count >= minOverlap else { continue }
+			let low = max(lines.lowerBound, -shift), high = min(lines.upperBound, limit - shift)
+			guard high - low >= minOverlap else { continue }
+			let visible = low..<high
 			let samples = visible.count * ((across.count + step - 1) / step)
 			let budget = (best?.cost ?? .infinity) * Double(samples)
 			var sum = 0
@@ -111,6 +121,14 @@ enum FrameAnalysis {
 	static func settleTime(times: [Double], errors: [Double], trigger: Double, tolerance: Double) -> Double? {
 		guard let last = errors.lastIndex(where: { $0 > tolerance }), last + 1 < times.count else { return nil }
 		return times[last + 1] - trigger
+	}
+
+	/// When a motion started on screen: one refresh before its first visibly changed frame at or after `trigger`
+	/// (that frame already shows up to one refresh of motion), never earlier than the trigger.
+	/// This leaves out the compositor's trigger-to-screen latency, which is not part of the motion.
+	static func motionStart(times: [Double], changed: [Bool], trigger: Double, refresh: Double) -> Double {
+		guard let first = times.indices.first(where: { times[$0] >= trigger && changed[$0] }) else { return trigger }
+		return max(trigger, times[first] - refresh)
 	}
 
 	/// The x centroid of pixels in `rows` × `columns` that differ from `background` by more than `threshold`.
