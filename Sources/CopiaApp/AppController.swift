@@ -121,7 +121,7 @@ public final class AppController {
 		KeyboardShortcuts.onKeyUp(for: .copiaHistory) { [weak self] in self?.toggleHistory() }
 		KeyboardShortcuts.onKeyUp(for: .copiaPause) { [weak self] in self?.togglePause() }
 		let timer = Timer(timeInterval: Self.retentionInterval, repeats: true) { [weak self] _ in
-			MainActor.assumeIsolated { Task { await self?.retentionTick() } }
+			MainActor.assumeIsolated { _ = Task { await self?.retentionTick() } }
 		}
 		timer.tolerance = 300
 		RunLoop.main.add(timer, forMode: .common)
