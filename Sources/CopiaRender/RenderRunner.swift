@@ -12,6 +12,12 @@ struct Scene {
 	var overrides = CopiaOverrides()
 	var clips: (_ mixed: [Clip], _ extremes: [Clip]) -> [Clip] = { mixed, _ in mixed }
 	var prepare: @MainActor (StripModel) async -> Void = { _ in }
+	/// Records contrast probes (glass text and the lens) in the manifest for `--check-contrast`.
+	var checkContrast = false
+	/// Runs after the strip settles under a slowed animator; the capture lands halfway through it.
+	var midway: (@MainActor (StripModel) async -> Void)?
+	/// Lays every card out at once (CardSheet) instead of the strip.
+	var sheet = false
 }
 
 /// Renders each strip state as a real window over a fixed wallpaper and captures it with `screencapture`.
@@ -19,22 +25,30 @@ struct Scene {
 enum RenderRunner {
 	/// A 1440×900 "screen" placed at the top-left of the main display.
 	static let stage = CGSize(width: 1440, height: 900)
+	/// Midway scenes run their transition this long and are captured at half of it.
+	static let midwayDuration = 5.0
 
 	static func scenes() -> [Scene] {
 		var list: [Scene] = []
 		for dark in [false, true] {
 			for wallpaperDark in [false, true] {
 				let suffix = "\(dark ? "dark" : "light")-\(wallpaperDark ? "darkwall" : "brightwall")"
-				list.append(Scene(name: "01-mixed-\(suffix)", dark: dark, wallpaperDark: wallpaperDark))
+				list.append(Scene(name: "01-mixed-\(suffix)", dark: dark, wallpaperDark: wallpaperDark, checkContrast: true))
 			}
 			let mode = dark ? "dark" : "light"
 			list.append(Scene(name: "02-selection-mid-\(mode)", dark: dark, prepare: { m in m.select(m.clips[5].id) }))
 			list.append(Scene(name: "02-command-badges-\(mode)", dark: dark, prepare: { m in m.commandHeld = true }))
 			list.append(Scene(name: "03-search-\(mode)", dark: dark, prepare: { m in m.query = "the" }))
-			list.append(Scene(name: "03-no-results-\(mode)", dark: dark, prepare: { m in m.query = "zebra" }))
-			list.append(Scene(name: "04-empty-\(mode)", dark: dark, clips: { _, _ in [] }))
-			list.append(Scene(name: "04-paused-\(mode)", dark: dark, prepare: { m in m.paused = true }))
+			list.append(Scene(name: "03-no-results-\(mode)", dark: dark, prepare: { m in m.query = "zebra" }, checkContrast: true))
+			for wallpaperDark in [false, true] {
+				let wall = wallpaperDark ? "-darkwall" : ""
+				list.append(Scene(name: "04-empty-\(mode)\(wall)", dark: dark, wallpaperDark: wallpaperDark, clips: { _, _ in [] },
+					checkContrast: true))
+				list.append(Scene(name: "04-paused-\(mode)\(wall)", dark: dark, wallpaperDark: wallpaperDark,
+					prepare: { m in m.paused = true }, checkContrast: true))
+			}
 			list.append(Scene(name: "05-extremes-\(mode)", dark: dark, clips: { _, e in e + [Fixtures.failed, Fixtures.pending] }))
+			list.append(Scene(name: "05-sheet-\(mode)", dark: dark, clips: { _, e in e + [Fixtures.failed, Fixtures.pending] }, sheet: true))
 			list.append(Scene(name: "06-delete-toast-\(mode)", dark: dark, prepare: { m in m.select(m.clips[1].id); await m.deleteSelected() }))
 			list.append(Scene(name: "06-ax-toast-\(mode)", dark: dark, prepare: { m in
 				m.actions.paste = { _, _, _ in .accessibilityRequired }
@@ -46,15 +60,38 @@ enum RenderRunner {
 			list.append(Scene(name: "08-loading-\(mode)", dark: dark, clips: { mixed, _ in
 				var c = mixed; c[2].preview = .pending; c[3].preview = .pending; return c
 			}))
+			// Halfway through open: sliding up from below the window, or (Reduce Motion) fading in place.
+			list.append(Scene(name: "09-open-midway-\(mode)", dark: dark, midway: replayOpen))
+			list.append(Scene(name: "09-reduce-motion-open-\(mode)", dark: dark, overrides: CopiaOverrides(reduceMotion: true),
+				midway: replayOpen))
+			// Halfway through a delete with Reduce Motion: the card crossfades without shrinking.
+			list.append(Scene(name: "09-reduce-motion-delete-\(mode)", dark: dark, overrides: CopiaOverrides(reduceMotion: true),
+				prepare: { m in m.select(m.clips[1].id) }, midway: { m in await m.deleteSelected() }))
 		}
 		return list
 	}
 
+	/// Puts the strip back in its hidden state, lets it draw there, then opens it again.
+	static func replayOpen(_ model: StripModel) async {
+		model.open()
+		try? await Task.sleep(for: .milliseconds(300))
+		model.animateIn()
+	}
+
+	/// Every transition as one long linear ramp, so a capture can land halfway through it.
+	static func slowed(_ seconds: Double) -> Animator {
+		Animator { _, change, completion in
+			withAnimation(.linear(duration: seconds), completionCriteria: .logicallyComplete, change, completion: completion)
+		}
+	}
+
 	static func run(output: URL, only: String?) async throws {
 		try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-		let assets = try FixtureAssets.prepare(in: output.appendingPathComponent("assets"))
+		let assets = try FixtureAssets.prepare(in: output.appendingPathComponent("assets"), filePreviews: true)
 		guard let screen = NSScreen.screens.first else { throw RenderError.noScreen }
 		let visible = CGRect(x: screen.frame.minX, y: screen.frame.maxY - stage.height, width: stage.width, height: stage.height)
+		// Contrast probes are read from the strip's accessibility tree.
+		AccessibilityNode.enableInProcess()
 
 		let wallpaper = NSWindow(contentRect: visible, styleMask: .borderless, backing: .buffered, defer: false)
 		wallpaper.level = .floating
@@ -67,13 +104,33 @@ enum RenderRunner {
 			NSApp.appearance = NSAppearance(named: scene.dark ? .darkAqua : .aqua)
 			wallpaper.contentView = NSHostingView(rootView: Wallpaper(dark: scene.wallpaperDark))
 			wallpaper.orderFrontRegardless()
-			try await showStrip(scene, clips: scene.clips(assets.mixed, assets.extremes), in: visible, panel: panel)
-
 			let url = output.appendingPathComponent("\(scene.name).png")
+			let clips = scene.clips(assets.mixed, assets.extremes)
+			if scene.sheet {
+				panel.orderOut(nil)
+				let region = try await captureSheet(scene, clips: clips, stage: visible, screen: screen, to: url)
+				manifest.append(["scene": scene.name, "file": url.lastPathComponent, "dark": scene.dark,
+					"wallpaperDark": scene.wallpaperDark, "frame": NSStringFromRect(region)])
+				print("rendered \(scene.name)")
+				continue
+			}
+			let model = try await showStrip(scene, clips: clips, in: visible, panel: panel)
+			if let midway = scene.midway {
+				model.animator = slowed(midwayDuration)
+				await midway(model)
+				try await Task.sleep(for: .seconds(midwayDuration / 2))
+			}
+
 			let region = PanelLayout.stripFrame(in: visible).insetBy(dx: -28, dy: -28).intersection(visible)
+			let probes = scene.checkContrast ? contrastProbes(in: panel, region: region) : []
 			try capture(region, on: screen, to: url)
-			manifest.append(["scene": scene.name, "file": url.lastPathComponent, "dark": scene.dark,
-				"wallpaperDark": scene.wallpaperDark, "frame": NSStringFromRect(panel.frame)])
+			var row: [String: Any] = ["scene": scene.name, "file": url.lastPathComponent, "dark": scene.dark,
+				"wallpaperDark": scene.wallpaperDark, "frame": NSStringFromRect(panel.frame)]
+			if scene.checkContrast {
+				row["regionWidth"] = region.width
+				row["probes"] = probes.map(\.json)
+			}
+			manifest.append(row)
 			print("rendered \(scene.name)")
 		}
 		if only.map({ "shell".contains($0) || $0.hasPrefix("1") }) ?? true {
@@ -81,6 +138,86 @@ enum RenderRunner {
 		}
 		let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
 		try data.write(to: output.appendingPathComponent("manifest.json"))
+	}
+
+	/// Every text on the glass (outside the cards) and the selected card's lens ring, in points from `region`'s top-left.
+	static func contrastProbes(in panel: StripPanel, region: CGRect) -> [ContrastCheck.Probe] {
+		var seen = Set<ObjectIdentifier>()
+		let nodes = AccessibilityNode(panel.host).all.filter { seen.insert(ObjectIdentifier($0.object)).inserted }
+		func local(_ r: CGRect) -> CGRect { CGRect(x: r.minX - region.minX, y: region.maxY - r.maxY, width: r.width, height: r.height) }
+		var probes: [ContrastCheck.Probe] = []
+		for node in nodes where node.actions.isEmpty && node.frame.width > 0 {
+			switch node.role {
+			case NSAccessibility.Role.staticText.rawValue:
+				let text = node.value.isEmpty ? node.label : node.value
+				probes.append(.init(kind: .text, name: "text “\(text.prefix(32))”", rect: local(node.frame)))
+			case NSAccessibility.Role.textField.rawValue where node.value.isEmpty:
+				probes.append(.init(kind: .text, name: "search placeholder", rect: local(node.frame)))
+			default: break
+			}
+		}
+		// The selected card's frame includes the lens background; the ring is the card grown by the lens outset.
+		if let card = nodes.first(where: { !$0.actions.isEmpty && $0.isSelected }) {
+			let f = card.frame
+			let size = CGSize(width: Theme.cardSize.width + 2 * Theme.lensOutset, height: Theme.cardSize.height + 2 * Theme.lensOutset)
+			let ring = CGRect(x: f.midX - size.width / 2, y: f.midY - size.height / 2, width: size.width, height: size.height)
+			probes.append(.init(kind: .lens, name: "lens", rect: local(ring)))
+		}
+		return probes
+	}
+
+	/// Prints each probe's ratio and returns the exit status for `--check-contrast DIR`.
+	static func checkContrast(_ directory: URL) -> Int32 {
+		do {
+			let results = try ContrastCheck.check(directory: directory)
+			for r in results {
+				print("\(r.passes ? "PASS" : "FAIL")  \(String(format: "%5.2f", r.ratio)):1 (min \(r.minimum))  \(r.scene)  \(r.probe)")
+			}
+			let failures = results.filter { !$0.passes }.count
+			print(results.isEmpty ? "no contrast probes in \(directory.path)/manifest.json"
+				: "\(results.count - failures) of \(results.count) probes pass")
+			return ContrastCheck.exitCode(results)
+		} catch {
+			FileHandle.standardError.write(Data("check-contrast failed: \(error)\n".utf8))
+			return 1
+		}
+	}
+
+	/// Shows every card at once on a glass sheet centered on the stage, waits for its previews, and captures it.
+	static func captureSheet(_ scene: Scene, clips: [Clip], stage: CGRect, screen: NSScreen, to url: URL) async throws -> CGRect {
+		let thumbnails = ThumbnailCache()
+		let host = NSHostingView(rootView: CardSheet(clips: clips, thumbnails: thumbnails, now: Fixtures.now)
+			.environment(\.copiaOverrides, scene.overrides))
+		let size = host.fittingSize
+		let window = NSWindow(contentRect: CGRect(x: stage.midX - size.width / 2, y: stage.midY - size.height / 2,
+			width: size.width, height: size.height), styleMask: .borderless, backing: .buffered, defer: false)
+		window.isOpaque = false
+		window.backgroundColor = .clear
+		window.hasShadow = true
+		window.level = .floating + 1
+		window.isReleasedWhenClosed = false
+		window.contentView = host
+		window.orderFrontRegardless()
+		defer { window.orderOut(nil) }
+		try await waitForPreviews(clips, in: thumbnails)
+		window.invalidateShadow()
+		let region = window.frame.insetBy(dx: -28, dy: -28).intersection(stage)
+		try capture(region, on: screen, to: url)
+		return region
+	}
+
+	/// Waits until every saved preview (thumbnail or site icon) has decoded, then lets the fade finish.
+	static func waitForPreviews(_ clips: [Clip], in thumbnails: ThumbnailCache) async throws {
+		let expected = clips.compactMap { clip -> URL? in
+			switch clip.preview {
+			case let .ready(url), let .icon(url): url
+			case .pending, .failed: nil
+			}
+		}
+		for _ in 0..<200 where !expected.allSatisfy({ thumbnails.cached($0) != nil }) {
+			try await Task.sleep(for: .milliseconds(50))
+		}
+		try await Task.sleep(for: .milliseconds(450))
 	}
 
 	/// Shows `scene` in the strip and waits until every visible preview has decoded,
@@ -91,21 +228,16 @@ enum RenderRunner {
 		let thumbnails = ThumbnailCache()
 		let root = StripView(model: model, focus: SearchFocus(), thumbnails: thumbnails, now: { Fixtures.now })
 			.environment(\.copiaOverrides, scene.overrides)
+			// A fresh identity per scene: otherwise cards keep the previous scene's state and never load this cache.
+			.id(UUID())
 		panel.host.rootView = AnyView(root)
 		panel.setFrame(PanelLayout.windowFrame(in: visible), display: true)
 		panel.orderFrontRegardless()
 		model.open()
 		model.animateIn()
 		await scene.prepare(model)
-		let expected = model.visibleClips.prefix(12).compactMap { clip -> URL? in
-			if case let .ready(url) = clip.preview { return url }
-			return nil
-		}
-		for _ in 0..<200 where !expected.allSatisfy({ thumbnails.cached($0) != nil }) {
-			try await Task.sleep(for: .milliseconds(50))
-		}
-		try await Task.sleep(for: .milliseconds(450))
-		// As AppController does on open: the first shadow was taken while the cards sat 56 pt low.
+		try await waitForPreviews(Array(model.visibleClips.prefix(12)), in: thumbnails)
+		// As AppController does on open: the first shadow was taken while the strip sat below the window.
 		panel.invalidateShadow()
 		try await Task.sleep(for: .milliseconds(100))
 		return model

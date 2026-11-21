@@ -1,12 +1,17 @@
 import AppKit
 
 /// `copia-render [--output DIR] [--only SUBSTRING]`: captures every strip state to PNG for design review.
+/// `copia-render --check-contrast DIR`: measures the glass text and lens probes recorded in DIR/manifest.json;
+/// exits nonzero below 4.5:1 (text) or 3:1 (lens).
 /// `copia-render --readme --output DIR`: the README's product shots (see scripts/readme-media.sh).
 @main
 enum Main {
 	@MainActor static func main() {
 		let args = CommandLine.arguments
 		func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
+		if let directory = value("--check-contrast") {
+			exit(RenderRunner.checkContrast(URL(fileURLWithPath: directory, isDirectory: true)))
+		}
 		let output = URL(fileURLWithPath: value("--output") ?? "renders", isDirectory: true)
 		let only = value("--only")
 

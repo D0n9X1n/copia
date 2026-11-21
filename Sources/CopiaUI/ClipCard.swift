@@ -499,6 +499,7 @@ public struct CardSheet: View {
 				shape.fill(Theme.solidBackdrop)
 			} else {
 				Color.clear.glassEffect(.regular, in: shape).clipShape(shape)
+					.overlay { shape.fill(Theme.glassScrim) }
 			}
 		}
 		.overlay { shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5) }

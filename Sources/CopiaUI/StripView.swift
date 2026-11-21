@@ -86,7 +86,9 @@ public struct StripView: View {
 				shape.fill(Theme.solidBackdrop)
 			} else {
 				// Clipped: the glass casts its own shadow below the shape, and the window's square bottom edge cut it into corners.
+				// The dark-mode scrim bounds how light the glass gets over a bright wallpaper, so text on it keeps 4.5:1.
 				Color.clear.glassEffect(.regular, in: shape).clipShape(shape)
+					.overlay { shape.fill(Theme.glassScrim) }
 			}
 		}
 		.overlay {
@@ -112,7 +114,7 @@ public struct StripView: View {
 			}
 			Text(model.query.isEmpty ? "\(model.clips.count) items" : "\(model.visibleClips.count) of \(model.clips.count)")
 				.font(.system(size: 11, weight: .medium).monospacedDigit())
-				.foregroundStyle(Theme.ink2(highContrast: highContrast))
+				.foregroundStyle(Theme.glassInk2(highContrast: highContrast))
 		}
 		.padding(.leading, 16)
 		.padding(.trailing, 20)
@@ -174,11 +176,16 @@ public struct StripView: View {
 			animator: model.animator)
 			.background {
 				if selected {
-					RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-						.fill(Color.accentColor.opacity(0.12))
-						.strokeBorder(Color.accentColor, lineWidth: 3)
-						.padding(-Theme.lensOutset)
-						.matchedGeometryEffect(id: "lens", in: lensSpace)
+					// The halo fills the gap and edges the accent ring outside, so the ring reaches 3:1 on any glass.
+					ZStack {
+						RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
+							.fill(Theme.lensHalo)
+						RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+							.strokeBorder(Color.accentColor, lineWidth: 3)
+							.padding(Theme.lensHaloWidth)
+					}
+					.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
+					.matchedGeometryEffect(id: "lens", in: lensSpace)
 				}
 			}
 			.id(clip.id)
@@ -223,7 +230,7 @@ public struct StripView: View {
 			Image(systemName: symbol).font(.system(size: 40, weight: .regular)).foregroundStyle(Theme.ink.opacity(0.55))
 			Text(title).font(.system(size: 20, weight: .semibold)).foregroundStyle(Theme.ink)
 				.lineLimit(1).truncationMode(.tail)
-			Text(detail).font(.system(size: 13)).foregroundStyle(Theme.ink2(highContrast: highContrast))
+			Text(detail).font(.system(size: 13)).foregroundStyle(Theme.glassInk2(highContrast: highContrast))
 		}
 		.frame(maxWidth: .infinity, maxHeight: .infinity)
 		.padding(.bottom, 12)
@@ -283,7 +290,9 @@ struct SearchField: NSViewRepresentable {
 		field.drawsBackground = false
 		field.focusRingType = .none
 		field.font = .systemFont(ofSize: 15)
-		field.placeholderString = "Type to search"
+		// Glass metadata ink: the system placeholder color falls below 4.5:1 on the glass.
+		field.placeholderAttributedString = NSAttributedString(string: "Type to search",
+			attributes: [.foregroundColor: Theme.glassInk2NS, .font: NSFont.systemFont(ofSize: 15)])
 		field.delegate = context.coordinator
 		field.cell?.isScrollable = true
 		field.cell?.wraps = false
