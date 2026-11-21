@@ -254,11 +254,15 @@ public struct StripView: View {
 }
 
 /// The selection lens: an accent ring edged by a halo, so the ring reaches 3:1 on any glass. Sits behind the card.
+/// The halo is a band, not a fill: it covers the gap and tucks 1 pt under the card, so a card fading out (delete)
+/// shows the glass behind it, not a solid block.
 struct LensRing: View {
+	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
+
 	var body: some View {
 		ZStack {
 			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
-				.fill(Theme.lensHalo)
+				.strokeBorder(Theme.lensHalo, lineWidth: Self.band)
 			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
 				.strokeBorder(Color.accentColor, lineWidth: 3)
 				.padding(Theme.lensHaloWidth)
