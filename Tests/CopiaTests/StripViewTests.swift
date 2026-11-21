@@ -124,6 +124,31 @@ import CopiaFixtures
 		#expect(Diagnostics.bodyEvaluations == before)
 	}
 
+	@Test func deleteKeepsTheCardOrderUntilTheLiveFadeCompletes() async {
+		let host = StripHost(width: 1000)
+		defer { host.close() }
+		await host.settle()
+		let deleted = host.model.clips[0].id
+		let order = host.model.clips.map(\.id)
+		var fadeCompleted = false
+		let live = Animator.live { false }
+		host.model.animator = Animator { event, change, completion in
+			live.run(event, change) {
+				if event == .delete { fadeCompleted = true }
+				completion()
+			}
+		}
+		await host.model.deleteSelected()
+		await host.settle(80)
+		#expect(!fadeCompleted)
+		#expect(host.model.clips.contains { $0.id == deleted })
+		#expect(host.model.removingIDs.contains(deleted))
+		#expect(host.model.clips.map(\.id) == order)
+		await host.settle(500)
+		#expect(fadeCompleted)
+		#expect(!host.model.clips.contains { $0.id == deleted })
+	}
+
 	@Test func stripAndCardBodiesCountTheirEvaluations() {
 		_ = NSApplication.shared
 		let window = NSWindow(contentRect: CGRect(x: -6000, y: -6000, width: 600, height: Theme.panelHeight),

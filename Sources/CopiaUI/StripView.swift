@@ -179,13 +179,14 @@ public struct StripView: View {
 		let tint = clip.sourceBundleID == nil ? Theme.neutralTint : sources.tint(for: clip.sourceBundleID)
 		return ClipCard(clip: clip, tint: tint, icon: sources.icon(for: clip.sourceBundleID),
 			badge: model.badge(for: clip.id), hovered: model.hoveredID == clip.id, selected: selected,
-			removing: model.removingIDs.contains(clip.id), now: now(), highlight: model.query, thumbnails: thumbnails,
+			removing: false, now: now(), highlight: model.query, thumbnails: thumbnails,
 			animator: model.animator)
 			.background {
 				if selected {
-					LensRing(removing: model.removingIDs.contains(clip.id)).matchedGeometryEffect(id: "lens", in: lensSpace)
+					LensRing().matchedGeometryEffect(id: "lens", in: lensSpace)
 				}
 			}
+			.modifier(CardRemoval(model: model, id: clip.id, reduced: reduceMotion))
 			.focusEffectDisabled()
 			.onHover { inside in
 				if inside { model.hoveredID = clip.id } else if model.hoveredID == clip.id { model.hoveredID = nil }
@@ -254,6 +255,20 @@ public struct StripView: View {
 			.shadow(color: .black.opacity(0.2), radius: 12, y: 4)
 			.transition(.move(edge: .bottom).combined(with: .opacity))
 		}
+	}
+}
+
+/// Reads the delete state at the animating view, not through the lazy row's value snapshot.
+private struct CardRemoval: ViewModifier {
+	let model: StripModel
+	let id: UUID
+	let reduced: Bool
+
+	func body(content: Content) -> some View {
+		let removing = model.removingIDs.contains(id)
+		content
+			.scaleEffect(StripMotion.removingScale(removing: removing, reduced: reduced))
+			.opacity(removing ? 0 : 1)
 	}
 }
 
