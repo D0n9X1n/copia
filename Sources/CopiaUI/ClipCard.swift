@@ -456,6 +456,55 @@ private struct CardBody: View {
 	}
 }
 
+/// Every card at once on the strip's glass: the render harness's extremes sheet.
+public struct CardSheet: View {
+	let clips: [Clip]
+	let thumbnails: ThumbnailCache
+	let now: Date
+	let columns: Int
+	let sources: SourceAppearance
+	@Environment(\.accessibilityReduceTransparency) private var systemReduceTransparency
+	@Environment(\.copiaOverrides) private var overrides
+
+	public init(clips: [Clip], thumbnails: ThumbnailCache, now: Date, columns: Int = 6, sources: SourceAppearance = .shared) {
+		self.clips = clips
+		self.thumbnails = thumbnails
+		self.now = now
+		self.columns = columns
+		self.sources = sources
+	}
+
+	private var rows: [[Clip]] {
+		stride(from: 0, to: clips.count, by: columns).map { Array(clips[$0..<min($0 + columns, clips.count)]) }
+	}
+
+	public var body: some View {
+		let shape = RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous)
+		Grid(alignment: .topLeading, horizontalSpacing: Theme.cardGap, verticalSpacing: Theme.cardGap) {
+			ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+				GridRow {
+					ForEach(row) { clip in
+						ClipCard(clip: clip, tint: clip.sourceBundleID == nil ? Theme.neutralTint : sources.tint(for: clip.sourceBundleID),
+							icon: sources.icon(for: clip.sourceBundleID), badge: nil, hovered: false, selected: false, removing: false,
+							now: now, highlight: "", thumbnails: thumbnails, animator: .immediate)
+							.accessibilityElement(children: .ignore)
+							.accessibilityLabel(CardAccessibility(clip: clip, now: now).label)
+					}
+				}
+			}
+		}
+		.padding(Theme.rowPadding)
+		.background {
+			if overrides.reduceTransparency ?? systemReduceTransparency {
+				shape.fill(Theme.solidBackdrop)
+			} else {
+				Color.clear.glassEffect(.regular, in: shape).clipShape(shape)
+			}
+		}
+		.overlay { shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5) }
+	}
+}
+
 /// The 8 pt checkerboard behind transparent images: one 16×16 tile repeated by Core Animation.
 /// (A SwiftUI Canvas here cost ~110 MB of GPU buffers inside the glass strip.)
 private struct Checkerboard: View {

@@ -66,6 +66,27 @@ import CopiaFixtures
 		#expect(host.requests.contains(.loading))
 	}
 
+	@Test func theCardSheetShowsEveryExtremeAtOnceOnAStageSizedSheet() async {
+		AccessibilityNode.enableInProcess()
+		let clips = Fixtures.extremes + [Fixtures.failed, Fixtures.pending]
+		let host = NSHostingView(rootView: CardSheet(clips: clips, thumbnails: ThumbnailCache(), now: Fixtures.now))
+		let size = host.fittingSize
+		#expect(size.width <= 1440 && size.height <= 900)
+		let window = NSWindow(contentRect: CGRect(origin: CGPoint(x: -6000, y: -6000), size: size),
+			styleMask: .borderless, backing: .buffered, defer: false)
+		window.isReleasedWhenClosed = false
+		window.alphaValue = 0
+		defer { window.orderOut(nil) }
+		window.contentView = host
+		window.orderFrontRegardless()
+		try? await Task.sleep(for: .milliseconds(150))
+		host.layoutSubtreeIfNeeded()
+		let labels = Set(AXNode(host).all.map(\.label))
+		for clip in clips {
+			#expect(labels.contains(CardAccessibility(clip: clip, now: Fixtures.now).label))
+		}
+	}
+
 	@Test func stripAndCardBodiesCountTheirEvaluations() {
 		_ = NSApplication.shared
 		let window = NSWindow(contentRect: CGRect(x: -6000, y: -6000, width: 600, height: Theme.panelHeight),
