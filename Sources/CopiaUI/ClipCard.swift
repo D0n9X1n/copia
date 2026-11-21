@@ -356,9 +356,11 @@ private struct CardBody: View {
 							.frame(width: presentation.faviconSide, height: presentation.faviconSide)
 							.clipShape(.rect(cornerRadius: 6, style: .continuous))
 					} else {
+						// Loading: the type symbol at 30%. A failed preview keeps a stronger glyph beside its title.
 						Image(systemName: presentation.symbol)
 							.font(.system(size: 30, weight: .regular))
-							.foregroundStyle(Theme.ink.opacity(presentation.placeholderOpacity + 0.15))
+							.foregroundStyle(Theme.ink.opacity(presentation.placeholderOpacity
+								+ (clip.preview == .failed ? 0.15 : 0)))
 					}
 				}
 				.frame(width: 192, height: 100)
@@ -375,13 +377,27 @@ private struct CardBody: View {
 		.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 	}
 
+	/// A file whose QuickLook thumbnail is not on screen yet: pending, or saved but not decoded.
+	private var fileLoading: Bool {
+		clip.preview == .pending || (presentation.fileThumbnail != nil && thumbnail == nil)
+	}
+
 	@ViewBuilder private var fileBody: some View {
 		VStack(spacing: 10) {
-			ZStack {
-				ForEach((0..<presentation.fileStack).reversed(), id: \.self) { offset in
-					fileLayer(offset)
-						.offset(x: CGFloat(offset) * 10, y: CGFloat(-offset) * 6)
-						.opacity(offset == 0 ? 1 : 0.85)
+			Group {
+				if fileLoading {
+					Image(systemName: presentation.symbol)
+						.font(.system(size: 30))
+						.foregroundStyle(Theme.ink.opacity(presentation.placeholderOpacity))
+						.transition(.opacity)
+				} else {
+					ZStack {
+						ForEach((0..<presentation.fileStack).reversed(), id: \.self) { offset in
+							fileLayer(offset)
+								.offset(x: CGFloat(offset) * 10, y: CGFloat(-offset) * 6)
+								.opacity(offset == 0 ? 1 : 0.85)
+						}
+					}
 				}
 			}
 			.frame(height: presentation.fileThumbnailSide)
