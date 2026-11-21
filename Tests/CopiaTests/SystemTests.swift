@@ -31,6 +31,21 @@ final class FakePasteboard: PasteboardSource {
 		return (w, { drafts })
 	}
 
+	@Test func pollingTimerUsesHalfSecondCadenceAndOneTenthTolerance() {
+		let pb = FakePasteboard()
+		let (w, drafts) = make(pb)
+		let timer = w.makeTimer()
+		defer { timer.invalidate() }
+		#expect(timer.timeInterval == 0.5)
+		#expect(timer.tolerance == 0.1)
+		pb.copy("timer copy")
+		#expect(pb.reads == 0)
+		timer.fire()
+		#expect(drafts().first.map(Capture.plainText) == "timer copy")
+		#expect(pb.reads == 1)
+		#expect(timer.isValid)
+	}
+
 	@Test func emitsOneDraftPerObservedChange() {
 		let pb = FakePasteboard()
 		let (w, drafts) = make(pb)
@@ -83,6 +98,22 @@ final class FakePasteboard: PasteboardSource {
 		#expect(drafts().isEmpty)
 		pb.copy("after"); w.tick()
 		#expect(drafts().count == 1)
+	}
+
+	@Test func resumingWithoutAPausedTickNeverCapturesThePausedCopy() {
+		let pb = FakePasteboard()
+		let (w, drafts) = make(pb)
+		w.setPaused(true)
+		pb.copy("while paused")
+		w.setPaused(false)
+		w.tick()
+		#expect(drafts().isEmpty)
+		#expect(pb.reads == 0)
+		pb.copy("after resume")
+		w.tick()
+		#expect(drafts().count == 1)
+		#expect(drafts().first.map(Capture.plainText) == "after resume")
+		#expect(pb.reads == 1)
 	}
 
 	@Test func aCopyThatLandsDuringTheReadIsNotStoredUnderTheOldTypes() {
@@ -231,6 +262,28 @@ final class FakePasteboard: PasteboardSource {
 		#expect(pb.string(forType: .string) == "hi")
 	}
 
+	@Test func accessibilityRevokedWhileWaitingOnlyCopiesAndDoesNotPostPaste() async {
+		let pb = pasteboard()
+		defer { pb.releaseGlobally() }
+		var trusted = true
+		var events: [String] = []
+		var sent = false
+		let paster = Paster(pasteboard: pb, isTrusted: { events.append("trust"); return trusted },
+			postPaste: { sent = true }, waitForFront: { _ in
+				events.append("front")
+				await Task.yield()
+				trusted = false
+				return true
+			})
+		let result = await paster.paste(items, plain: false, target: NSRunningApplication.current) { events.append("close") }
+		#expect(result == .accessibilityRequired)
+		#expect(!sent)
+		#expect(events == ["trust", "close", "front", "trust"])
+		#expect(pb.string(forType: .string) == "hi")
+		#expect(pb.data(forType: .html) == Data("<b>hi</b>".utf8))
+		#expect(pb.types?.map(\.rawValue).contains(PasteboardTypes.marker) == true)
+	}
+
 	@Test func aTargetThatLosesFrontDuringTheSettleDelayIsNotPastedInto() async {
 		var front: pid_t = 1
 		let ok = await Paster.activateAndWait(pid: 1, frontmost: { front }, activate: {},
@@ -368,9 +421,11 @@ final class GatedLinks: LinkFetching, Sendable {
 /// QuickLook stand-in: counts calls and succeeds or fails on demand.
 final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 	var calls = 0
+	var urls: [URL] = []
 	var fail = false
 	func thumbnail(for url: URL) async throws -> Data {
 		calls += 1
+		urls.append(url)
 		if fail { throw CocoaError(.fileReadUnknown) }
 		return Data([0x89, 0x50, 0x4E, 0x47])
 	}
@@ -459,6 +514,33 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		#expect(await store.thumbnail(for: clip.key) != nil)
 	}
 
+	@Test(arguments: [false, true], [Data(), Data([0xFF])])
+	func aLaterImagePreservesItemOrderAndPrefersPNGWithinAnItem(firstHasPNG: Bool, leadingText: Data) async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let links = CountingLinks()
+		let thumbs = CountingThumbnails()
+		let previewer = Previewer(store: store, links: links, files: thumbs)
+		let tiff = try #require(NSBitmapImageRep(data: try pngData(48))?.tiffRepresentation)
+		var representations = [(PasteboardTypes.tiff, tiff)]
+		if firstHasPNG { representations.append((PasteboardTypes.png, try pngData(32))) }
+		// Image classification requires empty text; exercise supported image clips whose image is not item zero.
+		let items = [PasteboardItemData([(PasteboardTypes.string, leadingText)]),
+			PasteboardItemData(representations), PasteboardItemData([(PasteboardTypes.png, try pngData(80))])]
+		let (clip, _) = try await store.insert(ClipDraft(items: items, copiedAt: .now))
+		#expect(clip.kind == .image)
+		previewer.generate(for: clip)
+		previewer.generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		#expect(previewer.stats.decodes == 1)
+		#expect(previewer.stats.priorities == [.utility])
+		#expect(links.calls == 0)
+		#expect(thumbs.calls == 0)
+		let thumbnail = try #require(await store.thumbnail(for: clip.key))
+		let image = try #require(NSBitmapImageRep(data: try Data(contentsOf: thumbnail)))
+		#expect(image.pixelsWide == (firstHasPNG ? 32 : 48))
+		#expect(image.pixelsHigh == image.pixelsWide)
+	}
+
 	@Test func aLinkWithOnlyASiteIconSavesTheIcon() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
 		let links = CountingLinks()
@@ -484,6 +566,34 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		try await Task.sleep(for: .milliseconds(50))
 		#expect(thumbs.calls == 1)
 		#expect(await reopened.thumbnail(for: clip.key) != nil)
+	}
+
+	@Test(arguments: [false, true])
+	func aFileAfterADescriptionPreviewsTheFirstSupportedURL(skippingMalformedItems: Bool) async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let links = CountingLinks()
+		let thumbs = CountingThumbnails()
+		let previewer = Previewer(store: store, links: links, files: thumbs)
+		let firstURL = URL(fileURLWithPath: "/tmp/Design Review.key")
+		var items = [PasteboardItemData([(PasteboardTypes.string, Data("File description".utf8))])]
+		if skippingMalformedItems {
+			items.append(PasteboardItemData([(PasteboardTypes.fileURL, Data([0xFF]))]))
+			items.append(PasteboardItemData([(PasteboardTypes.fileURL, Data("http://[".utf8))]))
+		}
+		items += [firstURL, URL(fileURLWithPath: "/tmp/later.txt")].map {
+			PasteboardItemData([(PasteboardTypes.fileURL, Data($0.absoluteString.utf8))])
+		}
+		let (clip, _) = try await store.insert(ClipDraft(items: items, copiedAt: .now))
+		#expect(clip.kind == .file)
+		previewer.generate(for: clip)
+		previewer.generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		#expect(await store.thumbnail(for: clip.key) != nil)
+		#expect(thumbs.calls == 1)
+		#expect(thumbs.urls == [firstURL])
+		#expect(links.calls == 0)
+		#expect(previewer.stats.decodes == 0)
+		#expect(previewer.stats.priorities == [.utility])
 	}
 
 	@Test func aFileQuickLookCannotDrawFailsAndKeepsNoThumbnail() async throws {

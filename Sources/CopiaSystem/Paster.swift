@@ -52,6 +52,7 @@ public final class Paster {
 		guard isTrusted() else { return .accessibilityRequired }
 		beginClose()
 		guard let target, await waitForFront(target) else { return .copied }
+		guard isTrusted() else { return .accessibilityRequired }
 		postPaste()
 		return .pasted
 	}

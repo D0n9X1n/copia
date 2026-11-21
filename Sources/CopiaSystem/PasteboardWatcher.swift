@@ -74,12 +74,18 @@ public final class PasteboardWatcher {
 			let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
 			MainActor.assumeIsolated { if let id { self?.appActivated(id) } }
 		}
+		let timer = makeTimer()
+		RunLoop.main.add(timer, forMode: .common)
+		self.timer = timer
+	}
+
+	/// Builds the polling timer without scheduling it, so its configuration can be tested in isolation.
+	func makeTimer() -> Timer {
 		let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
 			MainActor.assumeIsolated { self?.tick() }
 		}
 		timer.tolerance = 0.1
-		RunLoop.main.add(timer, forMode: .common)
-		self.timer = timer
+		return timer
 	}
 
 	public func stop() {

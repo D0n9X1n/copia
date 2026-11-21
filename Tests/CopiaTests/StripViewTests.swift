@@ -9,16 +9,39 @@ import CopiaFixtures
 @MainActor
 @Suite(.serialized) struct StripViewTests {
 	@Test func openSlidesTheStripUpFromBelowItsFullHeight() async throws {
-		let host = StripHost(appear: false)
+		let height = Theme.panelHeight, margin: CGFloat = 16, width: CGFloat = 1440
+		let normal = CopiaOverrides(reduceMotion: false)
+		let host = StripHost(width: width, overrides: normal, appear: false)
 		defer { host.close() }
+		// Observe the moving strip inside a larger viewport; a fully clipped element can be absent from AX.
+		// Keep the production layout fixed so the extra observation space does not move its Spacer.
+		host.window.setContentSize(CGSize(width: width, height: height * 2 + margin * 2))
+		host.window.contentView = NSHostingView(rootView:
+			StripView(model: host.model, focus: SearchFocus(), thumbnails: ThumbnailCache(), now: { Fixtures.now })
+				.environment(\.copiaOverrides, normal)
+				.frame(width: width, height: height)
+				.padding(.top, margin).padding(.bottom, height + margin))
 		await host.settle()
-		let hidden = try #require(host.strip)
-		#expect(hidden.frame.maxY <= host.window.frame.minY + 0.5)
+		let panelBottom = host.window.frame.minY + height + margin
+		let hidden = try #require(host.strip).frame
+		#expect(host.window.frame.contains(hidden))
+		#expect(abs(hidden.maxY - panelBottom) < 0.5)
+		#expect(abs(hidden.height - height) < 0.5)
 		host.model.animateIn()
 		await host.settle()
-		let shown = try #require(host.strip)
-		#expect(abs(shown.frame.minY - host.window.frame.minY) < 0.5)
+		let shown = try #require(host.strip).frame
+		#expect(abs(shown.minY - panelBottom) < 0.5)
+		#expect(abs(shown.minY - hidden.minY - height) < 0.5)
+		#expect(shown.size == hidden.size)
+		#expect(abs(shown.minX - hidden.minX) < 0.5)
 		#expect(host.requests == [.open])
+
+		let production = StripHost(overrides: normal)
+		defer { production.close() }
+		await production.settle()
+		let visible = try #require(production.strip).frame
+		#expect(abs(visible.minY - production.window.frame.minY) < 0.5)
+		#expect(abs(visible.height - height) < 0.5)
 	}
 
 	@Test func aNewCopyWhileOpenSlidesInAtIndexZeroAndTheSelectionStaysInView() async throws {

@@ -119,7 +119,7 @@ public final class Previewer {
 		switch clip.kind {
 		case .image:
 			guard let items = try? await store.items(for: clip.key),
-				let data = items.first?.data(for: PasteboardTypes.png) ?? items.first?.data(for: PasteboardTypes.tiff)
+				let data = Capture.imageData(ClipDraft(items: items, copiedAt: clip.lastCopied))
 			else { return (.failed, nil, nil) }
 			stats.decoded()
 			guard let png = thumbnailPNG(from: data) else { return (.failed, nil, nil) }
@@ -135,8 +135,7 @@ public final class Previewer {
 			}
 		case .file:
 			guard let items = try? await store.items(for: clip.key),
-				let path = items.first?.data(for: PasteboardTypes.fileURL).flatMap({ String(data: $0, encoding: .utf8) }),
-				let url = URL(string: path),
+				let url = Capture.fileURLs(ClipDraft(items: items, copiedAt: clip.lastCopied)).first,
 				let png = try? await files.thumbnail(for: url)
 			else { return (.failed, nil, nil) }
 			return (.ok, nil, png)
