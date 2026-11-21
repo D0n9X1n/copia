@@ -26,7 +26,7 @@ swift build -c release --arch arm64 --arch x86_64
 
 - `swift run copia-render --output renders`：把卡片栏的每种状态作为真实窗口放在固定壁纸上，截图到 `renders/` 供设计评审。加 `--only NAME` 只渲染一种状态。需要为终端授予屏幕录制权限。`--only icon-review` 只生成 `12-icon-review.png`：`Resources/AppIcon.icon` 的应用图标以 1024、128、32 和 16 像素分别放在浅色行和深色行上，由 Icon Composer 的导出图合成，不开窗口，也不截屏。
 - `scripts/readme-media.sh`：用测试数据把 README 的截图和图标渲染到 `.github/media/`（WebP，浅色和深色）。它会用生成的壁纸盖住主显示器左上角约一分钟，因此只截到 Copia 自己的窗口。另外需要 `cwebp`。
-- `Copia --selftest out.json`：通过与 ⌘Y 相同的路径，在每个显示器上打开并关闭卡片栏十次，记录键窗口、前台应用和面板所在的屏幕。只要有违例就以非零状态退出。
+- `"$(swift build --show-bin-path)/Copia" --selftest out.json`：通过与 ⌘Y 相同的路径，在每个显示器上打开并关闭卡片栏十次。每次都检查面板是键窗口、Copia 没有成为活跃应用、输入能到达搜索框、面板打开在指针所在的屏幕上，并且面板框架正好等于该屏幕可见区域的布局框架、且位于可见区域之内。只要有违例就以非零状态退出。它使用临时存储、暂停的捕获和私有的 `copia-selftest` 偏好设置域，从不读取或写入剪贴板内容（暂停的监视器只读取变更计数）。它会移动指针并向自己的面板输入，因此请在空闲的桌面上运行。
 
 ### 应用包与图标
 
