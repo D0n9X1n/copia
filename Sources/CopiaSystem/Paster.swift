@@ -58,8 +58,10 @@ public final class Paster {
 
 	/// How long the target must stay frontmost before ⌘V is sent.
 	public static let settleMilliseconds = 30
+	/// The longest the whole wait may take, settle included.
+	public static let waitBudgetMilliseconds = 300
 
-	/// Reactivates the target if needed and waits up to 300 ms for it to be frontmost.
+	/// Reactivates the target if needed and waits for it to be frontmost, 300 ms at most including the settle.
 	public static func activateAndWait(_ app: NSRunningApplication) async -> Bool {
 		await activateAndWait(pid: app.processIdentifier,
 			frontmost: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
@@ -71,12 +73,15 @@ public final class Paster {
 	static func activateAndWait(pid: pid_t, frontmost: () -> pid_t?, activate: () -> Void,
 		sleep: (Int) async -> Void) async -> Bool {
 		if frontmost() != pid { activate() }
-		for _ in 0..<30 {
+		// Poll only while a full settle still fits in the budget; a target seen later is not pasted into.
+		var waited = 0
+		while waited + settleMilliseconds <= waitBudgetMilliseconds {
 			if frontmost() == pid {
 				await sleep(settleMilliseconds)
 				return frontmost() == pid
 			}
 			await sleep(10)
+			waited += 10
 		}
 		return false
 	}

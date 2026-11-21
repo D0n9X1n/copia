@@ -31,6 +31,11 @@ jobs:
           python3 scripts/check-wiki.py
           python3 scripts/check-wiki.py --self-test
 
+      - name: Script self-tests
+        run: |
+          scripts/test-check-archs.sh
+          scripts/test-setup-release-signing.sh
+
       - name: Build (universal, release)
         run: swift build -c release --arch arm64 --arch x86_64
 
@@ -49,7 +54,7 @@ jobs:
           test -f dist/Copia.app/Contents/Resources/Assets.car
           test -f dist/Copia.app/Contents/Resources/AppIcon.icns
           test -d dist/Copia.app/Contents/Resources/KeyboardShortcuts_KeyboardShortcuts.bundle
-          lipo -archs dist/Copia.app/Contents/MacOS/Copia | grep -q 'x86_64 arm64'
+          scripts/check-archs.sh dist/Copia.app/Contents/MacOS/Copia
 
       - name: Upload benchmark
         if: always()

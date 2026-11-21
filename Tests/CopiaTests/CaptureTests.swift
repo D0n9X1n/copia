@@ -10,6 +10,8 @@ private func draft(_ items: PasteboardItemData..., at date: Date = .distantPast)
 	ClipDraft(items: items, copiedAt: date)
 }
 
+private func t(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: 1_800_000_000 + seconds) }
+
 @Suite struct CaptureTests {
 	@Test func classifiesEveryKind() {
 		#expect(Capture.kind(of: draft(item((PasteboardTypes.string, "hello")))) == .text)
@@ -30,6 +32,16 @@ private func draft(_ items: PasteboardItemData..., at date: Date = .distantPast)
 		#expect(Capture.plainText(html) == "Ship it & go")
 		let blank = draft(item((PasteboardTypes.rtf, "{\\rtf1\\ansi   }")))
 		#expect(Capture.decide(types: [PasteboardTypes.rtf], draft: blank, candidates: [], ignoredApps: []) == .skipEmpty)
+	}
+
+	/// A bare `public.url` item is a link whose text is its URL; a file's URL never replaces its path.
+	@Test func aURLOnlyItemIsALinkWithItsURLAsText() {
+		let bare = draft(item((PasteboardTypes.url, "https://example.com")))
+		#expect(Capture.plainText(bare) == "https://example.com")
+		#expect(Capture.kind(of: bare) == .link)
+		let file = draft(item((PasteboardTypes.fileURL, "file:///tmp/a.txt"), (PasteboardTypes.url, "file:///tmp/a.txt")))
+		#expect(Capture.plainText(file) == "")
+		#expect(Capture.kind(of: file) == .file)
 	}
 
 	@Test func colorDetectionFollowsPasteRules() {
@@ -79,15 +91,43 @@ private func draft(_ items: PasteboardItemData..., at date: Date = .distantPast)
 		#expect(ClipDraft.uuid(forKey: combined.contentKey) == ClipDraft.uuid(forKey: reordered.contentKey))
 	}
 
-	@Test func activationLogFlagsEveryAppFrontmostSinceThePoll() {
-		var log = ActivationLog(frontmost: "com.apple.TextEdit")
-		log.activated("com.apple.Safari")
-		let candidates = log.candidatesAndReset(currentFrontmost: "com.apple.Safari")
-		#expect(candidates == ["com.apple.TextEdit", "com.apple.Safari"])
+	@Test func activationLogFlagsEveryAppFrontmostInTheWindow() {
+		var log = ActivationLog(frontmost: "com.apple.TextEdit", at: t(0))
+		log.activated("com.apple.Safari", at: t(0.2))
+		log.activated("com.apple.Notes", at: t(0.3))
+		let candidates = log.candidates(until: t(0.5), currentFrontmost: "com.apple.Notes")
+		#expect(candidates == ["com.apple.TextEdit", "com.apple.Safari", "com.apple.Notes"])
 		#expect(Capture.decide(types: [PasteboardTypes.string], draft: draft(item((PasteboardTypes.string, "secret"))),
 			candidates: candidates, ignoredApps: ["com.apple.TextEdit"]) == .skipIgnoredApp)
 		#expect(ActivationLog.source(of: candidates, excluding: nil) == nil)
-		#expect(ActivationLog.source(of: log.candidatesAndReset(currentFrontmost: "com.apple.Safari"), excluding: nil) == "com.apple.Safari")
+		// The next window holds only the app that stayed in front, so it is the sole candidate and the source.
+		let next = log.candidates(until: t(1.0), currentFrontmost: "com.apple.Notes")
+		#expect(next == ["com.apple.Notes"])
+		#expect(ActivationLog.source(of: next, excluding: nil) == "com.apple.Notes")
+	}
+
+	/// The window is set by time, not by when the activation reached the log.
+	@Test func activationsAreAssignedToTheirWindowByTimestamp() {
+		// Stamped after this poll: it belongs to the next window, not this one.
+		var early = ActivationLog(frontmost: "com.apple.TextEdit", at: t(0))
+		early.activated("com.1password.1password", at: t(0.7))
+		#expect(early.candidates(until: t(0.5), currentFrontmost: "com.apple.TextEdit") == ["com.apple.TextEdit"])
+		#expect(early.candidates(until: t(1.0), currentFrontmost: "com.apple.TextEdit") == ["com.apple.TextEdit", "com.1password.1password"])
+
+		// Logged after the 0.5 poll but stamped 0.4: that app was in front when the window opened, and the app
+		// it replaced at 0.4 was not frontmost at any time in (0.5, 1.0].
+		var late = ActivationLog(frontmost: "com.apple.TextEdit", at: t(0))
+		late.roll(at: t(0.5))
+		late.activated("com.1password.1password", at: t(0.4))
+		#expect(late.candidates(until: t(1.0), currentFrontmost: "com.apple.Safari") == ["com.1password.1password", "com.apple.Safari"])
+	}
+
+	@Test func aWindowClosedWithoutACopyDropsTheAppsItSaw() {
+		var log = ActivationLog(frontmost: "com.apple.TextEdit", at: t(0))
+		log.activated("com.1password.1password", at: t(0.2))
+		log.activated("com.apple.TextEdit", at: t(0.3))
+		log.roll(at: t(0.5))
+		#expect(log.candidates(until: t(1.0), currentFrontmost: "com.apple.TextEdit") == ["com.apple.TextEdit"])
 	}
 
 	@Test func retentionCutoffs() {

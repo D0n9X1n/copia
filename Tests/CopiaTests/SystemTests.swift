@@ -111,6 +111,23 @@ final class FakePasteboard: PasteboardSource {
 		#expect(drafts().count == 1)
 		#expect(drafts().first?.sourceBundleID == "com.apple.TextEdit")
 	}
+
+	/// Rich text captured from the pasteboard shows its plain text with an "RTF" footer (Amendment 5).
+	@Test func capturedRichTextIsSavedWithAnRTFFooter() async throws {
+		let pb = FakePasteboard()
+		let (w, drafts) = make(pb)
+		pb.changeCount += 1
+		pb.items = [PasteboardItemData([(PasteboardTypes.rtf, Data("{\\rtf1\\ansi Quarterly \\b review\\b0}".utf8))])]
+		pb.typeIdentifiers = [PasteboardTypes.rtf]
+		w.tick()
+		let draft = try #require(drafts().first)
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-rtf-\(UUID().uuidString)")
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await ClipStore(directory: dir).insert(draft)
+		#expect(clip.kind == .richText)
+		#expect(clip.title == "Quarterly review")
+		#expect(clip.meta == "16 chars · RTF")
+	}
 }
 
 @MainActor
@@ -187,6 +204,66 @@ final class FakePasteboard: PasteboardSource {
 		#expect(slept == [Paster.settleMilliseconds])
 	}
 
+	/// The whole wait, settle included, stays within 300 ms: a target first seen at 290 ms has no room left to settle.
+	@Test func theWaitIncludingTheSettleNeverPasses300Milliseconds() async {
+		var slept: [Int] = []
+		var polls = 0
+		let late = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 29 ? 1 : 2 }, activate: {},
+			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+		#expect(slept.reduce(0, +) <= 300)
+		#expect(!late)
+
+		slept = []; polls = 0
+		let justInTime = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 27 ? 1 : 2 }, activate: {},
+			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+		#expect(justInTime)
+		#expect(slept.reduce(0, +) == 300)
+		#expect(slept.last == Paster.settleMilliseconds)
+	}
+
+	/// Every stored item and representation reaches the pasteboard in order, read back through spy events.
+	@Test func pasteWritesEveryItemAndRepresentationInOrder() async throws {
+		let pb = pasteboard()
+		defer { pb.releaseGlobally() }
+		var events: [String] = []
+		let paster = Paster(pasteboard: pb, isTrusted: { true }, postPaste: { events.append("cmdV") },
+			waitForFront: { _ in events.append("front"); return true })
+		let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+		let mixed = PasteboardItemData([(PasteboardTypes.string, Data("hi".utf8)), (PasteboardTypes.rtf, Data("{\\rtf1 hi}".utf8)),
+			(PasteboardTypes.html, Data("<b>hi</b>".utf8)), (PasteboardTypes.png, png)])
+		let files = ["c.txt", "a.txt", "b.txt"].map { PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/\($0)".utf8))]) }
+		let items = [mixed] + files
+
+		func readBack() -> [PasteboardItemData] {
+			(pb.pasteboardItems ?? []).map { item in
+				// As Copia reads a pasteboard: stored types only. The server adds translations such as UTF-16 text on read.
+				PasteboardItemData(item.types.map(\.rawValue)
+					.filter { PasteboardTypes.stored.contains($0) }
+					.map { (type: $0, data: item.data(forType: NSPasteboard.PasteboardType($0)) ?? Data()) })
+			}
+		}
+
+		let result = await paster.paste(items, plain: false, target: NSRunningApplication.current) { events.append("close") }
+		#expect(result == .pasted)
+		#expect(events == ["close", "front", "cmdV"])
+		let back = readBack()
+		#expect(back.count == items.count)
+		for (got, sent) in zip(back, items) {
+			#expect(Set(got.representations.map(\.type)) == Set(sent.representations.map(\.type)))
+			for rep in sent.representations { #expect(got.data(for: rep.type) == rep.data, "\(rep.type)") }
+		}
+		#expect(back.compactMap { $0.data(for: PasteboardTypes.fileURL) } == files.compactMap { $0.data(for: PasteboardTypes.fileURL) })
+		for item in pb.pasteboardItems ?? [] {
+			#expect(item.types.map(\.rawValue).contains(PasteboardTypes.marker))
+		}
+
+		events = []
+		#expect(await paster.paste(items, plain: true, target: NSRunningApplication.current) {} == .pasted)
+		#expect(readBack() == [PasteboardItemData([(PasteboardTypes.string, Data("hi".utf8))])]
+			+ ["/tmp/c.txt", "/tmp/a.txt", "/tmp/b.txt"].map { PasteboardItemData([(PasteboardTypes.string, Data($0.utf8))]) })
+		#expect(events == ["front", "cmdV"])
+	}
+
 	@Test func aTargetThatNeverComesForwardIsNotPastedInto() async {
 		var sent = false
 		let paster = Paster(pasteboard: pasteboard(), isTrusted: { true }, postPaste: { sent = true }, waitForFront: { _ in false })
@@ -199,9 +276,11 @@ final class FakePasteboard: PasteboardSource {
 /// Counts fetches so "fetched once" is provable.
 final class CountingLinks: LinkFetching, @unchecked Sendable {
 	var calls = 0
+	var urls: [URL] = []
 	var result: Result<LinkPreview, Error> = .success(LinkPreview(title: "A title"))
 	func fetch(_ url: URL) async throws -> LinkPreview {
 		calls += 1
+		urls.append(url)
 		return try result.get()
 	}
 }
@@ -261,6 +340,23 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		#expect(links.calls == 1)
 		let reopened = try ClipStore(directory: dir)
 		#expect(try await reopened.fetch(clip.key)?.title == "A title")
+	}
+
+	/// A copy carrying only `public.url` is saved with its URL as title and link, and its preview is requested for that URL.
+	@Test func aURLOnlyCopyIsSavedAsALinkAndPreviewed() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let links = CountingLinks()
+		let draft = ClipDraft(items: [PasteboardItemData([(PasteboardTypes.url, Data("https://example.com".utf8))])], copiedAt: .now)
+		let (clip, _) = try await store.insert(draft)
+		#expect(clip.kind == .link)
+		#expect(clip.title == "https://example.com")
+		#expect(clip.url == "https://example.com")
+		#expect(clip.meta == "example.com")
+		#expect(clip.previewState == .pending)
+		Previewer(store: store, links: links).generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .okNoImage)
+		#expect(links.urls == [URL(string: "https://example.com")!])
+		#expect(try await store.fetch(clip.key)?.title == "A title")
 	}
 
 	@Test func failedFetchIsRecorded() async throws {
@@ -355,6 +451,26 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		while saves < 2 { try await Task.sleep(for: .milliseconds(5)) }
 		#expect(try await store.fetch(clip.key)?.title == "Fresh")
 		#expect(links.calls == 2)
+	}
+
+	/// Undo after the trashed thumbnail was lost: the restored image asks again and ends whole, with a saved thumbnail.
+	@Test func anUndoneImageWhoseTrashedThumbnailWasLostGetsItsPreviewBack() async throws {
+		let faulty = FaultyFiles()
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-prev-\(UUID().uuidString)")
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let store = try ClipStore(directory: dir, files: faulty)
+		let previewer = Previewer(store: store, links: CountingLinks())
+		let (clip, _) = try await store.insert(ClipDraft(items: [PasteboardItemData([(PasteboardTypes.png, try pngData(64))])], copiedAt: .now))
+		previewer.generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		let deleted = try #require(try await store.delete(clip.key))
+		faulty.failRemoveContaining = "trash/\(clip.key).plist"
+		await store.emptyTrash()
+		try await store.restore(deleted)
+		await previewer.resumePending()
+		#expect(try await waitForState(store, clip.key) == .ok)
+		#expect(await store.thumbnail(for: clip.key) != nil)
+		#expect(previewer.stats.decodes == 2)
 	}
 
 	@Test func imageThumbnailIsAtMost480Pixels() throws {
