@@ -177,7 +177,7 @@ public struct SettingsView: View {
 				Toggle("Open at login", isOn: Binding(get: { model.login == .enabled || model.login == .requiresApproval },
 					set: { model.setLogin($0) }))
 				switch model.login {
-				case .requiresApproval: Text("Approve Copia in System Settings → General → Login Items.").font(.callout).foregroundStyle(.secondary)
+				case .requiresApproval: Text("Approve Copia in System Settings → General → Login Items.").font(.callout).foregroundStyle(ShellTheme.secondary)
 				case let .error(message): Text(message).font(.callout).foregroundStyle(.red)
 				default: EmptyView()
 				}
@@ -204,7 +204,7 @@ public struct SettingsView: View {
 				KeyboardShortcuts.Recorder("Pause capture", name: .copiaPause)
 			} footer: {
 				Text("In the strip: ←/→ select, ↩ paste, ⇧↩ paste plain text, ⌘1–9 quick paste, ⌘C copy, ⌫ delete, ⌘Z undo, ⎋ close.")
-					.font(.callout).foregroundStyle(.secondary)
+					.font(.callout).foregroundStyle(ShellTheme.secondary)
 			}
 		}
 	}
@@ -240,7 +240,7 @@ public struct SettingsView: View {
 				Text("Ignore copies from these apps")
 			} footer: {
 				Text("Copia also skips anything an app marks as concealed or transient, such as passwords.")
-					.font(.callout).foregroundStyle(.secondary)
+					.font(.callout).foregroundStyle(ShellTheme.secondary)
 			}
 		}
 	}
@@ -300,19 +300,19 @@ public struct OnboardingView: View {
 			page(title: "Copia remembers what you copy.",
 				detail: "Everything you copy with ⌘C is kept here. Press ⌘Y to bring it back.",
 				hero: AnyView(Image(nsImage: icon ?? NSImage()).resizable().frame(width: 128, height: 128))) {
-				Button("Get Started") { next() }.buttonStyle(.glassProminent).controlSize(.large)
+				Button("Get Started") { next() }.shellProminentButton().controlSize(.large)
 			}
 		case .accessibility:
 			page(title: "Paste where you were",
 				detail: "To paste into the app you were using, allow Copia in Privacy & Security → Accessibility. Without it, Copia copies and you press ⌘V.",
 				hero: AnyView(status(model.permissions.accessibilityGlyph, ok: model.permissions.accessibility))) {
 				if model.permissions.accessibility {
-					Button("Continue") { next() }.buttonStyle(.glassProminent).controlSize(.large)
+					Button("Continue") { next() }.shellProminentButton().controlSize(.large)
 				} else {
 					HStack {
 						Button("Continue without") { next() }.buttonStyle(.glass).controlSize(.large)
 						Button("Allow Accessibility") { model.requestAccessibility(); model.openAccessibility() }
-							.buttonStyle(.glassProminent).controlSize(.large)
+							.shellProminentButton().controlSize(.large)
 					}
 				}
 			}
@@ -321,11 +321,11 @@ public struct OnboardingView: View {
 				detail: "macOS may ask before an app reads the clipboard. Choose Always Allow for Copia so it can keep your history.",
 				hero: AnyView(status(model.permissions.pasteboardGlyph, ok: model.permissions.pasteboard == .allow))) {
 				if model.permissions.pasteboard == .allow {
-					Button("Continue") { next() }.buttonStyle(.glassProminent).controlSize(.large)
+					Button("Continue") { next() }.shellProminentButton().controlSize(.large)
 				} else {
 					HStack {
 						Button("Continue") { next() }.buttonStyle(.glass).controlSize(.large)
-						Button("Open Settings") { model.openPasteboard() }.buttonStyle(.glassProminent).controlSize(.large)
+						Button("Open Settings") { model.openPasteboard() }.shellProminentButton().controlSize(.large)
 					}
 				}
 			}
@@ -333,7 +333,7 @@ public struct OnboardingView: View {
 			page(title: "Try it", detail: "Copy something, then press ⌘Y.",
 				hero: AnyView(KeyboardShortcuts.Recorder("Show history", name: .copiaHistory))) {
 				Button("Open History") { model.finishOnboarding(); model.openHistory() }
-					.buttonStyle(.glassProminent).controlSize(.large)
+					.shellProminentButton().controlSize(.large)
 			}
 		}
 	}
@@ -351,7 +351,7 @@ public struct OnboardingView: View {
 		VStack(spacing: 18) {
 			hero.frame(height: 128)
 			Text(title).font(.system(size: 28, weight: .bold)).multilineTextAlignment(.center)
-			Text(detail).font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+			Text(detail).font(.system(size: 14)).foregroundStyle(ShellTheme.secondary).multilineTextAlignment(.center)
 				.fixedSize(horizontal: false, vertical: true)
 			actions().padding(.top, 8)
 		}
