@@ -7,16 +7,20 @@ import CopiaCore
 /// Writes deterministic preview images to disk so fixture cards show real thumbnails.
 public enum FixtureAssets {
 	/// Generates the images into `directory` and returns `Fixtures.mixed` + `Fixtures.extremes` with ready previews.
-	public static func prepare(in directory: URL) throws -> (mixed: [Clip], extremes: [Clip]) {
+	/// `filePreviews` also gives file clips saved QuickLook-style thumbnails, as the app shows them. It is off by
+	/// default so the bench's image pool and the README media stay as they were.
+	public static func prepare(in directory: URL, filePreviews: Bool = false) throws -> (mixed: [Clip], extremes: [Clip]) {
 		try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 		let screenshot = directory.appendingPathComponent("screenshot.png")
 		let hero = directory.appendingPathComponent("link-hero.png")
 		let panorama = directory.appendingPathComponent("panorama.png")
 		let logo = directory.appendingPathComponent("logo.png")
+		let favicon = directory.appendingPathComponent("favicon.png")
 		try write(drawScreenshot(width: 960, height: 640), to: screenshot)
 		try write(drawHero(width: 768, height: 400), to: hero)
 		try write(drawLandscape(width: 960, height: 960), to: panorama)
 		try write(drawLogo(side: 480), to: logo)
+		try write(drawFavicon(side: 128), to: favicon)
 
 		var mixed = Fixtures.mixed
 		mixed[2].preview = .ready(hero)
@@ -24,6 +28,21 @@ public enum FixtureAssets {
 		var extremes = Fixtures.extremes
 		extremes[6].preview = .ready(panorama)
 		extremes[7].preview = .ready(logo)
+		extremes[13].preview = .icon(favicon)
+		if filePreviews {
+			let slide = directory.appendingPathComponent("file-slide.png")
+			let sheet = directory.appendingPathComponent("file-sheet.png")
+			let photo = directory.appendingPathComponent("file-photo.png")
+			let page = directory.appendingPathComponent("file-page.png")
+			try write(drawSlide(width: 384, height: 216), to: slide)
+			try write(drawSheet(width: 300, height: 384), to: sheet)
+			try write(drawLandscape(width: 384, height: 288), to: photo)
+			try write(drawPage(width: 297, height: 384), to: page)
+			mixed[6].preview = .ready(slide)
+			mixed[8].preview = .ready(sheet)
+			extremes[8].preview = .ready(photo)
+			extremes[12].preview = .ready(page)
+		}
 		return (mixed, extremes)
 	}
 
@@ -127,6 +146,69 @@ public enum FixtureAssets {
 		ctx.strokeEllipse(in: CGRect(x: s * 0.15, y: s * 0.15, width: s * 0.7, height: s * 0.7))
 		ctx.setFillColor(color(0xFF375F))
 		ctx.fillEllipse(in: CGRect(x: s * 0.4, y: s * 0.4, width: s * 0.2, height: s * 0.2))
+		return ctx.makeImage()!
+	}
+
+	/// A presentation slide, as QuickLook renders a Keynote file.
+	static func drawSlide(width: Int, height: Int) -> CGImage {
+		let ctx = context(width, height)
+		let w = CGFloat(width), h = CGFloat(height)
+		gradient(ctx, 0x1E2A78, 0x6A3FB5, CGRect(x: 0, y: 0, width: w, height: h), vertical: false)
+		roundRect(ctx, CGRect(x: w * 0.1, y: h * 0.52, width: w * 0.56, height: h * 0.13), 6, color(0xFFFFFF, 0.92))
+		roundRect(ctx, CGRect(x: w * 0.1, y: h * 0.38, width: w * 0.4, height: h * 0.06), 4, color(0xFFFFFF, 0.55))
+		ctx.setFillColor(color(0xFF6A3D))
+		ctx.fillEllipse(in: CGRect(x: w * 0.7, y: h * 0.14, width: h * 0.4, height: h * 0.4))
+		return ctx.makeImage()!
+	}
+
+	/// A spreadsheet page: a header band and a grid.
+	static func drawSheet(width: Int, height: Int) -> CGImage {
+		let ctx = context(width, height)
+		let w = CGFloat(width), h = CGFloat(height)
+		ctx.setFillColor(color(0xFFFFFF))
+		ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+		ctx.setFillColor(color(0x34C759, 0.85))
+		ctx.fill(CGRect(x: 0, y: h - 40, width: w, height: 40))
+		ctx.setStrokeColor(color(0xD1D1D6))
+		ctx.setLineWidth(1)
+		for y in stride(from: h - 40, to: 0, by: -22) {
+			ctx.move(to: CGPoint(x: 0, y: y))
+			ctx.addLine(to: CGPoint(x: w, y: y))
+		}
+		for x in stride(from: w / 4, to: w, by: w / 4) {
+			ctx.move(to: CGPoint(x: x, y: 0))
+			ctx.addLine(to: CGPoint(x: x, y: h - 40))
+		}
+		ctx.strokePath()
+		for i in 0..<12 {
+			roundRect(ctx, CGRect(x: w * 0.75 + 8, y: h - 55 - CGFloat(i) * 22, width: CGFloat(30 + (i * 17) % 40), height: 8), 2, color(0x8E8E93))
+		}
+		return ctx.makeImage()!
+	}
+
+	/// A document page with a heading and lines of text.
+	static func drawPage(width: Int, height: Int) -> CGImage {
+		let ctx = context(width, height)
+		let w = CGFloat(width), h = CGFloat(height)
+		ctx.setFillColor(color(0xFFFFFF))
+		ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+		roundRect(ctx, CGRect(x: 24, y: h - 60, width: w * 0.6, height: 16), 3, color(0x1D1D1F))
+		for i in 0..<14 {
+			roundRect(ctx, CGRect(x: 24, y: h - 92 - CGFloat(i) * 20, width: (w - 48) * [1, 0.94, 0.97, 0.7][i % 4], height: 7), 2,
+				color(0x8E8E93))
+		}
+		return ctx.makeImage()!
+	}
+
+	/// A site icon: a rounded square with a mark.
+	static func drawFavicon(side: Int) -> CGImage {
+		let ctx = context(side, side)
+		let s = CGFloat(side)
+		ctx.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: s, height: s), cornerWidth: s * 0.22, cornerHeight: s * 0.22, transform: nil))
+		ctx.clip()
+		gradient(ctx, 0x0A84FF, 0x5E5CE6, CGRect(x: 0, y: 0, width: s, height: s))
+		ctx.setFillColor(color(0xFFFFFF))
+		ctx.fillEllipse(in: CGRect(x: s * 0.28, y: s * 0.28, width: s * 0.44, height: s * 0.44))
 		return ctx.makeImage()!
 	}
 
