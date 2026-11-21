@@ -249,17 +249,42 @@ final class FakePasteboard: PasteboardSource {
 	@Test func theWaitIncludingTheSettleNeverPasses300Milliseconds() async {
 		var slept: [Int] = []
 		var polls = 0
+		var clock = ContinuousClock.now
 		let late = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 29 ? 1 : 2 }, activate: {},
-			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+			sleep: { ms in slept.append(ms); clock = clock.advanced(by: .milliseconds(ms)); if ms == 10 { polls += 1 } },
+			now: { clock })
 		#expect(slept.reduce(0, +) <= 300)
 		#expect(!late)
 
 		slept = []; polls = 0
 		let justInTime = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 27 ? 1 : 2 }, activate: {},
-			sleep: { ms in slept.append(ms); if ms == 10 { polls += 1 } })
+			sleep: { ms in slept.append(ms); clock = clock.advanced(by: .milliseconds(ms)); if ms == 10 { polls += 1 } },
+			now: { clock })
 		#expect(justInTime)
 		#expect(slept.reduce(0, +) == 300)
 		#expect(slept.last == Paster.settleMilliseconds)
+	}
+
+	/// The budget is elapsed time on a monotonic clock, not the sum of requested sleeps: here every sleep takes three
+	/// times what it asked for, as under scheduling delay (B2:14).
+	@Test func theBudgetIsElapsedTimeNotRequestedSleeps() async {
+		let start = ContinuousClock.now
+		var clock = start
+		var polls = 0
+		func wait(frontAfter: Int) async -> Bool {
+			clock = start; polls = 0
+			return await Paster.activateAndWait(pid: 1, frontmost: { polls >= frontAfter ? 1 : 2 }, activate: {},
+				sleep: { ms in clock = clock.advanced(by: .milliseconds(3 * ms)); if ms == 10 { polls += 1 } },
+				now: { clock })
+		}
+		// Never comes forward: polling stops within the budget, not after 280 ms of requested sleeps (840 ms elapsed).
+		#expect(await wait(frontAfter: .max) == false)
+		#expect(clock - start <= .milliseconds(300))
+		// Seen at 240 ms elapsed: the settle ends at 330 ms, past the budget, so it is not pasted into.
+		#expect(await wait(frontAfter: 8) == false)
+		// Seen early: pasted into, with the settle inside the budget.
+		#expect(await wait(frontAfter: 2) == true)
+		#expect(clock - start <= .milliseconds(300))
 	}
 
 	/// Every stored item and representation reaches the pasteboard in order, read back through spy events.

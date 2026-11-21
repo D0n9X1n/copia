@@ -71,17 +71,18 @@ public final class Paster {
 
 	/// The target must still be frontmost after the settle delay; a switch during it would send ⌘V to another app.
 	static func activateAndWait(pid: pid_t, frontmost: () -> pid_t?, activate: () -> Void,
-		sleep: (Int) async -> Void) async -> Bool {
+		sleep: (Int) async -> Void, now: () -> ContinuousClock.Instant = { ContinuousClock.now }) async -> Bool {
+		// The budget is elapsed time on a monotonic clock: a sleep that wakes late still counts in full.
+		let start = now()
+		let budget = Duration.milliseconds(waitBudgetMilliseconds), settle = Duration.milliseconds(settleMilliseconds)
 		if frontmost() != pid { activate() }
 		// Poll only while a full settle still fits in the budget; a target seen later is not pasted into.
-		var waited = 0
-		while waited + settleMilliseconds <= waitBudgetMilliseconds {
+		while now() - start + settle <= budget {
 			if frontmost() == pid {
 				await sleep(settleMilliseconds)
-				return frontmost() == pid
+				return now() - start <= budget && frontmost() == pid
 			}
 			await sleep(10)
-			waited += 10
 		}
 		return false
 	}
