@@ -269,6 +269,23 @@ final class PasteGate {
 		#expect(r.model.clips.count == 8)
 	}
 
+	@Test func undoEndsThreeSecondsAfterTheDeleteEvenWhenAnotherToastReplacedIt() async {
+		let r = StripRig()
+		await r.model.deleteSelected()
+		r.probe.advance(by: .seconds(1))
+		r.failRestore = true
+		await r.model.undo()
+		if case .error = r.model.toast {} else { Issue.record("expected an error toast") }
+		#expect(r.model.canUndo)
+		r.probe.advance(by: .milliseconds(1_999))
+		#expect(r.model.canUndo)
+		r.probe.advance(by: .milliseconds(1))
+		#expect(!r.model.canUndo)
+		r.failRestore = false
+		await r.model.undo()
+		#expect(r.model.clips.count == 8)
+	}
+
 	@Test func escapeClearsTheQueryBeforeClosing() {
 		let r = StripRig()
 		r.model.query = "x"
