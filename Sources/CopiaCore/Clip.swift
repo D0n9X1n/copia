@@ -14,6 +14,8 @@ public enum ClipKind: String, CaseIterable, Codable, Sendable {
 public enum Preview: Equatable, Sendable {
 	case pending
 	case ready(URL)
+	/// A link with no preview image but a saved site icon.
+	case icon(URL)
 	case failed
 }
 
