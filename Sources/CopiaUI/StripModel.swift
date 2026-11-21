@@ -18,6 +18,8 @@ public final class StripModel {
 	public private(set) var isClosing = false
 	/// Cards are dropped while the strip is hidden so their views and images can be freed.
 	public private(set) var cardsMounted = false
+	/// Drives the open/close slide: false = below and transparent, true = in place.
+	public private(set) var appeared = false
 	/// Clip IDs currently animating out after a delete.
 	public private(set) var removingIDs: Set<UUID> = []
 
@@ -214,12 +216,18 @@ public final class StripModel {
 
 	// MARK: Open and close
 
+	/// Mounts the cards in their hidden position. Call `animateIn()` once the panel is on screen.
 	public func open() {
 		presentation += 1
 		isClosing = false
 		query = ""
+		appeared = false
 		cardsMounted = true
 		if selectedID == nil || !clips.contains(where: { $0.id == selectedID }) { selectedID = clips.first?.id }
+	}
+
+	public func animateIn() {
+		animator.run(.open, { self.appeared = true }, {})
 	}
 
 	public func beginClose() {
@@ -227,7 +235,7 @@ public final class StripModel {
 		isClosing = true
 		let generation = presentation
 		onCloseStart()
-		animator.run(.close, {}, {
+		animator.run(.close, { self.appeared = false }, {
 			guard generation == self.presentation else { return }
 			self.finishClose()
 		})

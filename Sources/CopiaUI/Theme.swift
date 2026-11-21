@@ -188,7 +188,11 @@ public final class SourceAppearance {
 	private func entry(for bundleID: String?) -> (icon: NSImage, tint: Theme.Tint)? {
 		guard let bundleID else { return nil }
 		if let hit = cache[bundleID] { return hit }
-		guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+		guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+			let generic = (NSWorkspace.shared.icon(for: .application), Theme.neutralTint)
+			cache[bundleID] = generic
+			return generic
+		}
 		let icon = NSWorkspace.shared.icon(forFile: url.path)
 		let entry = (icon, Theme.sourceTint(for: icon))
 		cache[bundleID] = entry
