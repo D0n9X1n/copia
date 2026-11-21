@@ -10,9 +10,9 @@ import SwiftUI
 	static let margin: CGFloat = 11
 
 	/// Alpha (0...1) at each point, in points from the top-left of the rendered image.
-	static func alpha(at points: [CGPoint]) throws -> [Double] {
+	static func alpha(at points: [CGPoint], removing: Bool = false) throws -> [Double] {
 		_ = NSApplication.shared
-		let renderer = ImageRenderer(content: LensRing()
+		let renderer = ImageRenderer(content: LensRing(removing: removing)
 			.frame(width: Theme.cardSize.width, height: Theme.cardSize.height)
 			.padding(margin))
 		renderer.scale = 1
@@ -29,20 +29,27 @@ import SwiftUI
 		}
 	}
 
-	@Test func theLensIsARingSoADeletedCardFadesToGlassNotToASolidBlock() throws {
-		let midY = Self.margin + Theme.cardSize.height / 2
-		let outer = Self.margin - Theme.lensOutset - Theme.lensHaloWidth
-		let alphas = try Self.alpha(at: [
+	static var points: [CGPoint] {
+		let midY = margin + Theme.cardSize.height / 2
+		let outer = margin - Theme.lensOutset - Theme.lensHaloWidth
+		return [
 			CGPoint(x: outer + 1, y: midY),                          // halo
 			CGPoint(x: outer + Theme.lensHaloWidth + 1.5, y: midY),  // accent ring
-			CGPoint(x: Self.margin - 1, y: midY),                    // the gap between ring and card
-			CGPoint(x: Self.margin + 9, y: midY),                    // inside the card's edge
-			CGPoint(x: Self.margin + Theme.cardSize.width / 2, y: midY), // the card's center
-		])
+			CGPoint(x: margin - 1, y: midY),                         // the gap between ring and card
+			CGPoint(x: margin + Theme.cardSize.width / 2, y: midY),  // behind the card's center
+		]
+	}
+
+	@Test func theLensIsAThreePointAccentStrokeOverATwelvePercentAccentFill() throws {
+		let alphas = try Self.alpha(at: Self.points)
 		#expect(alphas[0] > 0.99, "halo \(alphas)")
 		#expect(alphas[1] > 0.99, "ring \(alphas)")
-		#expect(alphas[2] > 0.99, "gap \(alphas)")
-		#expect(alphas[3] == 0, "inside \(alphas)")
-		#expect(alphas[4] == 0, "center \(alphas)")
+		#expect(alphas[2] > 0.08 && alphas[2] < 0.16, "gap \(alphas)")
+		#expect(alphas[3] > 0.08 && alphas[3] < 0.16, "center \(alphas)")
+	}
+
+	@Test func aDeletingCardsLensFadesWithItSoNoBlockShows() throws {
+		let alphas = try Self.alpha(at: Self.points, removing: true)
+		#expect(alphas.allSatisfy { $0 < 0.01 }, "\(alphas)")
 	}
 }

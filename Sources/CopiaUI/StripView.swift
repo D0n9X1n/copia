@@ -186,7 +186,7 @@ public struct StripView: View {
 			animator: model.animator)
 			.background {
 				if selected {
-					LensRing().matchedGeometryEffect(id: "lens", in: lensSpace)
+					LensRing(removing: model.removingIDs.contains(clip.id)).matchedGeometryEffect(id: "lens", in: lensSpace)
 				}
 			}
 			.focusEffectDisabled()
@@ -260,21 +260,26 @@ public struct StripView: View {
 	}
 }
 
-/// The selection lens: an accent ring edged by a halo, so the ring reaches 3:1 on any glass. Sits behind the card.
-/// The halo is a band, not a fill: it covers the gap and tucks 1 pt under the card, so a card fading out (delete)
-/// shows the glass behind it, not a solid block.
+/// The selection lens (brief): a 3 pt accent stroke over a 12% accent fill, radius 21, 5 pt outside the card, behind it.
+/// A halo edges the stroke outside so it stays visible on any glass. It fades with a deleting card, so the fill never
+/// shows as a block where the card was.
 struct LensRing: View {
-	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
+	var removing = false
+	static let fillOpacity = 0.12
 
 	var body: some View {
 		ZStack {
+			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+				.fill(Color.accentColor.opacity(Self.fillOpacity))
+				.padding(Theme.lensHaloWidth)
 			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
-				.strokeBorder(Theme.lensHalo, lineWidth: Self.band)
+				.strokeBorder(Theme.lensHalo, lineWidth: Theme.lensHaloWidth)
 			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
 				.strokeBorder(Color.accentColor, lineWidth: 3)
 				.padding(Theme.lensHaloWidth)
 		}
 		.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
+		.opacity(removing ? 0 : 1)
 	}
 }
 
