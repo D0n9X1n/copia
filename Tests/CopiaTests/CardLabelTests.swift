@@ -55,6 +55,75 @@ import CopiaFixtures
 		#expect(ClipCard.grown("Text", by: nil) == "Text")
 	}
 
+	/// Real Text accessibility frames, not a duplicated header layout. Yesterday is the longest age label;
+	/// with Rich Text it already needs truncation at 1.4×. At 6× both labels must truncate.
+	@Test func grownHeadersStayInsideTheirCardAndTailTruncateWithoutOverlap() async throws {
+		AccessibilityNode.enableInProcess()
+		#expect(Set(Fixtures.mixed.map(\.kind)) == Set(ClipKind.allCases))
+		for growth in [1.4, 6.0] {
+			for var clip in Fixtures.mixed {
+				clip.timestamp = Fixtures.now.addingTimeInterval(-86_400)
+				let host = NSHostingView(rootView: card(clip, growth: growth))
+				let window = NSWindow(contentRect: CGRect(origin: CGPoint(x: -6000, y: -6000), size: Theme.cardSize),
+					styleMask: .borderless, backing: .buffered, defer: false)
+				window.isReleasedWhenClosed = false
+				window.alphaValue = 0
+				window.contentView = host
+				window.orderFrontRegardless()
+				defer { window.orderOut(nil) }
+				try? await Task.sleep(for: .milliseconds(50))
+				host.layoutSubtreeIfNeeded()
+				let type = ClipCard.grown(CardPresentation(clip: clip).typeLabel, by: growth)
+				let time = ClipCard.grown("Yesterday", by: growth)
+				let nodes = AXNode(host).all
+				let typeNode = try #require(nodes.first { $0.value == type })
+				let timeNode = try #require(nodes.first { $0.value == time })
+				func local(_ frame: CGRect) -> CGRect {
+					CGRect(x: frame.minX - window.frame.minX, y: window.frame.maxY - frame.maxY,
+						width: frame.width, height: frame.height)
+				}
+				let typeFrame = local(typeNode.frame), timeFrame = local(timeNode.frame)
+				let header = CGRect(x: 40, y: 0, width: Theme.cardSize.width - 40 - 12, height: 40)
+				#expect(!typeFrame.isEmpty && !timeFrame.isEmpty)
+				#expect(header.contains(typeFrame), "\(type): \(typeFrame)")
+				#expect(header.contains(timeFrame), "\(time): \(timeFrame)")
+				#expect(typeFrame.minX == header.minX && timeFrame.maxX == header.maxX)
+				#expect(typeFrame.maxX + 20 <= timeFrame.minX)
+				#expect(typeFrame.height == 16 && timeFrame.height == 14)
+				if growth == 6 || clip.kind == .richText {
+					let naturalTime = (time as NSString).size(withAttributes:
+						[.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)]).width
+					#expect(timeFrame.width < naturalTime, "the timestamp must actually need truncation")
+				}
+				if growth == 6 {
+					let naturalType = (type as NSString).size(withAttributes:
+						[.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]).width
+					#expect(typeFrame.width < naturalType, "the type must actually need truncation")
+				}
+
+				// Use the actual outer Text frames to draw an independent, explicitly tail-truncated
+				// reference. Comparing all label pixels checks the prefix AND the ellipsis, not AX's
+				// untruncated string; head/middle truncation or wrapping cannot pass as tail truncation.
+				let reference = ZStack(alignment: .topLeading) {
+					Theme.card
+					Theme.neutralTint.band.frame(height: 40)
+					Text(type).font(.system(size: 13, weight: .semibold))
+						.foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.tail)
+						.frame(width: typeFrame.width, alignment: .leading)
+						.position(x: typeFrame.midX, y: typeFrame.midY)
+					Text(time).font(.system(size: 11, weight: .medium).monospacedDigit())
+						.foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.tail)
+						.frame(width: timeFrame.width, alignment: .leading)
+						.position(x: timeFrame.midX, y: timeFrame.midY)
+				}
+				.frame(width: Theme.cardSize.width, height: Theme.cardSize.height)
+				.environment(\.colorScheme, .light)
+				let r = try render([AnyView(card(clip, growth: growth)), AnyView(reference)])
+				#expect(difference(r, x: 40..<204, y: 1..<39) <= 24, "\(type), \(time)")
+			}
+		}
+	}
+
 	/// A type label grown far past its room is cut at its tail: its first letters match the ungrown label's.
 	@Test func anOverlongTypeLabelIsCutAtItsTail() throws {
 		let clip = Fixtures.mixed[0]

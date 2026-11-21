@@ -315,7 +315,7 @@ struct SearchPill: View {
 }
 
 /// A native text field so typing, input methods and the field editor all behave normally.
-/// Strip commands are read from the field editor's commands, which never fire mid-composition.
+/// Strip commands defer to the native field editor while an input method has marked text.
 struct SearchField: NSViewRepresentable {
 	@Bindable var model: StripModel
 	let focus: SearchFocus
@@ -355,6 +355,7 @@ struct SearchField: NSViewRepresentable {
 		}
 
 		func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+			guard !textView.hasMarkedText() else { return false }
 			let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
 			switch selector {
 			case #selector(NSResponder.moveLeft(_:)): model.move(-1)

@@ -100,6 +100,96 @@ final class InputHost {
 		#expect(host.model.query.isEmpty)
 	}
 
+	@Test func markedTextKeepsCommandsInTheFieldEditorUntilCommitOrCancel() async throws {
+		let commands: [(String, UInt16)] = [Self.leftArrow, Self.rightArrow, ("\r", 36), ("\u{7f}", 51), ("\u{1b}", 53)]
+		for (characters, code) in commands {
+			let host = InputHost()
+			defer { host.close() }
+			await host.settle()
+			host.focus.focus()
+			let editor = try #require(host.panel.firstResponder as? NSTextView)
+			let field = try #require(host.focus.field)
+			#expect(editor.isFieldEditor && field.currentEditor() === editor)
+			host.model.select(Fixtures.mixed[1].id)
+			editor.setMarkedText("re", selectedRange: NSRange(location: 1, length: 0),
+				replacementRange: NSRange(location: NSNotFound, length: 0))
+			#expect(editor.hasMarkedText())
+			let selection = host.model.selectedID
+			host.key(characters, code: code)
+			await host.settle()
+			#expect(host.model.selectedID == selection, "key \(code)")
+			#expect(host.log.entries.isEmpty, "key \(code)")
+			#expect(!host.model.isClosing && host.model.cardsMounted, "key \(code)")
+			// Native NSTextField may publish a query when Return or Backspace ends composition.
+			if code == 123 || code == 124 || code == 53 {
+				#expect(editor.hasMarkedText())
+				#expect(editor.string == "re")
+				#expect(host.model.query.isEmpty)
+			} else {
+				#expect(!editor.hasMarkedText())
+				#expect(host.model.query == (code == 36 ? "re" : "e"))
+			}
+		}
+	}
+
+	@Test func committingOrCancellingMarkedTextRestoresNormalStripKeys() async throws {
+		for commit in [true, false] {
+			let host = InputHost()
+			defer { host.close() }
+			await host.settle()
+			host.focus.focus()
+			let editor = try #require(host.panel.firstResponder as? NSTextView)
+			let field = try #require(host.focus.field)
+			#expect(editor.isFieldEditor && field.currentEditor() === editor)
+			let selection = host.model.selectedID
+			editor.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0),
+				replacementRange: NSRange(location: NSNotFound, length: 0))
+			editor.setMarkedText("にほん", selectedRange: NSRange(location: 3, length: 0), replacementRange: editor.markedRange())
+			await host.settle()
+			#expect(editor.hasMarkedText())
+			#expect(editor.string == "にほん")
+			// setMarkedText alone does not send controlTextDidChange on this native field.
+			#expect(host.model.query.isEmpty)
+			#expect(host.model.selectedID == selection)
+			#expect(host.log.entries.isEmpty)
+			#expect(!host.model.isClosing && host.model.cardsMounted)
+
+			// NSTextInputClient ends composition by replacing the marked range with a candidate;
+			// cancelling replaces it with nothing. No coordinator calls or synthetic selectors.
+			editor.insertText(commit ? "日本" : "", replacementRange: editor.markedRange())
+			await host.settle()
+			#expect(!editor.hasMarkedText())
+			#expect(editor.string == (commit ? "日本" : ""))
+			#expect(host.model.query == editor.string)
+			#expect(host.log.entries.isEmpty)
+			#expect(!host.model.isClosing && host.model.cardsMounted)
+
+			// Escape clears the committed search rather than closing; cancel already left it empty.
+			if commit {
+				host.key("\u{1b}", code: 53)
+				await host.settle()
+			}
+			#expect(host.model.query.isEmpty)
+			host.key("r", code: 15)
+			await host.settle()
+			#expect(host.model.query == "r")
+			host.key("\u{7f}", code: 51)
+			await host.settle()
+			#expect(host.model.query.isEmpty)
+			#expect(host.log.entries.isEmpty)
+			host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+			#expect(host.model.selectedID == Fixtures.mixed[1].id)
+			host.key("\u{7f}", code: 51)
+			await host.settle()
+			#expect(host.log.entries == ["delete \(Fixtures.mixed[1].id)"])
+			#expect(!host.model.clips.contains { $0.id == Fixtures.mixed[1].id })
+			host.key("\r", code: 36)
+			await host.settle()
+			#expect(host.log.entries == ["delete \(Fixtures.mixed[1].id)", "paste \(Fixtures.mixed[2].id) plain=false"])
+			#expect(host.model.isClosing || !host.model.cardsMounted)
+		}
+	}
+
 	@Test func holdingCommandShowsBadges() async {
 		let host = InputHost()
 		defer { host.close() }
