@@ -142,3 +142,39 @@ import SwiftUI
 		#expect(menu.items[1].title == "Pause Capture")
 	}
 }
+
+/// The onboarding status glyph follows each injected permission state.
+@MainActor
+@Suite struct PermissionGlyphTests {
+	@Test func accessibilityGrantedOrRevoked() {
+		#expect(PermissionGlyph(accessibility: true) == .granted)
+		#expect(PermissionGlyph(accessibility: false) == .needed)
+		#expect(PermissionGlyph.granted.symbol == "checkmark.circle.fill")
+		#expect(PermissionGlyph.needed.symbol == "exclamationmark.triangle.fill")
+		#expect(PermissionGlyph.granted.isGranted && !PermissionGlyph.needed.isGranted)
+	}
+
+	@Test func pasteboardEveryState() {
+		let expected: [(PermissionState.Pasteboard, PermissionGlyph)] = [(.unset, .needed), (.ask, .needed), (.allow, .granted), (.deny, .needed)]
+		for (state, glyph) in expected {
+			#expect(PermissionGlyph(pasteboard: state) == glyph, "\(state)")
+			#expect(PermissionState(accessibility: false, pasteboard: state).pasteboardGlyph == glyph, "\(state)")
+		}
+	}
+
+	@Test func modelChangeRedrawsTheGlyphWithoutRelaunch() {
+		final class Flag: @unchecked Sendable { var fired = 0 }
+		let model = ShellModel(), flag = Flag()
+		func read() -> (PermissionGlyph, PermissionGlyph) {
+			withObservationTracking { (model.permissions.accessibilityGlyph, model.permissions.pasteboardGlyph) }
+				onChange: { flag.fired += 1 }
+		}
+		#expect(read() == (.needed, .needed))
+		model.permissions = PermissionState(accessibility: true, pasteboard: .allow)
+		#expect(flag.fired == 1)
+		#expect(read() == (.granted, .granted))
+		model.permissions = PermissionState(accessibility: false, pasteboard: .deny)
+		#expect(flag.fired == 2)
+		#expect(read() == (.needed, .needed))
+	}
+}

@@ -8,6 +8,18 @@ extension KeyboardShortcuts.Name {
 	public static let copiaPause = Self("copiaPause", initial: .init(.t, modifiers: [.command]))
 }
 
+/// The onboarding status glyph for one permission.
+public enum PermissionGlyph: Equatable, Sendable {
+	case granted, needed
+
+	public init(accessibility: Bool) { self = accessibility ? .granted : .needed }
+	/// Only Always Allow lets Copia read without a prompt; default, ask and deny all still need the user.
+	public init(pasteboard: PermissionState.Pasteboard) { self = pasteboard == .allow ? .granted : .needed }
+
+	public var isGranted: Bool { self == .granted }
+	public var symbol: String { isGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill" }
+}
+
 /// Permission state shown in onboarding and Settings.
 public struct PermissionState: Equatable, Sendable {
 	public enum Pasteboard: Sendable { case unset, ask, allow, deny }
@@ -19,8 +31,8 @@ public struct PermissionState: Equatable, Sendable {
 		self.pasteboard = pasteboard
 	}
 
-	public var accessibilityGlyph: String { accessibility ? "checkmark.circle.fill" : "exclamationmark.triangle.fill" }
-	public var pasteboardGlyph: String { pasteboard == .allow ? "checkmark.circle.fill" : "exclamationmark.triangle.fill" }
+	public var accessibilityGlyph: PermissionGlyph { PermissionGlyph(accessibility: accessibility) }
+	public var pasteboardGlyph: PermissionGlyph { PermissionGlyph(pasteboard: pasteboard) }
 }
 
 public enum LoginStatus: Equatable, Sendable {
@@ -312,7 +324,7 @@ public struct OnboardingView: View {
 		case .accessibility:
 			page(title: "Paste where you were",
 				detail: "To paste into the app you were using, allow Copia in Privacy & Security → Accessibility. Without it, Copia copies and you press ⌘V.",
-				hero: AnyView(status(model.permissions.accessibilityGlyph, ok: model.permissions.accessibility))) {
+				hero: AnyView(status(model.permissions.accessibilityGlyph))) {
 				if model.permissions.accessibility {
 					Button("Continue") { next() }.shellProminentButton().controlSize(.large)
 				} else {
@@ -326,7 +338,7 @@ public struct OnboardingView: View {
 		case .pasteboard:
 			page(title: "Let Copia read the clipboard",
 				detail: "macOS may ask before an app reads the clipboard. Choose Always Allow for Copia so it can keep your history.",
-				hero: AnyView(status(model.permissions.pasteboardGlyph, ok: model.permissions.pasteboard == .allow))) {
+				hero: AnyView(status(model.permissions.pasteboardGlyph))) {
 				if model.permissions.pasteboard == .allow {
 					Button("Continue") { next() }.shellProminentButton().controlSize(.large)
 				} else {
@@ -347,10 +359,10 @@ public struct OnboardingView: View {
 
 	private func next() { model.onboardingStep = min(model.onboardingStep + 1, OnboardingStep.allCases.count - 1) }
 
-	private func status(_ glyph: String, ok: Bool) -> some View {
-		Image(systemName: glyph)
+	private func status(_ glyph: PermissionGlyph) -> some View {
+		Image(systemName: glyph.symbol)
 			.font(.system(size: 56))
-			.foregroundStyle(ok ? Color.green : Color.orange)
+			.foregroundStyle(glyph.isGranted ? Color.green : Color.orange)
 			.contentTransition(.symbolEffect(.replace))
 	}
 
