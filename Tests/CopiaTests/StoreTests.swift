@@ -22,7 +22,7 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 		try live.remove(url)
 	}
 	func exists(_ url: URL) -> Bool { live.exists(url) }
-	func list(_ directory: URL) -> [URL] { live.list(directory) }
+	func list(_ directory: URL) throws -> [URL] { try live.list(directory) }
 }
 
 private func text(_ s: String, at t: TimeInterval = 1_800_000_000) -> ClipDraft {
@@ -221,6 +221,29 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(try await store.fetch(clip.key)?.title == "keep me")
 		await store.failNextStep()
 		await #expect(throws: StoreError.self) { try await store.recent() }
+	}
+
+	/// An unreadable blobs folder is not an empty one: sweep must stop, not drop rows whose files it cannot see.
+	@Test func sweepKeepsRowsWhenTheBlobsFolderCannotBeRead() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("still here"))
+		let blobs = dir.appendingPathComponent("blobs").path
+		try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: blobs)
+		await #expect(throws: (any Error).self) { try await store.sweep() }
+		try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blobs)
+		#expect(try await store.fetch(clip.key)?.title == "still here")
+		try await store.sweep()
+		#expect(try await store.items(for: clip.key).count == 1)
+	}
+
+	/// Erase that cannot even list a folder must say so, not report success.
+	@Test func eraseReportsAFolderItCouldNotRead() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try await store.insert(text("secret"))
+		let blobs = dir.appendingPathComponent("blobs").path
+		try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: blobs)
+		defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blobs) }
+		await #expect(throws: StoreError.self) { try await store.eraseAll() }
 	}
 
 	/// Erase removes everything it can, then reports a file it could not remove instead of claiming success.

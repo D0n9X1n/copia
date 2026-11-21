@@ -8,7 +8,8 @@ public protocol FileOps: Sendable {
 	func move(_ from: URL, to: URL) throws
 	func remove(_ url: URL) throws
 	func exists(_ url: URL) -> Bool
-	func list(_ directory: URL) -> [URL]
+	/// Throws when the folder cannot be read, so an unreadable folder never looks empty.
+	func list(_ directory: URL) throws -> [URL]
 }
 
 public struct LiveFileOps: FileOps {
@@ -22,8 +23,8 @@ public struct LiveFileOps: FileOps {
 		if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
 	}
 	public func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
-	public func list(_ directory: URL) -> [URL] {
-		(try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+	public func list(_ directory: URL) throws -> [URL] {
+		try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
 	}
 }
 
@@ -211,8 +212,9 @@ public actor ClipStore {
 		}
 	}
 
+	/// Best effort: trash only holds undo copies of items already deleted.
 	public func emptyTrash() {
-		for url in files.list(trash) { try? files.remove(url) }
+		for url in (try? files.list(trash)) ?? [] { try? files.remove(url) }
 	}
 
 	/// Deletes clips last copied before `cutoff`, with their FTS entries and files.
@@ -241,7 +243,8 @@ public actor ClipStore {
 		}
 		var left = 0
 		for dir in [blobs, thumbs, trash] {
-			for url in files.list(dir) {
+			guard let urls = try? files.list(dir) else { left += 1; continue }
+			for url in urls {
 				do { try files.remove(url) } catch { left += 1 }
 			}
 		}
@@ -249,15 +252,16 @@ public actor ClipStore {
 	}
 
 	/// Launch cleanup: empty trash, drop files without rows and rows without blobs.
+	/// Rows are dropped only for blobs a successful listing shows are absent; a folder that cannot be read stops the sweep.
 	public func sweep() throws {
 		emptyTrash()
 		let keys = Set(try strings("SELECT id FROM clips", []))
-		for dir in [blobs, thumbs] {
-			for url in files.list(dir) where !keys.contains(url.deletingPathExtension().lastPathComponent) {
-				try? files.remove(url)
-			}
+		let blobFiles = try files.list(blobs), thumbFiles = try files.list(thumbs)
+		for url in blobFiles + thumbFiles where !keys.contains(url.deletingPathExtension().lastPathComponent) {
+			try? files.remove(url)
 		}
-		let missing = keys.filter { !files.exists(blobURL($0)) }
+		let present = Set(blobFiles.map { $0.deletingPathExtension().lastPathComponent })
+		let missing = keys.subtracting(present)
 		if !missing.isEmpty {
 			try transaction {
 				for key in missing {
