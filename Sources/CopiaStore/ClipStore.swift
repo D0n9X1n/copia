@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import SQLite3
 import CopiaCore
 
@@ -376,9 +377,14 @@ public actor ClipStore {
 		let keys = try strings("SELECT id FROM clips WHERE last_copied < ?", [.real(cutoff.timeIntervalSince1970)])
 		guard !keys.isEmpty else { return 0 }
 		try transaction(keys: keys) {
-			for key in keys {
-				try run("DELETE FROM clips WHERE id=?", [.text(key)])
-				try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
+			// Select expired TEXT ids while clips still exist; scan unindexed FTS only once.
+			try run("""
+				DELETE FROM clips_fts WHERE typeof(id)='text' AND id COLLATE BINARY IN
+					(SELECT id FROM clips WHERE last_copied < ?)
+				""", [.real(cutoff.timeIntervalSince1970)])
+			try run("DELETE FROM clips WHERE last_copied < ?", [.real(cutoff.timeIntervalSince1970)])
+			guard sqlite3_changes64(db) == Int64(keys.count) else {
+				throw StoreError.sqlite("prune deleted count differs from selected keys")
 			}
 		}
 		cleanup(keys.flatMap { [blobURL($0), thumbURL($0), trashURL($0, "plist")] })
@@ -413,15 +419,29 @@ public actor ClipStore {
 	}
 
 	private struct Inventory {
-		let clips: [StoredClip]
+		let clips: [(key: String, previewState: PreviewState)]
 		let listed: [URL]
 		let paths: Set<String>
 		let owned: Set<String>
 	}
 
+	/// Cleanup needs existence and thumbnail ownership, never titles or preview text.
+	private func ownershipRows(_ key: String? = nil) throws -> [(key: String, previewState: PreviewState)] {
+		readStatementCount += 1
+		let statement = try prepare("SELECT id, preview_state FROM clips" + (key == nil ? "" : " WHERE id=?"), key.map { [.text($0)] } ?? [])
+		defer { sqlite3_finalize(statement) }
+		var rows: [(key: String, previewState: PreviewState)] = []
+		while try nextRow(statement) {
+			let key = String(cString: sqlite3_column_text(statement, 0))
+			let state = String(cString: sqlite3_column_text(statement, 1))
+			rows.append((key, PreviewState(rawValue: state) ?? .failed))
+		}
+		return rows
+	}
+
 	/// Full sweeps require readable rows and every directory before destructive cleanup.
 	private func inventory() throws -> Inventory {
-		let clips = try recent()
+		let clips = try ownershipRows()
 		let listed = try files.list(blobs) + files.list(thumbs) + files.list(trash)
 		let paths = Set(listed.map(\.path))
 		var owned = Set<String>()
@@ -429,7 +449,7 @@ public actor ClipStore {
 			let home = blobURL(clip.key), legacy = trashURL(clip.key, "plist")
 			owned.insert(home.path)
 			if !paths.contains(home.path), paths.contains(legacy.path) { owned.insert(legacy.path) }
-			if ownsThumbnail(clip) { owned.insert(thumbURL(clip.key).path) }
+			if clip.previewState == .ok || clip.previewState == .okNoImage { owned.insert(thumbURL(clip.key).path) }
 		}
 		for deleted in undos.values {
 			owned.insert(snapshotURL(deleted, "plist").path)
@@ -443,7 +463,7 @@ public actor ClipStore {
 	private func cleanup(_ urls: [URL]) -> [URL] {
 		guard !recoveryRequired, !urls.isEmpty else { return urls }
 		do {
-			var rows: [String: StoredClip] = [:], checked = Set<String>(), owned = Set<String>()
+			var rows: [String: PreviewState] = [:], checked = Set<String>(), owned = Set<String>()
 			for url in urls {
 				let parent = url.deletingLastPathComponent().path
 				let name = url.deletingPathExtension().lastPathComponent
@@ -456,10 +476,10 @@ public actor ClipStore {
 					continue
 				}
 				guard [blobs.path, thumbs.path, trash.path].contains(parent) else { owned.insert(url.path); continue }
-				if checked.insert(name).inserted { rows[name] = try fetch(name) }
-				guard let clip = rows[name] else { continue }
+				if checked.insert(name).inserted { rows[name] = try ownershipRows(name).first?.previewState }
+				guard let state = rows[name] else { continue }
 				if parent == blobs.path, ext == "plist" { owned.insert(url.path) }
-				if parent == thumbs.path, ext == "png", ownsThumbnail(clip) { owned.insert(url.path) }
+				if parent == thumbs.path, ext == "png", state == .ok || state == .okNoImage { owned.insert(url.path) }
 				if parent == trash.path, ext == "plist", try readIfPresent(blobURL(name)) == nil { owned.insert(url.path) }
 			}
 			// Token-only/atomic-temp batches still require a readable database before destruction.
@@ -511,7 +531,7 @@ public actor ClipStore {
 
 	/// Launch ends undos, recovers legacy live blobs, and drops rows proven to have no payload.
 	public func sweep() throws {
-		let clips = try recent()
+		let clips = try ownershipRows()
 		let listed = try files.list(blobs) + files.list(thumbs) + files.list(trash)
 		let paths = Set(listed.map(\.path))
 		let missing = clips.filter { !paths.contains(blobURL($0.key).path) && !paths.contains(trashURL($0.key, "plist").path) }.map(\.key)
@@ -640,8 +660,17 @@ public actor ClipStore {
 	private var inTransaction = false
 	private var stepFault = false
 	private(set) var readStatementCount = 0
+	private(set) var writeStatementCount = 0
+	func resetWriteCount() { writeStatementCount = 0 }
+	/// Selected rows, retaining the existing targeted-read diagnostic.
 	private(set) var readRowCount = 0
-	func resetReadCounts() { readStatementCount = 0; readRowCount = 0 }
+	private(set) var decodedClipCount = 0
+	/// Includes skipped FTS ids, so tests also guard total scan work.
+	private(set) var steppedReadRowCount = 0
+	private(set) var readbackVMStepCount = 0
+	func resetReadCounts() { readStatementCount = 0; readRowCount = 0; decodedClipCount = 0; steppedReadRowCount = 0; readbackVMStepCount = 0 }
+	/// Tests: exercise chunking below the platform's SQLite bind limit.
+	func limitSQLVariables(_ limit: Int32) { sqlite3_limit(db, SQLITE_LIMIT_VARIABLE_NUMBER, limit) }
 	private var writeFault = false
 
 	/// Tests: the next read step fails as SQLite would on a busy or damaged database.
@@ -672,7 +701,7 @@ public actor ClipStore {
 	private func nextRow(_ statement: OpaquePointer?) throws -> Bool {
 		let code = stepFault ? SQLITE_IOERR : sqlite3_step(statement)
 		stepFault = false
-		if code == SQLITE_ROW { readRowCount += 1; return true }
+		if code == SQLITE_ROW { readRowCount += 1; steppedReadRowCount += 1; return true }
 		guard code == SQLITE_DONE else { throw StoreError.sqlite(String(cString: sqlite3_errstr(code))) }
 		return false
 	}
@@ -681,18 +710,141 @@ public actor ClipStore {
 		if recoveryRequired { throw StoreError.outcomeUnknown }
 	}
 
-	private struct SQLState: Equatable {
-		let rows: [StoredClip]
-		let fts: [String]
-		let generation: [String]
+	struct SQLFingerprint: Equatable {
+		let count: UInt64
+		let digest: SHA256.Digest
 	}
 
-	private func sqlState(_ keys: [String]?) throws -> SQLState {
-		let filter = keys.map { " WHERE id IN (" + $0.map { _ in "?" }.joined(separator: ",") + ")" } ?? ""
-		let values = (keys ?? []).map(Value.text)
-		return try SQLState(rows: query("SELECT * FROM clips" + filter + " ORDER BY id", values),
-			fts: strings("SELECT quote(id)||quote(title)||quote(preview_text) FROM clips_fts" + filter + " ORDER BY id", values),
-			generation: strings("SELECT value FROM meta WHERE key='generation'", []))
+	struct SQLState: Equatable {
+		let rows: SQLFingerprint
+		let fts: SQLFingerprint
+		let generation: SQLFingerprint
+	}
+
+	/// Construct once per transaction so prior, expected and persisted use identical chunks.
+	private struct ReadbackScope {
+		// SQLite ids use binary equality, unlike canonically equivalent Swift Strings.
+		let keys: Set<Data>?
+		let chunks: [[String]]
+		init(_ keys: [String]?) {
+			self.keys = keys.map { Set($0.map { Data($0.utf8) }) }
+			let sorted = self.keys?.sorted { $0.lexicographicallyPrecedes($1) }.map { String(decoding: $0, as: UTF8.self) } ?? []
+			chunks = stride(from: 0, to: sorted.count, by: 400).map { Array(sorted[$0..<min($0 + 400, sorted.count)]) }
+		}
+	}
+
+	/// Framing is independent of SQL text rendering and Swift's lossy metadata decoding.
+	private struct SQLHasher {
+		var hash = SHA256()
+		var count: UInt64 = 0
+
+		mutating func number(_ number: UInt64) {
+			var bits = number.bigEndian
+			withUnsafeBytes(of: &bits) { hash.update(bufferPointer: $0) }
+		}
+
+		mutating func bytes(_ bytes: UnsafeRawBufferPointer) {
+			number(UInt64(bytes.count))
+			hash.update(bufferPointer: bytes)
+		}
+
+		mutating func marker(_ marker: String) {
+			Array(marker.utf8).withUnsafeBytes { bytes($0) }
+		}
+
+		mutating func row(_ statement: OpaquePointer?) throws {
+			number(1) // Row marker, followed by column count and typed fields.
+			let columns = sqlite3_column_count(statement)
+			number(UInt64(columns))
+			for column in 0..<columns {
+				let type = sqlite3_column_type(statement, column) // Before any conversion.
+				number(UInt64(type))
+				switch type {
+				case SQLITE_NULL: break
+				case SQLITE_INTEGER: number(UInt64(bitPattern: sqlite3_column_int64(statement, column)))
+				case SQLITE_FLOAT: number(sqlite3_column_double(statement, column).bitPattern)
+				case SQLITE_TEXT, SQLITE_BLOB:
+					// SQLite requires the pointer accessor before column_bytes. Never use C-string length.
+					let pointer = type == SQLITE_TEXT
+						? sqlite3_column_text(statement, column).map { UnsafeRawPointer($0) }
+						: sqlite3_column_blob(statement, column)
+					let length = Int(sqlite3_column_bytes(statement, column))
+					guard sqlite3_errcode(sqlite3_db_handle(statement)) != SQLITE_NOMEM,
+						length == 0 || pointer != nil else { throw StoreError.sqlite("readback column unavailable") }
+					bytes(UnsafeRawBufferPointer(start: pointer, count: length))
+				default: throw StoreError.sqlite("unknown readback storage class")
+				}
+			}
+			count += 1
+		}
+
+		mutating func finish() -> SQLFingerprint {
+			number(0) // End of table, followed by total row count.
+			number(count)
+			return SQLFingerprint(count: count, digest: hash.finalize())
+		}
+	}
+
+	private func fingerprint(_ sql: String, _ values: [Value], into hasher: inout SQLHasher, keys: Set<Data>? = nil) throws {
+		readStatementCount += 1
+		let statement = try prepare(sql, values)
+		defer {
+			readbackVMStepCount += Int(sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_VM_STEP, 0))
+			sqlite3_finalize(statement)
+		}
+		hasher.marker(sql) // Query/chunk marker, including empty result sets.
+		hasher.number(UInt64(values.count))
+		for value in values {
+			if case let .text(key) = value { hasher.marker(key) }
+		}
+		while try nextRow(statement) {
+			if let keys {
+				// Match the TEXT bindings used by clip queries, without coercing BLOB/numeric ids.
+				guard sqlite3_column_type(statement, 0) == SQLITE_TEXT else { readRowCount -= 1; continue }
+				let pointer = sqlite3_column_text(statement, 0)
+				let length = Int(sqlite3_column_bytes(statement, 0))
+				guard let pointer else { throw StoreError.sqlite("readback id unavailable") }
+				let key = Data(bytes: pointer, count: length)
+				guard keys.contains(key) else {
+					// readRowCount tracks selected rows; skipped FTS ids do not decode clip metadata.
+					readRowCount -= 1
+					continue
+				}
+			}
+			try hasher.row(statement)
+		}
+		hasher.number(2) // End of query/chunk, including an empty projection.
+		hasher.number(UInt64(sqlite3_column_count(statement)))
+	}
+
+	/// Internal visibility lets tests compare the actual recovery oracle, not a substitute.
+	func sqlState(_ keys: [String]?) throws -> SQLState { try sqlState(ReadbackScope(keys)) }
+
+	private func sqlState(_ scope: ReadbackScope) throws -> SQLState {
+		var rows = SQLHasher(), fts = SQLHasher(), generation = SQLHasher()
+		rows.marker("clips")
+		if scope.keys == nil {
+			try fingerprint("SELECT * FROM clips ORDER BY id", [], into: &rows)
+		} else {
+			for chunk in scope.chunks {
+				let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+				try fingerprint("SELECT * FROM clips WHERE id IN (\(placeholders)) ORDER BY id", chunk.map(Value.text), into: &rows)
+			}
+		}
+		fts.marker("clips_fts")
+		// Small scopes filter inside SQLite; large scopes still scan FTS only once, never per chunk.
+		if scope.keys != nil, scope.chunks.count <= 1 {
+			let chunk = scope.chunks.first ?? []
+			let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+			let filter = chunk.isEmpty ? "0" : "id COLLATE BINARY IN (\(placeholders)) AND typeof(id)='text'"
+			try fingerprint("SELECT id, title, preview_text FROM clips_fts WHERE \(filter) ORDER BY rowid", chunk.map(Value.text), into: &fts)
+		} else {
+			// id is UNINDEXED. Rowid order avoids sorting full FTS text.
+			try fingerprint("SELECT id, title, preview_text FROM clips_fts ORDER BY rowid", [], into: &fts, keys: scope.keys)
+		}
+		generation.marker("meta")
+		try fingerprint("SELECT key, value FROM meta WHERE key='generation' ORDER BY key", [], into: &generation)
+		return SQLState(rows: rows.finish(), fts: fts.finish(), generation: generation.finish())
 	}
 
 	/// A SQL exception is not evidence of rollback. Read back only after SQLite confirms autocommit.
@@ -700,13 +852,14 @@ public actor ClipStore {
 	func transaction(keys: [String]? = nil, validFiles: () -> Bool = { true }, _ body: () throws -> Void) throws {
 		try checkAvailable()
 		if inTransaction { return try body() }
-		let prior = try sqlState(keys)
+		let scope = ReadbackScope(keys)
+		let prior = try sqlState(scope)
 		var expected: SQLState?
 		do {
 			try Self.exec(db, "BEGIN IMMEDIATE")
 			inTransaction = true
 			try body()
-			expected = try sqlState(keys)
+			expected = try sqlState(scope)
 			let fault = commitFault
 			commitFault = nil
 			if fault == .beforeEffect { throw StoreError.sqlite("injected COMMIT before effect") }
@@ -719,7 +872,7 @@ public actor ClipStore {
 			if sqlite3_get_autocommit(db) == 0, !rollbackFault { try? Self.exec(db, "ROLLBACK") }
 			rollbackFault = false
 			var persisted: SQLState?
-			if sqlite3_get_autocommit(db) != 0, !readbackFault { persisted = try? sqlState(keys) }
+			if sqlite3_get_autocommit(db) != 0, !readbackFault { persisted = try? sqlState(scope) }
 			readbackFault = false
 			if let persisted {
 				if let expected, persisted == expected, validFiles() { return }
@@ -739,17 +892,23 @@ public actor ClipStore {
 		let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 		for (i, value) in values.enumerated() {
 			let index = Int32(i + 1)
+			let code: Int32
 			switch value {
-			case let .text(s): sqlite3_bind_text(statement, index, s, -1, transient)
-			case let .int(n): sqlite3_bind_int64(statement, index, Int64(n))
-			case let .real(d): sqlite3_bind_double(statement, index, d)
-			case .null: sqlite3_bind_null(statement, index)
+			case let .text(s): code = s.withCString { sqlite3_bind_text(statement, index, $0, Int32(s.utf8.count), transient) }
+			case let .int(n): code = sqlite3_bind_int64(statement, index, Int64(n))
+			case let .real(d): code = sqlite3_bind_double(statement, index, d)
+			case .null: code = sqlite3_bind_null(statement, index)
+			}
+			guard code == SQLITE_OK else {
+				sqlite3_finalize(statement)
+				throw StoreError.sqlite(String(cString: sqlite3_errstr(code)))
 			}
 		}
 		return statement
 	}
 
 	private func run(_ sql: String, _ values: [Value]) throws {
+		writeStatementCount += 1
 		if writeFault { writeFault = false; throw StoreError.sqlite("injected write fault") }
 		let statement = try prepare(sql, values)
 		defer { sqlite3_finalize(statement) }
@@ -762,7 +921,10 @@ public actor ClipStore {
 		defer { sqlite3_finalize(statement) }
 		var result: [String] = []
 		while try nextRow(statement) {
-			result.append(String(cString: sqlite3_column_text(statement, 0)))
+			let pointer = sqlite3_column_text(statement, 0)
+			let length = Int(sqlite3_column_bytes(statement, 0))
+			guard let pointer else { throw StoreError.sqlite("string column unavailable") }
+			result.append(String(decoding: UnsafeBufferPointer(start: pointer, count: length), as: UTF8.self))
 		}
 		return result
 	}
@@ -772,8 +934,12 @@ public actor ClipStore {
 		let statement = try prepare(sql, values)
 		defer { sqlite3_finalize(statement) }
 		var result: [StoredClip] = []
-		func text(_ i: Int32) -> String? { sqlite3_column_text(statement, i).map { String(cString: $0) } }
+		func text(_ i: Int32) -> String? {
+			guard let pointer = sqlite3_column_text(statement, i) else { return nil }
+			return String(decoding: UnsafeBufferPointer(start: pointer, count: Int(sqlite3_column_bytes(statement, i))), as: UTF8.self)
+		}
 		while try nextRow(statement) {
+			decodedClipCount += 1
 			result.append(StoredClip(
 				key: text(0) ?? "", kind: ClipKind(rawValue: text(1) ?? "") ?? .text, title: text(2) ?? "",
 				previewText: text(3) ?? "", isCode: sqlite3_column_int(statement, 4) != 0, sourceBundle: text(5), sourceName: text(6),

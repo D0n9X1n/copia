@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import SQLite3
 import CopiaCore
 @testable import CopiaStore
 
@@ -68,7 +69,398 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 	(try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent(sub).path).count) ?? 0
 }
 
+/// Small SQL-only fixtures exercise scopes larger than a deliberately lowered bind limit.
+private func seedSQLRows(_ dir: URL, count: Int) throws {
+	try editSQL(dir, """
+		WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i+1<\(count))
+		INSERT INTO clips SELECT 'key-'||i, 'text', 'title', 'preview', 0, NULL, NULL,
+			1, 1, 1, 7, '', NULL, NULL, '', 'ok', i FROM n;
+		INSERT INTO clips_fts (id,title,preview_text) SELECT id,title,preview_text FROM clips;
+		""")
+}
+
+/// Real SQLite edits preserve storage classes and bytes that StoredClip intentionally normalizes.
+private func editSQL(_ dir: URL, _ sql: String) throws {
+	var db: OpaquePointer?
+	guard sqlite3_open(dir.appendingPathComponent("copia.sqlite").path, &db) == SQLITE_OK else {
+		throw StoreError.sqlite("fixture open failed")
+	}
+	defer { sqlite3_close(db) }
+	guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+		throw StoreError.sqlite(String(cString: sqlite3_errmsg(db)))
+	}
+}
+
+private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
+	var db: OpaquePointer?
+	guard sqlite3_open_v2(dir.appendingPathComponent("copia.sqlite").path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+		throw StoreError.sqlite("fixture read open failed")
+	}
+	defer { sqlite3_close(db) }
+	var statement: OpaquePointer?
+	guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+		throw StoreError.sqlite(String(cString: sqlite3_errmsg(db)))
+	}
+	defer { sqlite3_finalize(statement) }
+	var rows: [[String]] = []
+	while true {
+		let result = sqlite3_step(statement)
+		if result == SQLITE_DONE { return rows }
+		guard result == SQLITE_ROW else { throw StoreError.sqlite(String(cString: sqlite3_errmsg(db))) }
+		var row: [String] = []
+		for column in 0..<sqlite3_column_count(statement) {
+			guard let pointer = sqlite3_column_text(statement, column) else { throw StoreError.sqlite("fixture column unavailable") }
+			row.append(String(decoding: UnsafeBufferPointer(start: pointer, count: Int(sqlite3_column_bytes(statement, column))), as: UTF8.self))
+		}
+		rows.append(row)
+	}
+}
+
 @Suite struct StoreTests {
+	@Test func readbackDistinguishesNumbersFromIdenticallyRenderedText() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try editSQL(dir, "INSERT INTO clips_fts (id,title,preview_text) VALUES ('types','title','initial')")
+		for (number, string, type) in [("1", "'1'", "integer"), ("1.0", "'1.0'", "real")] {
+			try editSQL(dir, "UPDATE clips_fts SET preview_text=\(number)")
+			try #require(sqlTextRows(dir, "SELECT typeof(id),typeof(title),typeof(preview_text) FROM clips_fts") == [["text", "text", type]])
+			let numeric = try await store.sqlState(nil)
+			try editSQL(dir, "UPDATE clips_fts SET preview_text=\(string)")
+			try #require(sqlTextRows(dir, "SELECT typeof(id),typeof(title),typeof(preview_text) FROM clips_fts") == [["text", "text", "text"]])
+			#expect(try await store.sqlState(nil) != numeric, "\(type) and identically rendered TEXT must differ")
+		}
+	}
+
+	@Test func largeReadbackExcludesEveryNonTextID() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try editSQL(dir, """
+			INSERT INTO clips_fts (id,title,preview_text) VALUES
+				('123','text','include'), (123,'integer','exclude'), (123.0,'real','exclude'),
+				(x'313233','blob','exclude'), (NULL,'null','exclude');
+			""")
+		func requireTypes() throws {
+			try #require(sqlTextRows(dir, "SELECT typeof(id),typeof(title),typeof(preview_text) FROM clips_fts ORDER BY rowid") ==
+				["text", "integer", "real", "blob", "null"].map { [$0, "text", "text"] })
+		}
+		let keys = ["123", "123.0", ""]
+		for scope in [keys, keys + (0..<401).map { "absent-\($0)" }] {
+			try requireTypes()
+			let initial = try await store.sqlState(scope)
+			#expect(initial.fts.count == 1)
+			for row in 2...5 {
+				try editSQL(dir, "UPDATE clips_fts SET preview_text=preview_text||'changed' WHERE rowid=\(row)")
+				try requireTypes()
+				#expect(try await store.sqlState(scope) == initial)
+			}
+			try editSQL(dir, "UPDATE clips_fts SET preview_text=preview_text||'changed' WHERE rowid=1")
+			try requireTypes()
+			#expect(try await store.sqlState(scope) != initial)
+		}
+	}
+
+	@Test func largePruneRollbackPreservesRowsAndEveryPayload() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try seedSQLRows(dir, count: 1_001)
+		let payloads = try (0..<1_001).map { try ClipStore.encode(text("payload \($0)").items) }
+		for (i, payload) in payloads.enumerated() {
+			try payload.write(to: dir.appendingPathComponent("blobs/key-\(i).plist"))
+		}
+		func requireTypes(_ count: Int) throws {
+			try #require(sqlTextRows(dir, "SELECT typeof(id),typeof(last_copied) FROM clips") == Array(repeating: ["text", "real"], count: count))
+			try #require(sqlTextRows(dir, "SELECT typeof(id),typeof(title),typeof(preview_text) FROM clips_fts") == Array(repeating: ["text", "text", "text"], count: count))
+		}
+		await store.limitSQLVariables(401)
+		try requireTypes(1_001)
+		let prior = try await store.sqlState(nil)
+		let debt = await store.cleanupPending
+		let recovery = await store.recoveryRequired
+		await store.failTransaction(commit: .beforeEffect)
+		await #expect(throws: StoreError.self) { try await store.prune(before: Date(timeIntervalSince1970: 2)) }
+		try requireTypes(1_001)
+		#expect(try await store.sqlState(nil) == prior)
+		try requireTypes(1_001)
+		#expect(await store.cleanupPending == debt)
+		try requireTypes(1_001)
+		#expect(await store.recoveryRequired == recovery)
+		try requireTypes(1_001)
+		for (i, payload) in payloads.enumerated() {
+			#expect(try Data(contentsOf: dir.appendingPathComponent("blobs/key-\(i).plist")) == payload)
+		}
+		try requireTypes(1_001)
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 2)) == 1_001)
+		try requireTypes(0)
+		let empty = try await store.sqlState(nil)
+		#expect(empty.rows.count == 0 && empty.fts.count == 0)
+		try requireTypes(0)
+		#expect(fileCount(dir, "blobs") == 0 && fileCount(dir, "thumbs") == 0 && fileCount(dir, "trash") == 0)
+	}
+
+
+	@Test func deleteAndRestorePreserveTextAfterEmbeddedNUL() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let draft = text("head\0tailword文")
+		let (original, _) = try await store.insert(draft)
+		#expect(try await store.fetch(original.key) == original)
+		#expect(try await store.search("tailword") == [original.key])
+		let deleted = try #require(try await store.delete(original.key))
+		#expect(deleted.clip == original)
+		var expected = original
+		let restored = try await store.restore(deleted)
+		#expect(restored.generation > original.generation)
+		expected.generation = restored.generation
+		#expect(restored == expected)
+		#expect(try await store.recent() == [expected])
+		#expect(try await store.search("tailword") == [original.key])
+		#expect(try await store.items(for: original.key) == draft.items)
+	}
+
+	@Test func readbackFingerprintsEveryRawClipColumnWithoutDecoding() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try await store.insert(text("fingerprint"))
+		// Consecutive alternatives exercise NULL/empty, raw enum/bool values, field boundaries,
+		// exact integer/float bits, and TEXT versus BLOB including Unicode and embedded NUL.
+		let changes: [(String, [String])] = [
+			("id", ["'a'", "'b'"]), ("kind", ["'unknown-one'", "'unknown-two'"]),
+			("title", ["'ab'", "'a'", "CAST(x'61' AS BLOB)", "CAST(x'e696870061' AS TEXT)", "CAST(x'e696870062' AS TEXT)"]),
+			("preview_text", ["'c'", "'bc'", "CAST(x'610062' AS TEXT)", "CAST(x'610063' AS TEXT)"]),
+			("is_code", ["1", "2", "1.5"]),
+			("source_bundle", ["NULL", "''", "x''"]), ("source_name", ["NULL", "''", "'文'"]),
+			("first_copied", ["0.0", "1.0e-20", "1.0000000000000002e-20"]),
+			("last_copied", ["-1.0e-20", "0.0", "1.0e300"]),
+			("copy_count", ["-9223372036854775808", "9223372036854775806", "9223372036854775807"]),
+			("byte_size", ["0", "1", "1.5"]), ("meta", ["''", "'文'", "x'e69687'"]),
+			("color_hex", ["NULL", "''"]), ("url", ["NULL", "''"]),
+			("file_names", ["'a'", "'a' || char(10)"]),
+			("preview_state", ["'unknown-one'", "'unknown-two'"]), ("generation", ["1", "2"]),
+		]
+		await store.resetReadCounts()
+		for (column, values) in changes {
+			try editSQL(dir, "UPDATE clips SET \(column)=\(values[0])")
+			var previous = try await store.sqlState(nil)
+			#expect(try await store.sqlState(nil) == previous)
+			for value in values.dropFirst() {
+				try editSQL(dir, "UPDATE clips SET \(column)=\(value)")
+				let next = try await store.sqlState(nil)
+				#expect(next != previous, "Raw column \(column) changed to \(value)")
+				previous = next
+			}
+		}
+		#expect(await store.decodedClipCount == 0)
+		await store.failNextStep()
+		await #expect(throws: StoreError.self) { try await store.sqlState(nil) }
+		let readable = try await store.sqlState(nil)
+		#expect(try await store.sqlState(nil) == readable)
+		// A later prepare error must not return the clips fingerprint as a partial state.
+		try editSQL(dir, "DROP TABLE clips_fts")
+		await #expect(throws: StoreError.self) { try await store.sqlState(nil) }
+	}
+
+	@Test func readbackSeparatesFTSFieldsRowsTablesAndGeneration() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let empty = try await store.sqlState(nil)
+		try editSQL(dir, "INSERT INTO clips_fts (id,title,preview_text) VALUES ('a','ab','c')")
+		let first = try await store.sqlState(nil)
+		#expect(first != empty)
+		#expect(try await store.sqlState(nil) == first)
+		for sql in [
+			"UPDATE clips_fts SET title='a',preview_text='bc'",
+			"UPDATE clips_fts SET title=CAST(x'e696870061' AS TEXT)",
+			"UPDATE clips_fts SET title=CAST(x'e696870062' AS TEXT)",
+			"UPDATE clips_fts SET preview_text=NULL",
+			"UPDATE clips_fts SET preview_text=''",
+			"UPDATE clips_fts SET preview_text=x''",
+			"UPDATE clips_fts SET preview_text=1",
+			"UPDATE clips_fts SET preview_text=1.0",
+			"UPDATE clips_fts SET preview_text=1.0000000000000002",
+			"UPDATE clips_fts SET preview_text=-1.0e300",
+			"UPDATE clips_fts SET preview_text=-0.0",
+			"UPDATE clips_fts SET preview_text=0.0",
+			"UPDATE clips_fts SET id='b'",
+			"INSERT INTO clips_fts (id,title,preview_text) SELECT id,title,preview_text FROM clips_fts",
+			"UPDATE clips_fts SET preview_text='duplicate changed' WHERE rowid=2",
+			"DELETE FROM clips_fts WHERE rowid=1",
+			"INSERT INTO meta VALUES ('generation',1)",
+			"UPDATE meta SET value=2",
+			"UPDATE meta SET value=x'32'",
+			"UPDATE meta SET value=CAST(x'610061' AS TEXT)",
+			"UPDATE meta SET value=CAST(x'610062' AS TEXT)",
+			"DELETE FROM meta",
+		] {
+			let before = try await store.sqlState(nil)
+			try editSQL(dir, sql)
+			let after = try await store.sqlState(nil)
+			#expect(after != before, "State changed by \(sql)")
+			#expect(try await store.sqlState(nil) == after)
+		}
+		try editSQL(dir, "DELETE FROM clips_fts")
+		#expect(try await store.sqlState(nil) == empty)
+		#expect(empty.rows.count == 0 && empty.fts.count == 0 && empty.generation.count == 0)
+		#expect(empty.rows.digest != empty.fts.digest && empty.fts.digest != empty.generation.digest)
+		// Even empty tables include the column count, so a changed projection cannot compare equal.
+		try editSQL(dir, "ALTER TABLE clips ADD COLUMN extra TEXT")
+		#expect(try await store.sqlState(nil) != empty)
+	}
+
+	@Test func scopedReadbackDeduplicatesChunksAndScansFTSOnlyOnce() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try seedSQLRows(dir, count: 1_001)
+		await store.limitSQLVariables(401)
+		let keys = (0..<1_001).map { "key-\($0)" }
+		await store.resetReadCounts()
+		let state = try await store.sqlState(keys)
+		#expect(await store.readStatementCount == 5) // Three clip chunks, one FTS pass, one meta query.
+		#expect(await store.readRowCount == 2_002)
+		#expect(await store.steppedReadRowCount == 2_002)
+		#expect(await store.decodedClipCount == 0)
+		#expect(try await store.sqlState(Array(keys.reversed()) + keys) == state)
+		try editSQL(dir, "UPDATE clips_fts SET preview_text='outside' WHERE id='key-999'")
+		await store.resetReadCounts()
+		let scoped = try await store.sqlState(["key-0"])
+		#expect(await store.steppedReadRowCount == 2)
+		#expect(await store.decodedClipCount == 0)
+		try editSQL(dir, "UPDATE clips_fts SET preview_text='outside changed' WHERE id='key-999'")
+		#expect(try await store.sqlState(["key-0"]) == scoped)
+		try editSQL(dir, "INSERT INTO clips_fts (id,title,preview_text) VALUES ('key-0','duplicate','new')")
+		#expect(try await store.sqlState(["key-0"]) != scoped)
+		await store.resetReadCounts()
+		let bounded = try await store.sqlState(Array(keys.prefix(400)))
+		#expect(bounded.fts.count == 401) // Includes the duplicate id.
+		#expect(await store.steppedReadRowCount == 801)
+		#expect(await store.readStatementCount == 3)
+		await store.resetReadCounts()
+		let empty = try await store.sqlState([])
+		#expect(empty.rows.count == 0 && empty.fts.count == 0)
+		#expect(await store.steppedReadRowCount == 0)
+	}
+
+	@Test func scopedReadbackFiltersIDsBeforeCheckingTheirType() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try seedSQLRows(dir, count: 1_001)
+		await store.resetReadCounts()
+		let state = try await store.sqlState(["key-0"])
+		#expect(state.rows.count == 1 && state.fts.count == 1)
+		#expect(await store.readbackVMStepCount < 4 * 1_001)
+	}
+
+	@Test func scopedReadbackMatchesOnlyTextIDsAndPreservesEmbeddedNUL() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try editSQL(dir, "INSERT INTO clips_fts (id,title,preview_text) VALUES ('a','title','preview')")
+		let state = try await store.sqlState(["a"])
+		try editSQL(dir, "INSERT INTO clips_fts (id,title,preview_text) VALUES (x'61','blob id','excluded')")
+		#expect(try await store.sqlState(["a"]) == state)
+		try editSQL(dir, "INSERT INTO clips_fts (id,title,preview_text) VALUES (CAST(x'610062' AS TEXT),'NUL id','included')")
+		try seedSQLRows(dir, count: 1)
+		try editSQL(dir, "UPDATE clips SET id=CAST(x'610062' AS TEXT)")
+		let nul = try await store.sqlState(["a\0b"])
+		#expect(nul.rows.count == 1)
+		#expect(nul.fts.count == 1)
+		try editSQL(dir, "UPDATE clips_fts SET preview_text='changed' WHERE rowid=3")
+		#expect(try await store.sqlState(["a\0b"]) != nul)
+		// Swift String equality normalizes Unicode; SQLite TEXT ids use exact UTF-8 bytes.
+		try editSQL(dir, "INSERT INTO clips_fts (id,title,preview_text) VALUES (CAST(x'c3a9' AS TEXT),'composed','one'), (CAST(x'65cc81' AS TEXT),'decomposed','two')")
+		let unicode = try await store.sqlState(["é"])
+		#expect(unicode.fts.count == 1)
+		#expect(try await store.sqlState(["é", "e\u{301}"]).fts.count == 2)
+		// The bounded SQL path and large Swift-filtered path select the exact same raw rows.
+		let padding = (0..<401).map { "absent-\($0)" }
+		for keys in [["a"], ["a\0b"], ["é"], ["é", "e\u{301}"]] {
+			let small = try await store.sqlState(keys)
+			let large = try await store.sqlState(keys + padding)
+			#expect(small.fts.count == large.fts.count)
+		}
+	}
+
+	@Test func largePruneUsesBoundedReadbackBindings() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try seedSQLRows(dir, count: 1_001)
+		await store.limitSQLVariables(401)
+		await store.failTransaction(commit: .afterEffect)
+		await store.resetWriteCount()
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 2)) == 1_001)
+		#expect(await store.writeStatementCount == 2)
+		#expect(try await store.recent().isEmpty)
+		#expect(try await store.ftsKeys().isEmpty)
+		#expect(await store.recoveryRequired == false)
+	}
+
+	@Test func pruneKeepsUnrelatedIntegerAndBlobFtsIds() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try seedSQLRows(dir, count: 5)
+		try editSQL(dir, """
+			UPDATE clips SET id=CASE id
+				WHEN 'key-0' THEN '123' WHEN 'key-1' THEN CAST(x'610062' AS TEXT)
+				WHEN 'key-2' THEN CAST(x'c3a9' AS TEXT) WHEN 'key-3' THEN CAST(x'65cc81' AS TEXT)
+				ELSE 'future' END;
+			UPDATE clips SET last_copied=2 WHERE id=CAST(x'65cc81' AS TEXT);
+			UPDATE clips SET last_copied=3 WHERE id='future';
+			DELETE FROM clips_fts;
+			INSERT INTO clips_fts (id,title,preview_text) SELECT id,title,preview_text FROM clips;
+			INSERT INTO clips_fts (id,title,preview_text) SELECT id,'duplicate',preview_text FROM clips;
+			INSERT INTO clips_fts (id,title,preview_text) VALUES
+				(123,'integer','keep'), (123.0,'real','keep'), (x'313233','blob','keep'),
+				(NULL,'null','keep'), ('orphan','orphan','keep'), ('a','NUL prefix','keep');
+			""")
+		let retained = try await store.sqlState(["e\u{301}", "future", "orphan", "a"])
+		await store.resetWriteCount()
+		await store.failTransaction(commit: .afterEffect)
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 2)) == 3)
+		#expect(await store.writeStatementCount == 2)
+		let all = try await store.sqlState(nil)
+		#expect(all.rows.count == 2 && all.fts.count == 10)
+		#expect(try await store.sqlState(["e\u{301}", "future", "orphan", "a"]) == retained)
+		let expired = try await store.sqlState(["123", "a\0b", "é"])
+		#expect(expired.rows.count == 0 && expired.fts.count == 0)
+		#expect(await store.recoveryRequired == false)
+	}
+
+	@Test func pruneRollsBackWhenDeletedCountNoLongerMatchesSelectedKeys() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try seedSQLRows(dir, count: 2)
+		// A real trigger moves one selected row to the retention boundary and skips its deletion.
+		// The store must reject the changed count and restore both metadata and FTS atomically.
+		try editSQL(dir, """
+			CREATE TRIGGER changed_cutoff BEFORE DELETE ON clips WHEN old.id='key-0' BEGIN
+				UPDATE clips SET last_copied=2 WHERE id=old.id;
+				SELECT RAISE(IGNORE);
+			END;
+			""")
+		let before = try await store.sqlState(nil)
+		await #expect(throws: StoreError.self) { try await store.prune(before: Date(timeIntervalSince1970: 2)) }
+		#expect(try await store.sqlState(nil) == before)
+		#expect(await store.recoveryRequired == false)
+		try editSQL(dir, "DROP TRIGGER changed_cutoff")
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 2)) == 2)
+	}
+
+	@Test func pruneNULKeyCommitFailureUsesTheExactReadbackScope() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		try seedSQLRows(dir, count: 1)
+		try editSQL(dir, "UPDATE clips SET id=CAST(x'610062' AS TEXT); UPDATE clips_fts SET id=CAST(x'610062' AS TEXT)")
+		let before = try await store.sqlState(nil)
+		await store.failTransaction(commit: .beforeEffect)
+		await #expect(throws: StoreError.self) { try await store.prune(before: Date(timeIntervalSince1970: 2)) }
+		#expect(try await store.sqlState(nil) == before)
+		#expect(await store.recoveryRequired == false)
+		await store.failTransaction(commit: .afterEffect)
+		#expect(try await store.prune(before: Date(timeIntervalSince1970: 2)) == 1)
+		let after = try await store.sqlState(nil)
+		#expect(after.rows.count == 0 && after.fts.count == 0)
+	}
+
+	@Test func maintenanceReadsOnlyOwnershipMetadata() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text(String(repeating: "文", count: 4_000)))
+		for operation in ["orphans", "sweep", "erase"] {
+			await store.resetReadCounts()
+			switch operation {
+			case "orphans": try await store.removeOrphans()
+			case "sweep": try await store.sweep()
+			default: try await store.eraseAll()
+			}
+			#expect(await store.decodedClipCount == 0, "Maintenance \(operation) decoded full metadata")
+		}
+		#expect(try await store.fetch(clip.key) == nil)
+	}
+
 	@Test(arguments: [false, true])
 	func ordinaryCloseDoesNotScanHistoryAndKeepsLaterTokens(failUnlink: Bool) async throws {
 		let files = FaultyFiles()
