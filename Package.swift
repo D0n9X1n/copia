@@ -32,6 +32,6 @@ let package = Package(
 		.executableTarget(name: "Copia", dependencies: ["CopiaApp"]),
 		.executableTarget(name: "CopiaBench", dependencies: ["CopiaApp", "CopiaCore", "CopiaStore", "CopiaFixtures", "CopiaUI"]),
 		.executableTarget(name: "CopiaRender", dependencies: ["CopiaUI", "CopiaFixtures"]),
-		.testTarget(name: "CopiaTests", dependencies: ["CopiaCore", "CopiaUI", "CopiaFixtures", "CopiaStore", "CopiaSystem", "CopiaApp"]),
+		.testTarget(name: "CopiaTests", dependencies: ["CopiaCore", "CopiaUI", "CopiaFixtures", "CopiaStore", "CopiaSystem", "CopiaApp", "CopiaBench"]),
 	]
 )
