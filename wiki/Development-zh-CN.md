@@ -36,7 +36,7 @@ Garland 图标是一个 Icon Composer 包：三张卡片用黄色夹子挂在弧
 
 ### CI
 
-`.github/workflows/ci.yml` 在每次推送时于 `xcode-27` runner 上运行。它检查 wiki 和发布脚本的自测，运行通用构建、测试和基准测试，并组装未签名的应用包。Actions 固定到提交 SHA。
+`.github/workflows/ci.yml` 在每次推送时于 `xcode-27` runner 上运行。它检查 wiki 和发布脚本的自测，运行通用构建、测试和基准测试，并组装未签名的应用包。Actions 固定到提交 SHA。如果基准测试失败，会另行运行有时限的 Time Profiler，仅分析 `copia-bench`，并将 `failure-profile` 产物保留七天。插桩后的数值仅用于诊断，绝不替代未插桩且已失败的门槛检查。
 
 ### Wiki
 

@@ -43,9 +43,22 @@ jobs:
         run: swift test
 
       - name: Benchmark (fails over budget)
+        id: benchmark
         run: |
           swift build -c release --product copia-bench
           "$(swift build -c release --show-bin-path)/copia-bench" --json bench.json
+
+      # A separate instrumented run explains failures; it never replaces the unprofiled gate above.
+      - name: Profile failed benchmark
+        if: failure() && steps.benchmark.outcome == 'failure'
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          BIN="$(swift build -c release --show-bin-path)/copia-bench"
+          test -x "$BIN"
+          xcrun xctrace record --template 'Time Profiler' --time-limit 100s \
+            --output cpu-profile.trace --target-stdout profile-output.log \
+            --launch -- "$BIN" --no-sck --idle 60 --opens 1 --json profile-bench.json
 
       - name: App bundle (unsigned)
         run: |
@@ -63,3 +76,15 @@ jobs:
           name: bench
           path: bench.json
           if-no-files-found: ignore
+
+      - name: Upload failure profile
+        if: always() && steps.benchmark.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: failure-profile
+          path: |
+            cpu-profile.trace
+            profile-output.log
+            profile-bench.json
+          if-no-files-found: ignore
+          retention-days: 7

@@ -36,7 +36,7 @@ The Garland icon is an Icon Composer package: three cards hanging from a curved 
 
 ### CI
 
-`.github/workflows/ci.yml` runs on every push on the `xcode-27` runner. It checks the wiki and the release scripts' self-tests, runs the universal build, tests and the benchmark, and assembles an unsigned bundle. Actions are pinned to commit SHAs.
+`.github/workflows/ci.yml` runs on every push on the `xcode-27` runner. It checks the wiki and the release scripts' self-tests, runs the universal build, tests and the benchmark, and assembles an unsigned bundle. Actions are pinned to commit SHAs. If the benchmark fails, a separate, bounded Time Profiler run targets only `copia-bench` and uploads `failure-profile` for seven days. Its instrumented numbers are diagnostic only and never replace the failed unprofiled gate.
 
 ### Wiki
 
