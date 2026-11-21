@@ -43,6 +43,8 @@ public struct StripView: View {
 	@State private var position = ScrollPosition(edge: .leading)
 	@State private var scrollX: CGFloat = 0
 	@State private var viewport: CGFloat = 0
+	/// Cards deleted while the strip is open, so an undo brings them back with the reverse of the delete.
+	@State private var departed: Set<UUID> = []
 	@Environment(\.accessibilityReduceTransparency) private var systemReduceTransparency
 	@Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 	@Environment(\.colorSchemeContrast) private var systemContrast
@@ -61,13 +63,13 @@ public struct StripView: View {
 	}
 
 	public var body: some View {
+		let _ = Diagnostics.body()
 		VStack(spacing: 0) {
 			Spacer(minLength: 0)
 			strip
 				.frame(height: Theme.panelHeight)
-				.offset(y: model.appeared ? 0 : (reduceMotion ? 0 : 56))
-				.opacity(model.appeared ? 1 : 0)
-				.scaleEffect(model.appeared || reduceMotion ? 1 : 0.985, anchor: .bottom)
+				.offset(y: StripMotion.openOffset(appeared: model.appeared, reduced: reduceMotion))
+				.opacity(StripMotion.openOpacity(appeared: model.appeared, reduced: reduceMotion))
 		}
 	}
 
@@ -84,7 +86,9 @@ public struct StripView: View {
 				shape.fill(Theme.solidBackdrop)
 			} else {
 				// Clipped: the glass casts its own shadow below the shape, and the window's square bottom edge cut it into corners.
+				// The dark-mode scrim bounds how light the glass gets over a bright wallpaper, so text on it keeps 4.5:1.
 				Color.clear.glassEffect(.regular, in: shape).clipShape(shape)
+					.overlay { shape.fill(Theme.glassScrim) }
 			}
 		}
 		.overlay {
@@ -110,7 +114,7 @@ public struct StripView: View {
 			}
 			Text(model.query.isEmpty ? "\(model.clips.count) items" : "\(model.visibleClips.count) of \(model.clips.count)")
 				.font(.system(size: 11, weight: .medium).monospacedDigit())
-				.foregroundStyle(Theme.ink2(highContrast: highContrast))
+				.foregroundStyle(Theme.glassInk2(highContrast: highContrast))
 		}
 		.padding(.leading, 16)
 		.padding(.trailing, 20)
@@ -121,6 +125,9 @@ public struct StripView: View {
 
 	@ViewBuilder private var content: some View {
 		let visible = model.visibleClips
+		let rows = visible.enumerated().map { slot, clip in
+			(key: StripMotion.cardKey(id: clip.id, slot: slot, reduced: reduceMotion), slot: slot, clip: clip)
+		}
 		if model.clips.isEmpty {
 			emptyState(symbol: "list.clipboard", title: "Nothing copied yet",
 				detail: "Copy anything with ⌘C and it appears here.")
@@ -129,8 +136,9 @@ public struct StripView: View {
 		} else {
 			ScrollView(.horizontal) {
 				LazyHStack(spacing: Theme.cardGap) {
-					ForEach(Array(visible.enumerated()), id: \.element.id) { index, clip in
-						card(clip, index: index)
+					ForEach(rows, id: \.key) { row in
+						card(row.clip, index: row.slot)
+							.transition(transition(for: row.clip.id))
 					}
 				}
 				.padding(.horizontal, Theme.rowPadding)
@@ -142,12 +150,23 @@ public struct StripView: View {
 			.onScrollGeometryChange(for: CGSize.self) { geo in
 				CGSize(width: geo.contentOffset.x, height: geo.containerSize.width)
 			} action: { _, new in
-				scrollX = new.width == 0 ? scrollX : new.width
 				scrollX = new.width
 				viewport = new.height
 			}
-			.onChange(of: model.selectedID) { _, _ in scrollToSelection(animated: true) }
+			// The index, not the ID: a new copy at the front moves the selection without changing it.
+			.onChange(of: visible.firstIndex { $0.id == model.selectedID }) { _, _ in scrollToSelection(animated: true) }
+			.onChange(of: model.removingIDs) { _, removing in departed.formUnion(removing) }
+			.onChange(of: model.cardsMounted) { _, mounted in if !mounted { departed.removeAll() } }
 			.onAppear { scrollToSelection(animated: false) }
+		}
+	}
+
+	/// How a card enters and leaves. A card deleted this session comes back (undo) with the reverse of its delete.
+	private func transition(for id: UUID) -> AnyTransition {
+		switch StripMotion.cardTransition(returning: departed.contains(id), reduced: reduceMotion) {
+		case .crossfade: .opacity
+		case .slideIn: .asymmetric(insertion: .move(edge: .leading).combined(with: .opacity), removal: .opacity)
+		case .reverseDelete: .scale(scale: StripMotion.deleteScale).combined(with: .opacity)
 		}
 	}
 
@@ -156,17 +175,13 @@ public struct StripView: View {
 		let tint = clip.sourceBundleID == nil ? Theme.neutralTint : sources.tint(for: clip.sourceBundleID)
 		return ClipCard(clip: clip, tint: tint, icon: sources.icon(for: clip.sourceBundleID),
 			badge: model.badge(for: clip.id), hovered: model.hoveredID == clip.id, selected: selected,
-			removing: model.removingIDs.contains(clip.id), now: now(), highlight: model.query, thumbnails: thumbnails)
+			removing: model.removingIDs.contains(clip.id), now: now(), highlight: model.query, thumbnails: thumbnails,
+			animator: model.animator)
 			.background {
 				if selected {
-					RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-						.fill(Color.accentColor.opacity(0.12))
-						.strokeBorder(Color.accentColor, lineWidth: 3)
-						.padding(-Theme.lensOutset)
-						.matchedGeometryEffect(id: "lens", in: lensSpace)
+					LensRing().matchedGeometryEffect(id: "lens", in: lensSpace)
 				}
 			}
-			.id(clip.id)
 			.focusEffectDisabled()
 			.onHover { inside in
 				if inside { model.hoveredID = clip.id } else if model.hoveredID == clip.id { model.hoveredID = nil }
@@ -195,8 +210,9 @@ public struct StripView: View {
 		let target = PanelLayout.offset(selectedMinX: PanelLayout.cardMinX(index: index), viewport: viewport,
 			current: scrollX, contentWidth: PanelLayout.contentWidth(count: model.visibleClips.count))
 		guard abs(target - scrollX) > 0.5 else { return }
-		if animated, !reduceMotion, let animation = Motion.value(.lens, reduced: false).animation {
-			withAnimation(animation) { position.scrollTo(x: target) }
+		if animated, !reduceMotion {
+			// Through the Animator, so the curve comes from the Motion table and tests see it.
+			model.animator.run(.lens, { position.scrollTo(x: target) }, {})
 		} else {
 			position.scrollTo(x: target)
 		}
@@ -207,7 +223,7 @@ public struct StripView: View {
 			Image(systemName: symbol).font(.system(size: 40, weight: .regular)).foregroundStyle(Theme.ink.opacity(0.55))
 			Text(title).font(.system(size: 20, weight: .semibold)).foregroundStyle(Theme.ink)
 				.lineLimit(1).truncationMode(.tail)
-			Text(detail).font(.system(size: 13)).foregroundStyle(Theme.ink2(highContrast: highContrast))
+			Text(detail).font(.system(size: 13)).foregroundStyle(Theme.glassInk2(highContrast: highContrast))
 		}
 		.frame(maxWidth: .infinity, maxHeight: .infinity)
 		.padding(.bottom, 12)
@@ -234,6 +250,24 @@ public struct StripView: View {
 			.shadow(color: .black.opacity(0.2), radius: 12, y: 4)
 			.transition(.move(edge: .bottom).combined(with: .opacity))
 		}
+	}
+}
+
+/// The selection lens: an accent ring edged by a halo, so the ring reaches 3:1 on any glass. Sits behind the card.
+/// The halo is a band, not a fill: it covers the gap and tucks 1 pt under the card, so a card fading out (delete)
+/// shows the glass behind it, not a solid block.
+struct LensRing: View {
+	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
+
+	var body: some View {
+		ZStack {
+			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
+				.strokeBorder(Theme.lensHalo, lineWidth: Self.band)
+			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+				.strokeBorder(Color.accentColor, lineWidth: 3)
+				.padding(Theme.lensHaloWidth)
+		}
+		.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
 	}
 }
 
@@ -267,7 +301,9 @@ struct SearchField: NSViewRepresentable {
 		field.drawsBackground = false
 		field.focusRingType = .none
 		field.font = .systemFont(ofSize: 15)
-		field.placeholderString = "Type to search"
+		// Glass metadata ink: the system placeholder color falls below 4.5:1 on the glass.
+		field.placeholderAttributedString = NSAttributedString(string: "Type to search",
+			attributes: [.foregroundColor: Theme.glassInk2NS, .font: NSFont.systemFont(ofSize: 15)])
 		field.delegate = context.coordinator
 		field.cell?.isScrollable = true
 		field.cell?.wraps = false
@@ -324,7 +360,11 @@ struct CardAccessibility {
 	var label: String {
 		let kind = CardPresentation(clip: clip).typeLabel
 		let source = clip.sourceName ?? "Unknown app"
-		let age = ClipCard.relative(clip.timestamp, now: now)
-		return "\(kind) from \(source), \(age == "Now" ? "just now" : age + " ago"): \(preview)"
+		let spoken = switch ClipCard.relative(clip.timestamp, now: now) {
+		case "Now": "just now"
+		case "Yesterday": "yesterday"
+		case let age: age + " ago"
+		}
+		return "\(kind) from \(source), \(spoken): \(preview)"
 	}
 }

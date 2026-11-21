@@ -11,9 +11,14 @@ public final class ThumbnailCache {
 
 	private let cache = NSCache<NSURL, NSImage>()
 	private var keys = Set<URL>()
+	private let decoder: @Sendable (URL) async -> CGImage?
+	/// Bumped by `removeAll()`; a decode started before the purge is dropped when it lands.
+	private var generation = 0
 	public private(set) var decodeCount = 0
 
-	public init() {
+	/// `decode` runs off the main thread; tests inject one they can hold.
+	public init(decode: (@Sendable (URL) async -> CGImage?)? = nil) {
+		decoder = decode ?? { Self.decode($0) }
 		cache.totalCostLimit = Self.costLimit
 	}
 
@@ -32,8 +37,9 @@ public final class ThumbnailCache {
 	/// Decodes on a background thread so opening the strip never waits for images.
 	public func load(_ url: URL) async -> NSImage? {
 		if let hit = cached(url) { return hit }
-		let cg = await Task.detached(priority: .userInitiated) { Self.decode(url) }.value
-		guard let cg else { return nil }
+		let (decoder, started) = (decoder, generation)
+		let cg = await Task.detached(priority: .userInitiated) { await decoder(url) }.value
+		guard let cg, started == generation else { return nil }
 		return cached(url) ?? store(cg, for: url)
 	}
 
@@ -56,6 +62,7 @@ public final class ThumbnailCache {
 	}
 
 	public func removeAll() {
+		generation += 1
 		cache.removeAllObjects()
 		keys.removeAll()
 	}

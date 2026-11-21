@@ -75,6 +75,10 @@ public enum Fixtures {
 			text: "An extremely long document name that keeps going well past the card width - final - v12 (edited).pdf",
 			sourceName: "Finder", sourceBundleID: "com.apple.finder", timestamp: ago(120), meta: "1 file · 2.1 MB",
 			fileNames: ["An extremely long document name that keeps going well past the card width - final - v12 (edited).pdf"]),
+		// A page with no preview image, only a site icon (`.icon` once FixtureAssets saves it).
+		Clip(id: id(2, 13), kind: .link, text: "Field notes: a week of designing with Liquid Glass on the Mac",
+			sourceName: "Safari", sourceBundleID: "com.apple.Safari", timestamp: ago(130), meta: "notes.example.org",
+			url: URL(string: "https://notes.example.org/liquid-glass")),
 	]
 
 	/// A link whose preview fetch failed.

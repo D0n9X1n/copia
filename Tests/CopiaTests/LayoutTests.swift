@@ -82,3 +82,64 @@ import CopiaFixtures
 		#expect(cache.entryCount == 0)
 	}
 }
+
+@MainActor
+@Suite struct CardContentTests {
+	let saved = URL(fileURLWithPath: "/tmp/copia-saved-preview.png")
+
+	@Test func aFileCardShowsItsSavedThumbnailAt96Points() {
+		var clip = Fixtures.mixed[6]
+		clip.preview = .ready(saved)
+		let p = CardPresentation(clip: clip)
+		#expect(p.bodyKind == .file)
+		#expect(p.fileThumbnail == saved)
+		#expect(p.previewURL == saved)
+		#expect(p.fileThumbnailSide == 96)
+		#expect(CardPresentation(clip: Fixtures.mixed[6]).fileThumbnail == nil)
+	}
+
+	@Test func multipleFilesStackUpToThreeWithACount() {
+		let many = CardPresentation(clip: Fixtures.extremes[8])
+		#expect(many.fileStack == 3)
+		#expect(many.fileCount == "+299")
+		let one = CardPresentation(clip: Fixtures.mixed[6])
+		#expect(one.fileStack == 1)
+		#expect(one.fileCount == nil)
+	}
+
+	@Test func aLinkWithASavedSiteIconShowsA32PointFaviconAndTwoTitleLines() {
+		var clip = Fixtures.mixed[2]
+		clip.preview = .icon(saved)
+		let p = CardPresentation(clip: clip)
+		#expect(p.linkArt == .favicon(saved))
+		#expect(p.previewURL == saved)
+		#expect(p.faviconSide == 32)
+		#expect(p.title == "Paste in Liquid Glass")
+		#expect(p.titleLines == 2)
+	}
+
+	@Test func aFailedLinkKeepsItsTitleWithALinkGlyph() {
+		var clip = Fixtures.mixed[2]
+		clip.preview = .failed
+		let p = CardPresentation(clip: clip)
+		#expect(p.linkArt == .glyph)
+		#expect(p.symbol == "link")
+		#expect(p.title == "Paste in Liquid Glass")
+		#expect(p.fallback == "Paste in Liquid Glass")
+	}
+
+	@Test func rightToLeftTextUsesNaturalAlignment() {
+		#expect(CardPresentation(clip: Fixtures.extremes[3]).textDirection == .rightToLeft)
+		#expect(CardPresentation(clip: Fixtures.extremes[4]).textDirection == .leftToRight)
+		#expect(CardPresentation(clip: Fixtures.mixed[0]).textDirection == .leftToRight)
+		// The first strong character decides, as natural alignment does.
+		#expect(CardPresentation.direction(of: "123 שלום world") == .rightToLeft)
+		#expect(CardPresentation.direction(of: "“Hello” مرحبا") == .leftToRight)
+	}
+
+	@Test func richTextStaysPlainTextWithItsRTFMeta() {
+		let p = CardPresentation(clip: Fixtures.mixed[5])
+		#expect(p.bodyKind == .prose)
+		#expect(p.footer == "112 chars · RTF")
+	}
+}

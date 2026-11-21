@@ -42,6 +42,45 @@ public enum Motion {
 	}
 }
 
+/// The strip's open/close and card insert/delete values. Views read these; the curves come from `Motion`.
+public enum StripMotion {
+	public enum CardTransition: Equatable, Sendable { case crossfade, slideIn, reverseDelete }
+
+	public static let deleteScale: CGFloat = 0.9
+
+	/// Open slides up from fully below the window (its whole height); Reduce Motion fades in place.
+	public static func openOffset(appeared: Bool, reduced: Bool) -> CGFloat {
+		appeared || reduced ? 0 : Theme.panelHeight
+	}
+
+	/// Only Reduce Motion fades; the slide alone hides the strip otherwise.
+	public static func openOpacity(appeared: Bool, reduced: Bool) -> Double {
+		appeared || !reduced ? 1 : 0
+	}
+
+	/// A deleting card shrinks as it fades; Reduce Motion only crossfades.
+	public static func removingScale(removing: Bool, reduced: Bool) -> CGFloat {
+		removing && !reduced ? deleteScale : 1
+	}
+
+	/// New copies slide in at the front; an undone card comes back with the reverse of its delete.
+	public static func cardTransition(returning: Bool, reduced: Bool) -> CardTransition {
+		reduced ? .crossfade : (returning ? .reverseDelete : .slideIn)
+	}
+
+	/// A card's identity in the row.
+	public struct CardKey: Hashable, Sendable {
+		let id: UUID
+		let slot: Int?
+	}
+
+	/// Under Reduce Motion the slot is part of the identity: a card that changes slot crossfades out of the old one
+	/// and into the new one instead of sliding across.
+	public static func cardKey(id: UUID, slot: Int, reduced: Bool) -> CardKey {
+		CardKey(id: id, slot: reduced ? slot : nil)
+	}
+}
+
 /// Runs a state change under its table animation, then calls `completion`. Tests inject a recording spy.
 @MainActor
 public struct Animator {

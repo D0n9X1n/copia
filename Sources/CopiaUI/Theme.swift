@@ -14,6 +14,18 @@ public enum Theme {
 		static let brandDark: UInt32 = 0xFF7A50
 		static let solidBackdropLight: UInt32 = 0xF2F2F7
 		static let solidBackdropDark: UInt32 = 0x1C1C1E
+		/// Metadata ink for text directly on the glass, whose backing varies with the wallpaper (ink2 is for solid cards).
+		static let glassInk2Light: UInt32 = 0x48484D
+		static let glassInk2Dark: UInt32 = 0xE0E0E5
+	}
+
+	/// Dark-mode black scrim over the glass: bounds how light the backing gets over a bright wallpaper.
+	static let glassScrimDark = 0.22
+
+	/// White in light mode and black in dark, unless the accent would fall below 3:1 against it.
+	static func lensHalo(accent: SIMD3<Double>, dark: Bool) -> SIMD3<Double> {
+		let preferred = SIMD3<Double>(repeating: dark ? 0 : 1)
+		return contrast(accent, preferred) >= 3 ? preferred : extremeInk(on: accent)
 	}
 
 	// MARK: Dimensions
@@ -35,6 +47,8 @@ public enum Theme {
 	public static let smallRadius: CGFloat = 8
 	public static let lensRadius: CGFloat = 21
 	public static let lensOutset: CGFloat = 5
+	/// The lens halo's width outside the accent ring (it fits the row's 8 pt above and below a card).
+	public static let lensHaloWidth: CGFloat = 2
 	public static let headerTintAlpha = (light: 0.14, dark: 0.22)
 
 	// MARK: Colors
@@ -65,6 +79,33 @@ public enum Theme {
 		highContrast ? ink : dynamic(Hex.ink2Light, Hex.ink2Dark)
 	}
 
+	/// Metadata ink for text directly on the glass (≥ 4.5:1 over the measured backing). Increase Contrast promotes it to `ink`.
+	public static func glassInk2(highContrast: Bool) -> Color {
+		highContrast ? ink : dynamic(Hex.glassInk2Light, Hex.glassInk2Dark)
+	}
+
+	static let glassInk2NS = NSColor(name: nil) { appearance in
+		nsColor(appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? Hex.glassInk2Dark : Hex.glassInk2Light)
+	}
+
+	/// Clear in light mode; a black scrim in dark mode, over the glass and under everything on it.
+	public static let glassScrim = Color(nsColor: NSColor(name: nil) { appearance in
+		appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor.black.withAlphaComponent(glassScrimDark) : .clear
+	})
+
+	/// The lens's halo: fills the gap inside the accent ring and edges it outside, so the ring reaches 3:1 on any glass.
+	public static let lensHalo = Color(nsColor: NSColor(name: nil) { appearance in
+		let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+		var accent = SIMD3<Double>(0, 0.48, 1)
+		appearance.performAsCurrentDrawingAppearance {
+			if let c = NSColor.controlAccentColor.usingColorSpace(.sRGB) {
+				accent = SIMD3(c.redComponent, c.greenComponent, c.blueComponent)
+			}
+		}
+		let halo = lensHalo(accent: accent, dark: dark)
+		return NSColor(srgbRed: halo.x, green: halo.y, blue: halo.z, alpha: 1)
+	})
+
 	/// Card stroke: 8% black / 10% white, 16% on hover, 25% with Increase Contrast.
 	public static func stroke(hovered: Bool, highContrast: Bool) -> Color {
 		let boost: CGFloat? = highContrast ? 0.25 : (hovered ? 0.16 : nil)
@@ -93,6 +134,15 @@ public enum Theme {
 	static func composite(_ top: SIMD3<Double>, over bottom: SIMD3<Double>, alpha: Double) -> SIMD3<Double> {
 		top * alpha + bottom * (1 - alpha)
 	}
+
+	/// Pure black or pure white, whichever contrasts more with `background`; always ≥ 4.58:1.
+	static func extremeInk(on background: SIMD3<Double>) -> SIMD3<Double> {
+		let black = SIMD3<Double>(0, 0, 0), white = SIMD3<Double>(1, 1, 1)
+		return contrast(black, background) >= contrast(white, background) ? black : white
+	}
+
+	/// The hex label's ink on a color swatch.
+	static func swatchInk(on swatch: SIMD3<Double>) -> SIMD3<Double> { extremeInk(on: swatch) }
 
 	/// The lowest contrast of header ink over any allowed tint band, composited over the card.
 	static func minimumHeaderContrast(dark: Bool) -> Double {
