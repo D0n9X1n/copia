@@ -1,6 +1,7 @@
 import AppKit
 
 /// `copia-render [--output DIR] [--only SUBSTRING]`: captures every strip state to PNG for design review.
+/// `copia-render --readme --output DIR`: the README's product shots (see scripts/readme-media.sh).
 @main
 enum Main {
 	@MainActor static func main() {
@@ -9,11 +10,15 @@ enum Main {
 		let output = URL(fileURLWithPath: value("--output") ?? "renders", isDirectory: true)
 		let only = value("--only")
 
-		let app = NSApplication.shared
+		let app = RenderApplication.shared
 		app.setActivationPolicy(.accessory)
 		Task { @MainActor in
 			do {
-				try await RenderRunner.run(output: output, only: only)
+				if args.contains("--readme") {
+					try await ReadmeRunner.run(output: output)
+				} else {
+					try await RenderRunner.run(output: output, only: only)
+				}
 				exit(0)
 			} catch {
 				FileHandle.standardError.write(Data("copia-render failed: \(error)\n".utf8))
@@ -22,4 +27,9 @@ enum Main {
 		}
 		app.run()
 	}
+}
+
+/// Reports itself active so windows and controls draw as users see them; a terminal-launched process is often refused focus.
+final class RenderApplication: NSApplication {
+	override var isActive: Bool { true }
 }
