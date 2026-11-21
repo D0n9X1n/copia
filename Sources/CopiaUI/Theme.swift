@@ -22,10 +22,24 @@ public enum Theme {
 	/// Dark-mode black scrim over the glass: bounds how light the backing gets over a bright wallpaper.
 	static let glassScrimDark = 0.22
 
-	/// White in light mode and black in dark, unless the accent would fall below 3:1 against it.
+	/// White in light mode and black in dark, unless the ring would fall below 3:1 against the halo or against the gap
+	/// inside it (the halo tinted by the 12% fill); then the other extreme.
 	static func lensHalo(accent: SIMD3<Double>, dark: Bool) -> SIMD3<Double> {
+		func keepsRing(_ halo: SIMD3<Double>) -> Bool {
+			contrast(accent, halo) >= 3 && contrast(accent, lensGap(accent: accent, halo: halo)) >= 3
+		}
 		let preferred = SIMD3<Double>(repeating: dark ? 0 : 1)
-		return contrast(accent, preferred) >= 3 ? preferred : extremeInk(on: accent)
+		if keepsRing(preferred) { return preferred }
+		let other = SIMD3<Double>(repeating: dark ? 1 : 0)
+		return keepsRing(other) ? other : extremeInk(on: accent)
+	}
+
+	/// The lens's 12% accent fill (brief).
+	public static let lensFillOpacity = 0.12
+
+	/// The gap inside the ring: the halo tinted by the accent fill.
+	static func lensGap(accent: SIMD3<Double>, halo: SIMD3<Double>) -> SIMD3<Double> {
+		composite(accent, over: halo, alpha: lensFillOpacity)
 	}
 
 	// MARK: Dimensions

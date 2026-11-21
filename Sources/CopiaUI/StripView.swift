@@ -276,7 +276,7 @@ private struct StripSlide<Content: View>: View {
 /// reaches 3:1 on any glass; the fill tints that band. The lens fades with a deleting card, so no block shows.
 struct LensRing: View {
 	var removing = false
-	static let fillOpacity = 0.12
+	static let fillOpacity = Theme.lensFillOpacity
 	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
 
 	var body: some View {

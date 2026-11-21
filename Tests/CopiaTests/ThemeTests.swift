@@ -89,6 +89,12 @@ import AppKit
 	}
 
 	/// The halo sits on both sides of the accent ring, so the ring reaches 3:1 against its neighbors on any glass.
+	@Test func thePinkAccentKeeps3To1AgainstItsTintedGap() {
+		let pink = Theme.rgb(0xF74F9E)
+		let halo = Theme.lensHalo(accent: pink, dark: false)
+		#expect(Theme.contrast(pink, Theme.lensGap(accent: pink, halo: halo)) >= 3)
+	}
+
 	@Test func lensHaloKeepsTheRingAt3To1ForEveryAccent() {
 		// macOS accent colors (light, dark) plus a sweep of hues.
 		var accents: [UInt32] = [0x007AFF, 0x0A84FF, 0xA550A7, 0xBF5AF2, 0xF74F9E, 0xFF375F, 0xFF5257, 0xFF453A,
@@ -102,7 +108,10 @@ import AppKit
 		for hex in accents {
 			for dark in [false, true] {
 				let accent = Theme.rgb(hex)
-				#expect(Theme.contrast(accent, Theme.lensHalo(accent: accent, dark: dark)) >= 3, "\(String(hex, radix: 16)) dark=\(dark)")
+				let halo = Theme.lensHalo(accent: accent, dark: dark)
+				#expect(Theme.contrast(accent, halo) >= 3, "\(String(hex, radix: 16)) dark=\(dark)")
+				// Inside the ring the 12% accent fill tints the halo; the ring must keep 3:1 against that too.
+				#expect(Theme.contrast(accent, Theme.lensGap(accent: accent, halo: halo)) >= 3, "gap \(String(hex, radix: 16)) dark=\(dark)")
 			}
 		}
 	}
