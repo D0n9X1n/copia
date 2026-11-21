@@ -27,23 +27,33 @@ final class FakeLogin: LoginService {
 /// A controller over a temporary store, a fake pasteboard and a private defaults suite. Nothing reaches the system clipboard.
 @MainActor
 final class AppRig {
-	let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-app-\(UUID().uuidString)")
+	let dir: URL
+	/// Only a rig that made its own directory removes it; rigs sharing one (a relaunch) leave it to the test.
+	private let ownsDirectory: Bool
 	let suite = "copia-tests-\(UUID().uuidString)"
 	let defaults: UserDefaults
 	let pasteboard = FakePasteboard()
 	let login = FakeLogin()
+	let links = CountingLinks()
+	let thumbs = CountingThumbnails()
 	var permissions = PermissionState(accessibility: false, pasteboard: .unset)
 	let controller: AppController
 
-	init() throws {
+	init(dir shared: URL? = nil) throws {
+		dir = shared ?? FileManager.default.temporaryDirectory.appendingPathComponent("copia-app-\(UUID().uuidString)")
+		ownsDirectory = shared == nil
 		defaults = UserDefaults(suiteName: suite)!
 		var rig: AppRig?
 		controller = try AppController(directory: dir, defaults: defaults, pasteboard: pasteboard, login: login,
 			permissions: { rig?.permissions ?? PermissionState(accessibility: false, pasteboard: .unset) },
-			links: CountingLinks(), files: CountingThumbnails())
+			links: links, files: thumbs)
 		rig = self
 		controller.model.animator = .immediate
 	}
+
+	/// Launches as the app does, without onboarding, menu or hotkeys. Call `stop()` when done.
+	func launch() async { await controller.start(showOnboarding: false, menuAndHotkeys: false) }
+	func stop() { controller.watcher.stop() }
 
 	func copy(_ text: String) async throws {
 		let draft = ClipDraft(items: [PasteboardItemData([(PasteboardTypes.string, Data(text.utf8))])], copiedAt: .now)
@@ -58,9 +68,24 @@ final class AppRig {
 	}
 
 	deinit {
-		try? FileManager.default.removeItem(at: dir)
+		if ownsDirectory { try? FileManager.default.removeItem(at: dir) }
 		UserDefaults.standard.removePersistentDomain(forName: suite)
 	}
+}
+
+/// A store directory several rigs share, as one install across relaunches. Removed by the test.
+func sharedStoreDirectory() -> URL {
+	FileManager.default.temporaryDirectory.appendingPathComponent("copia-app-\(UUID().uuidString)")
+}
+
+/// Polls `condition` for up to two seconds.
+@MainActor
+func eventually(_ condition: () async throws -> Bool) async rethrows -> Bool {
+	for _ in 0..<200 {
+		if try await condition() { return true }
+		try? await Task.sleep(for: .milliseconds(10))
+	}
+	return try await condition()
 }
 
 @MainActor
@@ -107,6 +132,97 @@ final class AppRig {
 		#expect(!r.controller.model.canUndo)
 		await r.controller.model.undo()
 		#expect(r.controller.model.clips.isEmpty)
+	}
+
+	/// Closing the strip ends undo and empties trash/.
+	@Test func deleteThenCloseEndsUndoAndEmptiesTrash() async throws {
+		let r = try AppRig()
+		try await r.copy("gone"); try await r.copy("kept")
+		r.controller.model.open()
+		r.controller.model.select(r.controller.model.clips[1].id)
+		await r.controller.model.deleteSelected()
+		#expect(r.controller.model.canUndo)
+		#expect(r.fileCount("trash") == 1)
+		r.controller.model.beginClose()
+		#expect(!r.controller.model.canUndo)
+		#expect(await eventually { r.fileCount("trash") == 0 })
+		r.controller.model.open()
+		await r.controller.model.undo()
+		#expect(r.titles() == ["kept"])
+		#expect(try await r.controller.store.recent().map(\.title) == ["kept"])
+	}
+
+	/// A relaunch over the same store ends the old session's undo and empties trash/.
+	@Test func deleteThenRelaunchEndsUndoAndEmptiesTrash() async throws {
+		let dir = sharedStoreDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+		let first = try AppRig(dir: dir)
+		try await first.copy("gone"); try await first.copy("kept")
+		first.controller.model.open()
+		first.controller.model.select(first.controller.model.clips[1].id)
+		await first.controller.model.deleteSelected()
+		#expect(first.fileCount("trash") == 1)
+		#expect(first.controller.model.canUndo)
+
+		let second = try AppRig(dir: dir)
+		await second.launch(); defer { second.stop() }
+		#expect(second.fileCount("trash") == 0)
+		#expect(!second.controller.model.canUndo)
+		#expect(second.titles() == ["kept"])
+		// The old session's undo now finds nothing to bring back and changes nothing.
+		await first.controller.model.undo()
+		#expect(try await second.controller.store.recent().map(\.title) == ["kept"])
+		#expect(second.fileCount("blobs") == 1 && second.fileCount("trash") == 0)
+	}
+
+	/// Pending link and image clips get one new preview request at launch and reach a saved final state.
+	@Test func launchResumesPendingPreviewsOnce() async throws {
+		let dir = sharedStoreDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+		let png = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 32, pixelsHigh: 32, bitsPerSample: 8, samplesPerPixel: 4,
+			hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:]))
+		let (link, image): (StoredClip, StoredClip) = try await {
+			let seed = try ClipStore(directory: dir)
+			let link = try await seed.insert(ClipDraft(items: [PasteboardItemData([(PasteboardTypes.string, Data("https://example.com/post".utf8))])], copiedAt: .now)).clip
+			let image = try await seed.insert(ClipDraft(items: [PasteboardItemData([(PasteboardTypes.png, png)])], copiedAt: .now)).clip
+			return (link, image)
+		}()
+		#expect(link.previewState == .pending && image.previewState == .pending)
+
+		let r = try AppRig(dir: dir)
+		await r.launch(); defer { r.stop() }
+		#expect(try await eventually { try await r.controller.store.pending().isEmpty })
+		#expect(r.links.calls == 1)
+		#expect(r.controller.previewer.stats.decodes == 1)
+		let reopened = try ClipStore(directory: dir)
+		#expect(try await reopened.fetch(link.key)?.previewState == .okNoImage)
+		#expect(try await reopened.fetch(link.key)?.title == "A title")
+		#expect(try await reopened.fetch(image.key)?.previewState == .ok)
+		#expect(await reopened.thumbnail(for: image.key) != nil)
+	}
+
+	/// A saved link preview with an image is reused after a relaunch with no network: no fetch, same title and image.
+	@Test func aSavedLinkPreviewIsReusedOfflineAfterARelaunch() async throws {
+		let dir = sharedStoreDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+		let image = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
+		let link: StoredClip = try await {
+			let seed = try ClipStore(directory: dir)
+			let clip = try await seed.insert(ClipDraft(items: [PasteboardItemData([(PasteboardTypes.string, Data("https://example.com/post".utf8))])], copiedAt: .now)).clip
+			try await seed.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved title", image: image)
+			return clip
+		}()
+
+		let r = try AppRig(dir: dir)
+		r.links.result = .failure(URLError(.notConnectedToInternet))
+		await r.launch(); defer { r.stop() }
+		let stored = try #require(try await r.controller.store.fetch(link.key))
+		r.controller.previewer.generate(for: stored)
+		await r.controller.previewer.resumePending()
+		try await Task.sleep(for: .milliseconds(50))
+		#expect(r.links.calls == 0)
+		#expect(stored.previewState == .ok && stored.title == "Saved title")
+		let card = try #require(r.controller.model.clips.first)
+		#expect(card.text == "Saved title")
+		guard case let .ready(url) = card.preview else { Issue.record("expected the saved image, got \(card.preview)"); return }
+		#expect(try Data(contentsOf: url) == image)
 	}
 
 	@Test func aFailedEraseIsShownInSettings() async throws {

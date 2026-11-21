@@ -221,6 +221,49 @@ final class FakePasteboard: PasteboardSource {
 		#expect(slept.last == Paster.settleMilliseconds)
 	}
 
+	/// Every stored item and representation reaches the pasteboard in order, read back through spy events.
+	@Test func pasteWritesEveryItemAndRepresentationInOrder() async throws {
+		let pb = pasteboard()
+		defer { pb.releaseGlobally() }
+		var events: [String] = []
+		let paster = Paster(pasteboard: pb, isTrusted: { true }, postPaste: { events.append("cmdV") },
+			waitForFront: { _ in events.append("front"); return true })
+		let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+		let mixed = PasteboardItemData([(PasteboardTypes.string, Data("hi".utf8)), (PasteboardTypes.rtf, Data("{\\rtf1 hi}".utf8)),
+			(PasteboardTypes.html, Data("<b>hi</b>".utf8)), (PasteboardTypes.png, png)])
+		let files = ["c.txt", "a.txt", "b.txt"].map { PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/\($0)".utf8))]) }
+		let items = [mixed] + files
+
+		func readBack() -> [PasteboardItemData] {
+			(pb.pasteboardItems ?? []).map { item in
+				// As Copia reads a pasteboard: stored types only. The server adds translations such as UTF-16 text on read.
+				PasteboardItemData(item.types.map(\.rawValue)
+					.filter { PasteboardTypes.stored.contains($0) }
+					.map { (type: $0, data: item.data(forType: NSPasteboard.PasteboardType($0)) ?? Data()) })
+			}
+		}
+
+		let result = await paster.paste(items, plain: false, target: NSRunningApplication.current) { events.append("close") }
+		#expect(result == .pasted)
+		#expect(events == ["close", "front", "cmdV"])
+		let back = readBack()
+		#expect(back.count == items.count)
+		for (got, sent) in zip(back, items) {
+			#expect(Set(got.representations.map(\.type)) == Set(sent.representations.map(\.type)))
+			for rep in sent.representations { #expect(got.data(for: rep.type) == rep.data, "\(rep.type)") }
+		}
+		#expect(back.compactMap { $0.data(for: PasteboardTypes.fileURL) } == files.compactMap { $0.data(for: PasteboardTypes.fileURL) })
+		for item in pb.pasteboardItems ?? [] {
+			#expect(item.types.map(\.rawValue).contains(PasteboardTypes.marker))
+		}
+
+		events = []
+		#expect(await paster.paste(items, plain: true, target: NSRunningApplication.current) {} == .pasted)
+		#expect(readBack() == [PasteboardItemData([(PasteboardTypes.string, Data("hi".utf8))])]
+			+ ["/tmp/c.txt", "/tmp/a.txt", "/tmp/b.txt"].map { PasteboardItemData([(PasteboardTypes.string, Data($0.utf8))]) })
+		#expect(events == ["front", "cmdV"])
+	}
+
 	@Test func aTargetThatNeverComesForwardIsNotPastedInto() async {
 		var sent = false
 		let paster = Paster(pasteboard: pasteboard(), isTrusted: { true }, postPaste: { sent = true }, waitForFront: { _ in false })
