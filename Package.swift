@@ -19,8 +19,17 @@ let package = Package(
 		),
 		.target(name: "CopiaFixtures", dependencies: ["CopiaCore"]),
 		.target(name: "CopiaStore", dependencies: ["CopiaCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
-		.executableTarget(name: "Copia", dependencies: ["CopiaUI", "CopiaFixtures"]),
+		.target(
+			name: "CopiaSystem",
+			dependencies: ["CopiaCore", "CopiaStore", "CopiaUI"]
+		),
+		.target(
+			name: "CopiaApp",
+			dependencies: ["CopiaCore", "CopiaStore", "CopiaSystem", "CopiaUI",
+				.product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")]
+		),
+		.executableTarget(name: "Copia", dependencies: ["CopiaApp"]),
 		.executableTarget(name: "CopiaRender", dependencies: ["CopiaUI", "CopiaFixtures"]),
-		.testTarget(name: "CopiaTests", dependencies: ["CopiaCore", "CopiaUI", "CopiaFixtures", "CopiaStore"]),
+		.testTarget(name: "CopiaTests", dependencies: ["CopiaCore", "CopiaUI", "CopiaFixtures", "CopiaStore", "CopiaSystem", "CopiaApp"]),
 	]
 )
