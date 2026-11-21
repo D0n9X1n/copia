@@ -111,6 +111,23 @@ final class FakePasteboard: PasteboardSource {
 		#expect(drafts().count == 1)
 		#expect(drafts().first?.sourceBundleID == "com.apple.TextEdit")
 	}
+
+	/// Rich text captured from the pasteboard shows its plain text with an "RTF" footer (Amendment 5).
+	@Test func capturedRichTextIsSavedWithAnRTFFooter() async throws {
+		let pb = FakePasteboard()
+		let (w, drafts) = make(pb)
+		pb.changeCount += 1
+		pb.items = [PasteboardItemData([(PasteboardTypes.rtf, Data("{\\rtf1\\ansi Quarterly \\b review\\b0}".utf8))])]
+		pb.typeIdentifiers = [PasteboardTypes.rtf]
+		w.tick()
+		let draft = try #require(drafts().first)
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-rtf-\(UUID().uuidString)")
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await ClipStore(directory: dir).insert(draft)
+		#expect(clip.kind == .richText)
+		#expect(clip.title == "Quarterly review")
+		#expect(clip.meta == "16 chars · RTF")
+	}
 }
 
 @MainActor

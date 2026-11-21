@@ -104,7 +104,7 @@ public enum Capture {
 		let size = ByteCountFormatter.string(fromByteCount: Int64(byteSize), countStyle: .file)
 		switch kind {
 		case .text: return "\(text.count.formatted()) chars"
-		case .richText: return "\(text.count.formatted()) chars · Rich"
+		case .richText: return "\(text.count.formatted()) chars · RTF"
 		case .image: return size
 		case .link: return url?.host() ?? "Link"
 		case .file: return files.count == 1 ? "1 file" : "\(files.count.formatted()) files"
