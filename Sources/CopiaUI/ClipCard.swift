@@ -156,8 +156,32 @@ private struct CardBody: View {
 	let highContrast: Bool
 	let highlight: String
 	let thumbnails: ThumbnailCache
+	/// Bumped when a background decode lands; the image itself lives only in the size-limited cache.
+	@State private var decoded = 0
+
+	private var previewURL: URL? {
+		if case let .ready(url) = clip.preview { return url }
+		return nil
+	}
+
+	/// The thumbnail if the cache holds it. Cards never keep their own copy, so the 24 MB cap is the real cap.
+	private var thumbnail: NSImage? {
+		_ = decoded
+		return previewURL.flatMap(thumbnails.cached)
+	}
 
 	var body: some View {
+		// Decide from what this body drew, not the cache now: a decode can land between the two, and then nothing redraws.
+		let shown = thumbnail != nil
+		content
+			.task(id: previewURL) {
+				guard let url = previewURL, !shown else { return }
+				guard await thumbnails.load(url) != nil else { return }
+				withAnimation(.linear(duration: 0.15)) { decoded += 1 }
+			}
+	}
+
+	@ViewBuilder private var content: some View {
 		switch clip.kind {
 		case .text, .richText: textBody
 		case .image: imageBody
@@ -223,22 +247,23 @@ private struct CardBody: View {
 	}
 
 	@ViewBuilder private var imageBody: some View {
-		if case let .ready(url) = clip.preview, let image = thumbnails.image(at: url) {
+		if let image = thumbnail {
 			Image(nsImage: image)
 				.resizable()
 				.aspectRatio(contentMode: .fit)
 				.clipShape(.rect(cornerRadius: Theme.smallRadius, style: .continuous))
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.padding(10)
-				.background(Checkerboard().opacity(0.5))
+				.background(Checkerboard())
 		} else {
 			placeholder(caption: clip.preview == .failed ? clip.text : nil)
+				.transition(.opacity)
 		}
 	}
 
 	@ViewBuilder private var linkBody: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			if case let .ready(url) = clip.preview, let image = thumbnails.image(at: url) {
+			if let image = thumbnail {
 				Image(nsImage: image)
 					.resizable()
 					.aspectRatio(contentMode: .fill)
@@ -330,18 +355,20 @@ private struct CardBody: View {
 	}
 }
 
-/// The 8 pt checkerboard behind transparent images.
+/// The 8 pt checkerboard behind transparent images: one 16×16 tile repeated by Core Animation.
+/// (A SwiftUI Canvas here cost ~110 MB of GPU buffers inside the glass strip.)
 private struct Checkerboard: View {
+	static let tile: CGImage = {
+		let ctx = CGContext(data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
+			space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+		ctx.setFillColor(CGColor(gray: 0.5, alpha: 0.09))
+		ctx.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+		ctx.fill(CGRect(x: 16, y: 16, width: 16, height: 16))
+		return ctx.makeImage()!
+	}()
+
 	var body: some View {
-		Canvas { context, size in
-			let cell: CGFloat = 8
-			for row in 0..<Int(size.height / cell) + 1 {
-				for col in 0..<Int(size.width / cell) + 1 where (row + col).isMultiple(of: 2) {
-					context.fill(Path(CGRect(x: CGFloat(col) * cell, y: CGFloat(row) * cell, width: cell, height: cell)),
-						with: .color(.gray.opacity(0.18)))
-				}
-			}
-		}
+		Image(decorative: Self.tile, scale: 2).resizable(resizingMode: .tile)
 	}
 }
 

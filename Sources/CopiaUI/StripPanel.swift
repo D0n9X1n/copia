@@ -18,7 +18,8 @@ public final class StripPanel: NSPanel {
 		hidesOnDeactivate = false
 		isOpaque = false
 		backgroundColor = .clear
-		hasShadow = false
+		// The window server draws this shadow outside Copia's memory; a SwiftUI shadow would need full-width buffers.
+		hasShadow = true
 		animationBehavior = .none
 		isReleasedWhenClosed = false
 		host.sizingOptions = []
@@ -39,8 +40,8 @@ public final class StripPanel: NSPanel {
 	}
 
 	/// Places the panel on `screen` and makes it key without activating Copia.
-	public func show(on screen: NSScreen) {
-		setFrame(PanelLayout.windowFrame(in: screen.visibleFrame), display: true)
+	public func show(on screen: NSScreen, visibleFrame: CGRect? = nil) {
+		setFrame(PanelLayout.windowFrame(in: visibleFrame ?? screen.visibleFrame), display: false)
 		orderFrontRegardless()
 		makeKey()
 	}

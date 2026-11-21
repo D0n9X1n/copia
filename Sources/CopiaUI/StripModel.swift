@@ -226,8 +226,11 @@ public final class StripModel {
 		if selectedID == nil || !clips.contains(where: { $0.id == selectedID }) { selectedID = clips.first?.id }
 	}
 
+	/// Called after the open animation, so the panel can refresh its shadow.
+	@ObservationIgnored public var onOpenFinish: () -> Void = {}
+
 	public func animateIn() {
-		animator.run(.open, { self.appeared = true }, {})
+		animator.run(.open, { self.appeared = true }, { self.onOpenFinish() })
 	}
 
 	public func beginClose() {

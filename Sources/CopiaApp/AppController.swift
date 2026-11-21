@@ -38,8 +38,8 @@ public final class AppController {
 	public let panel = StripPanel()
 	public let shell = ShellModel()
 	let focus = SearchFocus()
-	let thumbnails = ThumbnailCache.shared
-	let store: ClipStore
+	public let thumbnails = ThumbnailCache.shared
+	public let store: ClipStore
 	let watcher: PasteboardWatcher
 	let previewer: Previewer
 	let paster = Paster()
@@ -52,6 +52,8 @@ public final class AppController {
 	private var settingsWindow: NSWindow?
 	private var onboardingWindow: NSWindow?
 	private var permissionPoll: Task<Void, Never>?
+	/// Places the strip in this frame instead of the screen's visible frame (used by the benchmark).
+	public var visibleFrameOverride: CGRect?
 
 	public init(directory: URL? = nil, defaults: UserDefaults = .standard) throws {
 		prefs = Preferences(defaults: defaults)
@@ -67,13 +69,14 @@ public final class AppController {
 
 	// MARK: Launch
 
-	public func start(showOnboarding: Bool = true) async {
+	public func start(showOnboarding: Bool = true, menuAndHotkeys: Bool = true) async {
 		try? await store.sweep()
 		await prune()
 		await reload()
 		await previewer.resumePending()
 		watcher.setPaused(prefs.paused)
 		watcher.start()
+		guard menuAndHotkeys else { return }
 		menu = MenuBarController(actions: .init(
 			history: { [weak self] in self?.toggleHistory() },
 			pause: { [weak self] in self?.togglePause() },
@@ -99,6 +102,7 @@ public final class AppController {
 			NSAccessibility.post(element: panel, notification: .announcementRequested,
 				userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
 		}
+		model.onOpenFinish = { [weak self] in self?.panel.invalidateShadow() }
 		model.onCloseStart = { [weak self] in
 			CopiaDebug.log("closeStart key=\(self?.panel.isKeyWindow ?? false)")
 			self?.panel.resignKey()
@@ -164,13 +168,10 @@ public final class AppController {
 		let mouse = NSEvent.mouseLocation
 		guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main else { return }
 		model.open()
-		panel.show(on: screen)
+		panel.show(on: screen, visibleFrame: visibleFrameOverride)
 		focus.focus()
 		CopiaDebug.log("opened visible=\(panel.isVisible) key=\(panel.isKeyWindow) frame=\(panel.frame)")
-		DispatchQueue.main.async { [weak self] in
-			self?.model.animateIn()
-			self?.focus.focus()
-		}
+		DispatchQueue.main.async { [weak self] in self?.model.animateIn() }
 	}
 
 	private func keyEquivalent(_ event: NSEvent) -> Bool {
@@ -197,7 +198,7 @@ public final class AppController {
 		}
 	}
 
-	func reload() async {
+	public func reload() async {
 		guard let stored = try? await store.recent() else { return }
 		var map: [UUID: String] = [:]
 		var clips: [Clip] = []

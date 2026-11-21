@@ -65,7 +65,6 @@ public struct StripView: View {
 			Spacer(minLength: 0)
 			strip
 				.frame(height: Theme.panelHeight)
-				.padding(.horizontal, PanelLayout.margin.left)
 				.offset(y: model.appeared ? 0 : (reduceMotion ? 0 : 56))
 				.opacity(model.appeared ? 1 : 0)
 				.scaleEffect(model.appeared || reduceMotion ? 1 : 0.985, anchor: .bottom)
@@ -84,13 +83,13 @@ public struct StripView: View {
 			if reduceTransparency {
 				shape.fill(Theme.solidBackdrop)
 			} else {
-				Color.clear.glassEffect(.regular, in: shape)
+				// Clipped: the glass casts its own shadow below the shape, and the window's square bottom edge cut it into corners.
+				Color.clear.glassEffect(.regular, in: shape).clipShape(shape)
 			}
 		}
 		.overlay {
 			shape.strokeBorder(Color.white.opacity(highContrast ? 0.35 : 0.14), lineWidth: 0.5)
 		}
-		.shadow(color: .black.opacity(0.22), radius: 22, y: 10)
 		.overlay(alignment: .bottom) { toast.padding(.bottom, 22) }
 		.accessibilityElement(children: .contain)
 		.accessibilityLabel("Clipboard history, \(model.clips.count) items")

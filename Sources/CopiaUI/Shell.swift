@@ -150,9 +150,10 @@ public struct SettingsView: View {
 	@State private var tab: SettingsTab = .general
 	@State private var selectedApp: String?
 
-	public init(model: ShellModel, pickApp: @escaping () -> String? = { nil }) {
+	public init(model: ShellModel, pickApp: @escaping () -> String? = { nil }, initialTab: SettingsTab = .general) {
 		self.model = model
 		self.pickApp = pickApp
+		_tab = State(initialValue: initialTab)
 	}
 
 	public var body: some View {
@@ -172,7 +173,7 @@ public struct SettingsView: View {
 			}
 			.formStyle(.grouped)
 		}
-		.frame(width: Self.width, height: 400)
+		.frame(width: Self.width, height: 360)
 		.confirmationDialog("Erase history?", isPresented: $model.eraseConfirmation) {
 			Button("Erase", role: .destructive) { model.confirmErase() }
 			Button("Cancel", role: .cancel) { model.cancelErase() }
@@ -257,7 +258,7 @@ public struct SettingsView: View {
 
 // MARK: Onboarding
 
-public enum OnboardingStep: Int, CaseIterable {
+public enum OnboardingStep: Int, CaseIterable, Sendable {
 	case welcome, accessibility, pasteboard, tryIt
 	public var title: String {
 		switch self {

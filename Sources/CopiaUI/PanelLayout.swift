@@ -2,8 +2,8 @@ import AppKit
 
 /// Where the strip sits on a screen, and how far the row scrolls to keep the selection in view.
 public enum PanelLayout {
-	/// Room around the strip for its shadow and the open animation; the window is this much larger.
-	public static let margin = NSEdgeInsets(top: 40, left: 24, bottom: 0, right: 24)
+	/// Extra room around the strip. Zero: the shadow is the window server's, so the window is exactly the strip.
+	public static let margin = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
 
 	/// The strip's own frame: inset 8 pt inside the visible frame (above the Dock), 316 pt tall.
 	public static func stripFrame(in visible: CGRect) -> CGRect {

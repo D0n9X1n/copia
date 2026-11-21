@@ -7,6 +7,7 @@ let package = Package(
 	products: [
 		.executable(name: "Copia", targets: ["Copia"]),
 		.executable(name: "copia-render", targets: ["CopiaRender"]),
+		.executable(name: "copia-bench", targets: ["CopiaBench"]),
 	],
 	dependencies: [
 		.package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "3.1.0"),
@@ -29,6 +30,7 @@ let package = Package(
 				.product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")]
 		),
 		.executableTarget(name: "Copia", dependencies: ["CopiaApp"]),
+		.executableTarget(name: "CopiaBench", dependencies: ["CopiaApp", "CopiaCore", "CopiaStore", "CopiaFixtures", "CopiaUI"]),
 		.executableTarget(name: "CopiaRender", dependencies: ["CopiaUI", "CopiaFixtures"]),
 		.testTarget(name: "CopiaTests", dependencies: ["CopiaCore", "CopiaUI", "CopiaFixtures", "CopiaStore", "CopiaSystem", "CopiaApp"]),
 	]

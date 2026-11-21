@@ -74,7 +74,7 @@ import CopiaFixtures
 		guard case let .ready(url) = assets.mixed[3].preview else { Issue.record("no preview"); return }
 		let cache = ThumbnailCache()
 		let image = try #require(cache.image(at: url))
-		#expect(max(image.size.width, image.size.height) <= 480)
+		#expect(max(image.size.width, image.size.height) <= 384)
 		_ = cache.image(at: url)
 		#expect(cache.decodeCount == 1)
 		#expect(cache.entryCount == 1)
