@@ -88,7 +88,7 @@ enum ReadmeRunner {
 		shell.ignoredApps = ["com.apple.Passwords", "com.1password.1password"]
 		let windows = [
 			RenderRunner.window(OnboardingView(model: ShellModel(), icon: icon), title: "", hiddenTitle: true, level: .floating + 1),
-			RenderRunner.window(SettingsView(model: shell, initialTab: .general), title: "Copia Settings", hiddenTitle: false, level: .floating + 1),
+			RenderRunner.settingsWindow(model: shell, tab: .general, level: .floating + 1),
 		]
 		NSApp.setActivationPolicy(.regular)
 		defer { windows.forEach { $0.orderOut(nil) }; NSApp.setActivationPolicy(.accessory) }

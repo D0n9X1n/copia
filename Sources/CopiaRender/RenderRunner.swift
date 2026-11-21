@@ -128,10 +128,10 @@ enum RenderRunner {
 			let shell = ShellModel()
 			shell.ignoredApps = ["com.apple.Passwords", "com.1password.1password"]
 			for tab in SettingsTab.allCases {
-				let view = SettingsView(model: shell, initialTab: tab)
-				rows.append(try await capture(view, title: "Copia Settings", name: "10-settings-\(tab.rawValue.lowercased())-\(mode)",
-					output: output, stage: stage, screen: screen, hiddenTitle: false))
+				let window = settingsWindow(model: shell, tab: tab, level: .floating + 1)
+				rows.append(try await capture(window, name: "10-settings-\(tab.rawValue.lowercased())-\(mode)", output: output, stage: stage))
 			}
+			rows.append(try await captureEraseConfirmation(name: "10-settings-erase-confirm-\(mode)", output: output, stage: stage, screen: screen))
 			for (index, step) in OnboardingStep.allCases.enumerated() {
 				for granted in [false, true] where step == .accessibility || step == .pasteboard || granted {
 					let model = ShellModel()
@@ -162,9 +162,21 @@ enum RenderRunner {
 		return window
 	}
 
+	/// The app's Settings window, with its toolbar tabs, drawn as key.
+	static func settingsWindow(model: ShellModel, tab: SettingsTab, level: NSWindow.Level) -> NSWindow {
+		let window = SettingsView.makeSettingsWindow(model: model, initialTab: tab,
+			window: KeyWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false))
+		window.level = level
+		return window
+	}
+
 	static func capture<V: View>(_ view: V, title: String, name: String, output: URL, stage: CGRect, screen: NSScreen,
 		hiddenTitle: Bool) async throws -> [String: Any] {
-		let window = window(view, title: title, hiddenTitle: hiddenTitle, level: .floating + 1)
+		try await capture(window(view, title: title, hiddenTitle: hiddenTitle, level: .floating + 1), name: name, output: output, stage: stage)
+	}
+
+	/// Centers `window` on the stage and captures it alone.
+	static func capture(_ window: NSWindow, name: String, output: URL, stage: CGRect) async throws -> [String: Any] {
 		window.setFrameOrigin(NSPoint(x: stage.midX - window.frame.width / 2, y: stage.midY - window.frame.height / 2))
 		window.makeKeyAndOrderFront(nil)
 		NSApp.activate()
@@ -177,6 +189,25 @@ enum RenderRunner {
 		try process.run()
 		process.waitUntilExit()
 		guard process.terminationStatus == 0 else { throw RenderError.captureFailed(name) }
+		print("rendered \(name)")
+		return ["scene": name, "file": url.lastPathComponent]
+	}
+
+	/// Settings → General with the Erase History confirmation up. The dialog is its own sheet window,
+	/// so this captures the screen region around the window and its sheet rather than one window.
+	static func captureEraseConfirmation(name: String, output: URL, stage: CGRect, screen: NSScreen) async throws -> [String: Any] {
+		let model = ShellModel()
+		let window = settingsWindow(model: model, tab: .general, level: .floating + 1)
+		window.setFrameOrigin(NSPoint(x: stage.midX - window.frame.width / 2, y: stage.midY - window.frame.height / 2))
+		window.makeKeyAndOrderFront(nil)
+		NSApp.activate()
+		defer { model.cancelErase(); window.orderOut(nil) }
+		try await Task.sleep(for: .milliseconds(400))
+		model.requestErase()
+		try await Task.sleep(for: .milliseconds(900))
+		let covered = window.attachedSheet.map { window.frame.union($0.frame) } ?? window.frame
+		let url = output.appendingPathComponent("\(name).png")
+		try capture(covered.insetBy(dx: -24, dy: -24).intersection(stage), on: screen, to: url)
 		print("rendered \(name)")
 		return ["scene": name, "file": url.lastPathComponent]
 	}
