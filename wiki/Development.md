@@ -24,7 +24,7 @@ Tests use Swift Testing and need no environment variables. The store tests run a
 
 ### See it
 
-- `swift run copia-render --output renders`: opens each strip state as a real window over fixed wallpapers and captures it to `renders/` for design review. Add `--only NAME` to render one state. It needs Screen Recording permission for the terminal.
+- `swift run copia-render --output renders`: opens each strip state as a real window over fixed wallpapers and captures it to `renders/` for design review. Add `--only NAME` to render one state. It needs Screen Recording permission for the terminal. `--only icon-review` writes only `12-icon-review.png`: the app icon from `Resources/AppIcon.icon` at 1024, 128, 32 and 16 px on a light and a dark row, composed from Icon Composer's exports with no window and no screen capture.
 - `scripts/readme-media.sh`: renders the README's screenshots and icons from fixture data into `.github/media/` (WebP, light and dark). It covers the top-left of the main display with a generated wallpaper for about a minute, so only Copia's own windows are captured. It also needs `cwebp`.
 - `Copia --selftest out.json`: opens and closes the strip ten times on every display through the same path as ⌘Y and records the key window, the frontmost app and the panel's screen. It exits nonzero on any violation.
 
