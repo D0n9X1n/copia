@@ -69,8 +69,15 @@ public struct StripView: View {
 			strip
 				.frame(height: Theme.panelHeight)
 				.offset(y: StripMotion.openOffset(appeared: model.appeared, reduced: reduceMotion))
-				.opacity(StripMotion.openOpacity(appeared: model.appeared, reduced: reduceMotion))
+				.opacity(Self.stripOpacity(appeared: model.appeared, closing: model.isClosing, reduced: reduceMotion))
 		}
+	}
+
+	/// Opening slides up without a fade (Reduce Motion fades in place). Closing slides down and fades out together,
+	/// on the close curve: `isClosing` is set before the animated change, so the fade starts from full opacity.
+	static func stripOpacity(appeared: Bool, closing: Bool, reduced: Bool) -> Double {
+		if closing { return appeared ? 1 : 0 }
+		return StripMotion.openOpacity(appeared: appeared, reduced: reduced)
 	}
 
 	@ViewBuilder private var strip: some View {
