@@ -1,0 +1,76 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "display-p3:1.00000,0.56078,0.27843,1.00000",
+      "display-p3:0.90588,0.23137,0.40392,1.00000"
+    ]
+  },
+  "groups": [
+    {
+      "name": "Front",
+      "layers": [
+        {
+          "name": "Details",
+          "image-name": "card-front-details.svg",
+          "glass": false
+        },
+        {
+          "name": "Front card",
+          "image-name": "card-front.svg",
+          "glass": true
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.15
+      }
+    },
+    {
+      "name": "Middle",
+      "layers": [
+        {
+          "name": "Middle card",
+          "image-name": "card-middle.svg",
+          "glass": true,
+          "opacity": 0.88
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.35
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.45
+      }
+    },
+    {
+      "name": "Back",
+      "layers": [
+        {
+          "name": "Back card",
+          "image-name": "card-back.svg",
+          "glass": true,
+          "opacity": 0.72
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.25
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.6
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

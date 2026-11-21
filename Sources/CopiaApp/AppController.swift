@@ -99,7 +99,10 @@ public final class AppController {
 			NSAccessibility.post(element: panel, notification: .announcementRequested,
 				userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
 		}
-		model.onCloseStart = { [weak self] in self?.panel.resignKey() }
+		model.onCloseStart = { [weak self] in
+			CopiaDebug.log("closeStart key=\(self?.panel.isKeyWindow ?? false)")
+			self?.panel.resignKey()
+		}
 		model.onCloseFinish = { [weak self] in
 			guard let self else { return }
 			panel.hide()
@@ -163,6 +166,7 @@ public final class AppController {
 		model.open()
 		panel.show(on: screen)
 		focus.focus()
+		CopiaDebug.log("opened visible=\(panel.isVisible) key=\(panel.isKeyWindow) frame=\(panel.frame)")
 		DispatchQueue.main.async { [weak self] in
 			self?.model.animateIn()
 			self?.focus.focus()
