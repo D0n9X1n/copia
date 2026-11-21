@@ -357,6 +357,26 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		#expect(links.calls == 2)
 	}
 
+	/// Undo after the trashed thumbnail was lost: the restored image asks again and ends whole, with a saved thumbnail.
+	@Test func anUndoneImageWhoseTrashedThumbnailWasLostGetsItsPreviewBack() async throws {
+		let faulty = FaultyFiles()
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-prev-\(UUID().uuidString)")
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let store = try ClipStore(directory: dir, files: faulty)
+		let previewer = Previewer(store: store, links: CountingLinks())
+		let (clip, _) = try await store.insert(ClipDraft(items: [PasteboardItemData([(PasteboardTypes.png, try pngData(64))])], copiedAt: .now))
+		previewer.generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .ok)
+		let deleted = try #require(try await store.delete(clip.key))
+		faulty.failRemoveContaining = "trash/\(clip.key).plist"
+		await store.emptyTrash()
+		try await store.restore(deleted)
+		await previewer.resumePending()
+		#expect(try await waitForState(store, clip.key) == .ok)
+		#expect(await store.thumbnail(for: clip.key) != nil)
+		#expect(previewer.stats.decodes == 2)
+	}
+
 	@Test func imageThumbnailIsAtMost480Pixels() throws {
 		let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2000, pixelsHigh: 1000, bitsPerSample: 8, samplesPerPixel: 4,
 			hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!

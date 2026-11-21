@@ -65,6 +65,8 @@ public struct StoredClip: Equatable, Sendable {
 /// Everything needed to undo a delete.
 public struct DeletedClip: Sendable {
 	public let clip: StoredClip
+	/// The clip had a thumbnail when it was deleted, so a restore without it must ask for a new preview.
+	let hadThumbnail: Bool
 }
 
 /// History on disk: SQLite (WAL) with a trigram FTS index, plus blob and thumbnail files.
@@ -178,21 +180,29 @@ public actor ClipStore {
 
 	// MARK: Delete, restore, prune, erase
 
-	/// Removes the row and FTS entry in one transaction, then moves its files to trash for undo.
+	/// Moves the clip's files to trash for undo, then removes the row and FTS entry in one transaction.
+	/// Either all of it happens or nothing does: a failed move or row delete puts the moved files back and throws.
 	public func delete(_ key: String) throws -> DeletedClip? {
 		guard let clip = try fetch(key) else { return nil }
-		try transaction {
-			try run("DELETE FROM clips WHERE id=?", [.text(key)])
-			try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
+		var moved: [(file: URL, trashed: URL)] = []
+		do {
+			for (file, trashed) in [(blobURL(key), trashURL(key, "plist")), (thumbURL(key), trashURL(key, "png"))] where files.exists(file) {
+				try files.move(file, to: trashed)
+				moved.append((file, trashed))
+			}
+			try transaction {
+				try run("DELETE FROM clips WHERE id=?", [.text(key)])
+				try run("DELETE FROM clips_fts WHERE id=?", [.text(key)])
+			}
+		} catch {
+			for (file, trashed) in moved.reversed() { try? files.move(trashed, to: file) }
+			throw error
 		}
-		// A file that cannot move to trash is removed instead: the delete still frees it, only its undo is lost.
-		for (file, trashed) in [(blobURL(key), trashURL(key, "plist")), (thumbURL(key), trashURL(key, "png"))] where files.exists(file) {
-			do { try files.move(file, to: trashed) } catch { try? files.remove(file) }
-		}
-		return DeletedClip(clip: clip)
+		return DeletedClip(clip: clip, hadThumbnail: moved.contains { $0.file == thumbURL(key) })
 	}
 
 	/// Puts a deleted clip back. Either the row and its files all return, or nothing changes.
+	/// A thumbnail lost from trash comes back as a pending preview, so the app asks for it again.
 	public func restore(_ deleted: DeletedClip) throws {
 		let key = deleted.clip.key
 		guard try fetch(key) == nil else { throw StoreError.alreadyExists }
@@ -204,6 +214,7 @@ public actor ClipStore {
 		do {
 			if files.exists(trashedThumb) { try files.move(trashedThumb, to: thumbURL(key)); movedThumb = true }
 			var clip = deleted.clip
+			if deleted.hadThumbnail, !movedThumb { clip.previewState = .pending }
 			clip.generation = try nextGeneration()
 			try insertRow(clip)
 		} catch {
@@ -380,9 +391,13 @@ public actor ClipStore {
 
 	private var inTransaction = false
 	private var stepFault = false
+	private var writeFault = false
 
 	/// Tests: the next read step fails as SQLite would on a busy or damaged database.
 	func failNextStep() { stepFault = true }
+
+	/// Tests: the next write statement fails, so its transaction rolls back.
+	func failNextWrite() { writeFault = true }
 
 	/// Tests: every id in the FTS table, read directly (search joins on `clips`, so it would hide a leftover entry).
 	func ftsKeys() throws -> [String] { try strings("SELECT id FROM clips_fts", []) }
@@ -430,6 +445,7 @@ public actor ClipStore {
 	}
 
 	private func run(_ sql: String, _ values: [Value]) throws {
+		if writeFault { writeFault = false; throw StoreError.sqlite("injected write fault") }
 		let statement = try prepare(sql, values)
 		defer { sqlite3_finalize(statement) }
 		guard sqlite3_step(statement) == SQLITE_DONE else { throw StoreError.sqlite(String(cString: sqlite3_errmsg(db))) }
