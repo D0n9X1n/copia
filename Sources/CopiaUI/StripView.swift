@@ -272,19 +272,20 @@ private struct StripSlide<Content: View>: View {
 }
 
 /// The selection lens (brief): a 3 pt accent stroke over a 12% accent fill, radius 21, 5 pt outside the card, behind it.
-/// A halo edges the stroke outside so it stays visible on any glass. It fades with a deleting card, so the fill never
-/// shows as a block where the card was.
+/// An opaque halo band edges the stroke outside and fills the gap inside it (tucking 1 pt under the card), so the ring
+/// reaches 3:1 on any glass; the fill tints that band. The lens fades with a deleting card, so no block shows.
 struct LensRing: View {
 	var removing = false
 	static let fillOpacity = 0.12
+	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
 
 	var body: some View {
 		ZStack {
+			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
+				.strokeBorder(Theme.lensHalo, lineWidth: Self.band)
 			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
 				.fill(Color.accentColor.opacity(Self.fillOpacity))
 				.padding(Theme.lensHaloWidth)
-			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
-				.strokeBorder(Theme.lensHalo, lineWidth: Theme.lensHaloWidth)
 			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
 				.strokeBorder(Color.accentColor, lineWidth: 3)
 				.padding(Theme.lensHaloWidth)

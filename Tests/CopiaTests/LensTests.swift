@@ -46,7 +46,8 @@ import SwiftUI
 		let alphas = try Self.alpha(at: Self.points)
 		#expect(alphas[0] > 0.99, "halo \(alphas)")
 		#expect(alphas[1] > 0.99, "ring \(alphas)")
-		#expect(alphas[2] > 0.08 && alphas[2] < 0.16, "gap \(alphas)")
+		// The gap is the opaque halo tinted by the fill, so the ring keeps 3:1 against it on any glass.
+		#expect(alphas[2] > 0.99, "gap \(alphas)")
 		#expect(alphas[3] > 0.08 && alphas[3] < 0.16, "center \(alphas)")
 	}
 
