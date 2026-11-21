@@ -44,7 +44,8 @@ public final class StripPanel: NSPanel {
 
 	/// Places the panel on `screen` and makes it key without activating Copia.
 	public func show(on screen: NSScreen, visibleFrame: CGRect? = nil) {
-		setFrame(PanelLayout.windowFrame(in: visibleFrame ?? screen.visibleFrame), display: false)
+		let target = PanelLayout.windowFrame(in: visibleFrame ?? screen.visibleFrame)
+		if frame != target { setFrame(target, display: false) }
 		orderFrontRegardless()
 		makeKey()
 	}
