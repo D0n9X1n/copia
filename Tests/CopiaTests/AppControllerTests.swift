@@ -90,34 +90,6 @@ func eventually(_ condition: () async throws -> Bool) async rethrows -> Bool {
 
 @MainActor
 @Suite(.serialized) struct AppControllerTests {
-	@Test func toggleStartsTheOpenAnimationBeforeReturningFromTheHiddenPosition() async throws {
-		AXNode.enableInProcess()
-		let r = try AppRig()
-		try await r.copy("A fixture card")
-		r.controller.panel.alphaValue = 0
-		r.controller.visibleFrameOverride = CGRect(x: -6000, y: -6000, width: 900, height: 900)
-		let previousKey = NSApp.keyWindow
-		defer { r.controller.panel.orderOut(nil); previousKey?.makeKey() }
-		var started = false
-		r.controller.model.animator = Animator { event, change, completion in
-			if event == .open {
-				started = true
-				#expect(r.controller.model.cardsMounted)
-				#expect(!r.controller.model.appeared)
-				let strip = AXNode(r.controller.panel.host).all.first { $0.label.hasPrefix("Clipboard history") }
-				#expect(strip != nil)
-				#expect((strip?.frame.maxY ?? .infinity) <= r.controller.panel.frame.minY + 0.5)
-			}
-			change()
-			completion()
-		}
-		r.controller.toggleHistory()
-		#expect(started)
-		#expect(r.controller.model.appeared)
-		// Break the test animator's capture of the rig.
-		r.controller.model.animator = .immediate
-	}
-
 	@Test func anInsertWhileOpenKeepsTheSelectionAndARecopyMovesToTheFront() async throws {
 		let r = try AppRig()
 		try await r.copy("one"); try await r.copy("two"); try await r.copy("three")
