@@ -295,13 +295,16 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		#expect(try await store.fetch(clip.key) != nil)
 	}
 
+	/// Checked in the FTS table itself: search joins on `clips`, so it would hide an entry the sweep left behind.
 	@Test func sweepDropsRowsWithMissingBlobsAndTheirFts() async throws {
 		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
 		let (clip, _) = try await store.insert(text("lost blob"))
+		let (kept, _) = try await store.insert(text("kept blob"))
 		try FileManager.default.removeItem(at: dir.appendingPathComponent("blobs/\(clip.key).plist"))
 		try await store.sweep()
 		#expect(try await store.fetch(clip.key) == nil)
 		#expect(try await store.search("lost").isEmpty)
+		#expect(try await store.ftsKeys() == [kept.key])
 	}
 
 	@Test func pruneRemovesExpiredRowsAndFiles() async throws {
