@@ -20,6 +20,15 @@ enum BenchPlan {
 		screenRecording && !noSCK ? .screenCaptureKit : .proxy
 	}
 
+	/// Presented-frame checks (open, scroll, motion) gate only on a main display at 120 Hz or faster; on a slower display
+	/// they are measured and reported (Amendment 11). Half a hertz of slack absorbs a refresh measured as 119.9 Hz.
+	static func gatesPresentedFrames(refreshHz: Double) -> Bool { refreshHz >= 119.5 }
+
+	/// The strip width every run measures at, a 14-inch MacBook Pro's screen, so local and CI results compare (Amendment 11).
+	static let referenceWidth = 1_512.0
+
+	static func stripWidth(requested: Double?, screen: Double) -> Double { min(requested ?? referenceWidth, screen) }
+
 	static func skips(path: Path, screenRecording: Bool) -> [Skip] {
 		guard path == .proxy else { return [] }
 		let reason = screenRecording ? "--no-sck: recorded checks were turned off"

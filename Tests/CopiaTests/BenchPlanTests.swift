@@ -25,6 +25,20 @@ import Testing
 		#expect(BenchPlan.skips(path: .screenCaptureKit, screenRecording: true).isEmpty)
 	}
 
+	@Test func presentedFrameChecksGateOnlyAt120HzOrFaster() {
+		#expect(BenchPlan.gatesPresentedFrames(refreshHz: 120))
+		#expect(BenchPlan.gatesPresentedFrames(refreshHz: 119.9))
+		#expect(!BenchPlan.gatesPresentedFrames(refreshHz: 75))
+		#expect(!BenchPlan.gatesPresentedFrames(refreshHz: 60))
+	}
+
+	@Test func theOpenGateRunsAtTheReferenceWidthUnlessAWidthIsGiven() {
+		#expect(BenchPlan.referenceWidth == 1_512)
+		#expect(BenchPlan.stripWidth(requested: nil, screen: 2_924) == 1_512)
+		#expect(BenchPlan.stripWidth(requested: 2_000, screen: 2_924) == 2_000)
+		#expect(BenchPlan.stripWidth(requested: nil, screen: 1_280) == 1_280)
+	}
+
 	@Test func recordedChecksCoverScrollAndEveryMotion() {
 		#expect(BenchPlan.recordedChecks.contains("scrollSmoothness"))
 		for event in ["open", "close", "lens", "delete", "undo"] {

@@ -6,7 +6,7 @@ import CopiaFixtures
 import CopiaStore
 import CopiaUI
 
-/// `copia-bench [--json FILE] [--idle SECONDS] [--opens N] [--width POINTS] [--no-sck] [--motion-rounds N]`
+/// `copia-bench [--json FILE] [--idle SECONDS] [--opens N] [--width POINTS, default 1512] [--no-sck] [--motion-rounds N]`
 /// Seeds 1,000 clips (300 images) into a temporary store, then measures the budgets in the performance spec.
 /// With Screen Recording (and without `--no-sck`) it records the bench's own windows; otherwise it runs the proxy.
 @MainActor
@@ -159,9 +159,10 @@ enum Bench {
 			let controller = try AppController(directory: dir.appendingPathComponent("store"), defaults: defaults)
 			try await seed(controller.store, assets: dir.appendingPathComponent("assets"))
 			await controller.start(showOnboarding: false, menuAndHotkeys: false)
-			if let width = options.width, let screen = NSScreen.screens.first {
+			if let screen = NSScreen.screens.first {
 				let v = screen.visibleFrame
-				controller.visibleFrameOverride = CGRect(x: v.minX, y: v.minY, width: min(width, v.width), height: v.height)
+				let width = BenchPlan.stripWidth(requested: options.width, screen: v.width)
+				controller.visibleFrameOverride = CGRect(x: v.minX, y: v.minY, width: width, height: v.height)
 			}
 			await controller.reload()
 
@@ -196,19 +197,29 @@ enum Bench {
 			let screenRecording = CGPreflightScreenCaptureAccess()
 			let path = BenchPlan.path(screenRecording: screenRecording, noSCK: options.noSCK)
 			var checks: [(String, Bool)] = []
+			// Checks on presented frames; they gate only on a 120 Hz main display (Amendment 11).
+			var presented: [(String, Bool)] = []
 			var report: [String: Any] = [:]
 			var latencies: [Double] = []
-			var openMethod = "proxy: toggle to the panel on screen with its first card's layer contents committed"
+			let openMethod = "proxy: toggle to the panel on screen with its first card's layer contents committed"
 			if path == .screenCaptureKit {
 				do {
 					let run = try await RecordedRun.start(controller)
-					latencies = await run.latencies(options.opens)
-					openMethod = "screenCaptureKit: toggle to the first presented frame showing the first card"
+					let presentedOpens = await run.latencies(options.opens)
 					let motion = await run.motion(rounds: options.motionRounds)
 					let scroll = await run.scroll(velocity: 4_000, seconds: 5)
 					let frozen = await run.scroll(velocity: 0, seconds: 1.5)
 					await run.finish()
-					report["refreshHz"] = (1 / run.refresh).rounded()
+					let refreshHz = (1 / run.refresh).rounded()
+					report["refreshHz"] = refreshHz
+					report["presentedFramesGate"] = BenchPlan.gatesPresentedFrames(refreshHz: refreshHz)
+					report["presentedOpen"] = [
+						"method": "screenCaptureKit: toggle to the first presented frame showing the first card",
+						"p50ms": (percentile(presentedOpens, 0.5) * 10).rounded() / 10,
+						"p95ms": (percentile(presentedOpens, 0.95) * 10).rounded() / 10,
+						"samplesMs": presentedOpens.map { ($0 * 10).rounded() / 10 },
+					] as [String: Any]
+					presented.append(("presentedOpenP95ms < \(Budgets.openP95ms)", percentile(presentedOpens, 0.95) < Budgets.openP95ms))
 					report["scroll"] = [
 						"velocityPointsPerSecond": 4_000, "seconds": 5,
 						"freshFraction": scroll.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
@@ -217,8 +228,8 @@ enum Bench {
 						"frozenControlFreshFraction": frozen.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
 						"frozenControlOnTimeFraction": frozen.map { ($0.onTimeFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
 					] as [String: Any]
-					checks.append(("scrollSmoothness", scroll?.passes ?? false))
-					// The negative control must fail the same check, or the check proves nothing.
+					presented.append(("scrollSmoothness", scroll?.passes ?? false))
+					// The negative control must fail the same check, or the check proves nothing. It gates at any refresh.
 					checks.append(("scrollFrozenControlFails", frozen.map { !$0.passes } ?? false))
 					var motionReport: [String: Any] = [:]
 					for event in SettleBudget.events {
@@ -228,7 +239,7 @@ enum Bench {
 							let settled = samples.compactMap { $0?.seconds }
 							let limit = SettleBudget.limit(event, reduced: reduced)
 							let passes = !samples.isEmpty && settled.count == samples.count && median(settled) <= limit
-							checks.append(("motionSettle.\(key)", passes))
+							presented.append(("motionSettle.\(key)", passes))
 							motionReport[key] = [
 								"analyticMs": ms(SettleBudget.analytic(event, reduced: reduced)), "limitMs": ms(limit),
 								"medianMs": settled.isEmpty ? NSNull() : ms(median(settled)) as Any,
@@ -238,19 +249,26 @@ enum Bench {
 						}
 					}
 					report["motionSettle"] = motionReport
+					if BenchPlan.gatesPresentedFrames(refreshHz: refreshHz) {
+						checks += presented
+					} else {
+						report["reportedOnly"] = [
+							"reason": "main display at \(Int(refreshHz)) Hz; presented-frame checks gate at 120 Hz (Amendment 11)",
+							"checks": presented.map { ["check": $0.0, "passes": $0.1] as [String: Any] },
+						] as [String: Any]
+					}
 				} catch {
 					checks.append(("screenCaptureKitStarted", false))
 					report["screenCaptureKitError"] = "\(error)"
 				}
 			}
-			if latencies.isEmpty {
-				for _ in 0..<options.opens {
-					latencies.append(await proxyOpen(controller))
-					controller.toggleHistory()
-					try? await Task.sleep(for: .milliseconds(350))
-				}
-				openFootprint = max(openFootprint, footprintMB())
+			// The in-process open gates on every path and display.
+			for _ in 0..<options.opens {
+				latencies.append(await proxyOpen(controller))
+				controller.toggleHistory()
+				try? await Task.sleep(for: .milliseconds(350))
 			}
+			openFootprint = max(openFootprint, footprintMB())
 			let p95 = percentile(latencies, 0.95)
 
 			checks = [
