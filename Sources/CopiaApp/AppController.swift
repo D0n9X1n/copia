@@ -163,7 +163,7 @@ public final class AppController {
 				guard let self, let key = index.keys[id] else { return }
 				if let gone = try await store.delete(key) { index.noteDeleted(id, gone) }
 			},
-			restore: { [weak self] _, _ in },
+			restore: { _, _ in },
 			openAccessibilitySettings: { Permissions.requestAccessibility(); Permissions.openAccessibilitySettings() })
 		model.actions.search = { [weak self] query in
 			guard let self, let keys = try? await store.search(query) else { return [] }
