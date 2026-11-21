@@ -45,5 +45,7 @@ swift build -c release --arch arm64 --arch x86_64
 ### 发布
 
 1. CI 通过后合并发布用的拉取请求。
-2. 运行 `scripts/build-app.sh`，并用 `codesign --verify --deep --strict dist/Copia.app` 验证。
-3. 打标签 `v0.0.1` 并运行 `gh release create v0.0.1 dist/Copia-0.0.1.zip`。
+2. 运行 `scripts/build-app.sh`，并用 `codesign --verify --deep --strict dist/Copia.app` 验证。记录 `spctl -a -vv dist/Copia.app` 的结果。
+3. 把 `dist/Copia-0.0.1.zip` 解压到一个新的临时文件夹，设置隔离属性，在那里打开它，并确认快捷键录制器能显示文字。
+4. 在已签名的应用上手动检查：在文本编辑中复制，然后 ⌘Y 加 ↩ 能粘贴；图片和链接卡片显示已保存的预览；删除卡片会把它的文件从 `~/Library/Application Support/Copia` 中移除；全新的引导在授予辅助功能权限后会更新；登录时启动的状态能读回；重新绑定的快捷键会替换旧的；卡片栏能在全屏应用上方打开。
+5. 打标签 `v0.0.1` 并运行 `gh release create v0.0.1 dist/Copia-0.0.1.zip`。

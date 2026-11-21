@@ -45,5 +45,7 @@ The icon is an Icon Composer package: three SVG card layers over a persimmon-to-
 ### Release
 
 1. Merge the release pull request after CI passes.
-2. Run `scripts/build-app.sh` and verify with `codesign --verify --deep --strict dist/Copia.app`.
-3. Tag `v0.0.1` and run `gh release create v0.0.1 dist/Copia-0.0.1.zip`.
+2. Run `scripts/build-app.sh` and verify with `codesign --verify --deep --strict dist/Copia.app`. Record `spctl -a -vv dist/Copia.app`.
+3. Unzip `dist/Copia-0.0.1.zip` into a new temporary folder, set the quarantine attribute, open it there and check the Shortcuts recorder shows its labels.
+4. Check by hand on the signed app: copy in TextEdit, then ⌘Y and ↩ pastes it; image and link cards show saved previews; deleting a card removes its files from `~/Library/Application Support/Copia`; a fresh onboarding updates after granting Accessibility; Launch at login reads back; a rebound shortcut replaces the old one; the strip opens over a full-screen app.
+5. Tag `v0.0.1` and run `gh release create v0.0.1 dist/Copia-0.0.1.zip`.
