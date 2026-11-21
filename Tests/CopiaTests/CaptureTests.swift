@@ -34,6 +34,16 @@ private func t(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: 1_
 		#expect(Capture.decide(types: [PasteboardTypes.rtf], draft: blank, candidates: [], ignoredApps: []) == .skipEmpty)
 	}
 
+	/// A bare `public.url` item is a link whose text is its URL; a file's URL never replaces its path.
+	@Test func aURLOnlyItemIsALinkWithItsURLAsText() {
+		let bare = draft(item((PasteboardTypes.url, "https://example.com")))
+		#expect(Capture.plainText(bare) == "https://example.com")
+		#expect(Capture.kind(of: bare) == .link)
+		let file = draft(item((PasteboardTypes.fileURL, "file:///tmp/a.txt"), (PasteboardTypes.url, "file:///tmp/a.txt")))
+		#expect(Capture.plainText(file) == "")
+		#expect(Capture.kind(of: file) == .file)
+	}
+
 	@Test func colorDetectionFollowsPasteRules() {
 		#expect(Capture.colorHex("#1A2B3C") == "#1A2B3C")
 		#expect(Capture.colorHex("1a2b3c") == "#1A2B3C")

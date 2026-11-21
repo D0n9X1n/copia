@@ -25,7 +25,7 @@ public enum Capture {
 		return .keep
 	}
 
-	/// Each item's text: its string, else the text of its RTF, else of its HTML.
+	/// Each item's text: its string, else the text of its RTF, else of its HTML, else its URL (never a file's).
 	public static func plainText(_ draft: ClipDraft) -> String {
 		draft.items.compactMap { item in
 			if let data = item.data(for: PasteboardTypes.string) { return String(data: data, encoding: .utf8) }
@@ -35,6 +35,9 @@ public enum Capture {
 					.trimmingCharacters(in: .whitespacesAndNewlines)
 			}
 			if let data = item.data(for: PasteboardTypes.html) { return String(data: data, encoding: .utf8).map(htmlText) }
+			if item.data(for: PasteboardTypes.fileURL) == nil, let data = item.data(for: PasteboardTypes.url) {
+				return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+			}
 			return nil
 		}
 		.joined(separator: "\n")

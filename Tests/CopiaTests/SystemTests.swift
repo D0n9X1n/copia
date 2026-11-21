@@ -199,9 +199,11 @@ final class FakePasteboard: PasteboardSource {
 /// Counts fetches so "fetched once" is provable.
 final class CountingLinks: LinkFetching, @unchecked Sendable {
 	var calls = 0
+	var urls: [URL] = []
 	var result: Result<LinkPreview, Error> = .success(LinkPreview(title: "A title"))
 	func fetch(_ url: URL) async throws -> LinkPreview {
 		calls += 1
+		urls.append(url)
 		return try result.get()
 	}
 }
@@ -261,6 +263,23 @@ final class CountingThumbnails: FileThumbnailing, @unchecked Sendable {
 		#expect(links.calls == 1)
 		let reopened = try ClipStore(directory: dir)
 		#expect(try await reopened.fetch(clip.key)?.title == "A title")
+	}
+
+	/// A copy carrying only `public.url` is saved with its URL as title and link, and its preview is requested for that URL.
+	@Test func aURLOnlyCopyIsSavedAsALinkAndPreviewed() async throws {
+		let (store, dir) = try tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+		let links = CountingLinks()
+		let draft = ClipDraft(items: [PasteboardItemData([(PasteboardTypes.url, Data("https://example.com".utf8))])], copiedAt: .now)
+		let (clip, _) = try await store.insert(draft)
+		#expect(clip.kind == .link)
+		#expect(clip.title == "https://example.com")
+		#expect(clip.url == "https://example.com")
+		#expect(clip.meta == "example.com")
+		#expect(clip.previewState == .pending)
+		Previewer(store: store, links: links).generate(for: clip)
+		#expect(try await waitForState(store, clip.key) == .okNoImage)
+		#expect(links.urls == [URL(string: "https://example.com")!])
+		#expect(try await store.fetch(clip.key)?.title == "A title")
 	}
 
 	@Test func failedFetchIsRecorded() async throws {
