@@ -4,9 +4,11 @@ import CopiaApp
 import CopiaCore
 import CopiaFixtures
 import CopiaStore
+import CopiaUI
 
-/// `copia-bench [--json FILE] [--idle SECONDS] [--opens N] [--refresh-hz 60|120]`
+/// `copia-bench [--json FILE] [--idle SECONDS] [--opens N] [--width POINTS] [--no-sck] [--motion-rounds N]`
 /// Seeds 1,000 clips (300 images) into a temporary store, then measures the budgets in the performance spec.
+/// With Screen Recording (and without `--no-sck`) it records the bench's own windows; otherwise it runs the proxy.
 @MainActor
 enum Bench {
 	struct Budgets {
@@ -57,15 +59,38 @@ enum Bench {
 		}
 	}
 
-	/// Time from toggle to the first display frame where the panel is on screen with its cards mounted.
-	static func openLatency(_ controller: AppController) async -> Double {
+	/// The row's scroll view inside the hosting view.
+	static func scrollView(in view: NSView) -> NSScrollView? {
+		if let scroll = view as? NSScrollView { return scroll }
+		for sub in view.subviews { if let found = scrollView(in: sub) { return found } }
+		return nil
+	}
+
+	/// True when a layer with committed contents lies in the row's leading card slot.
+	static func firstCardCommitted(_ panel: StripPanel) -> Bool {
+		guard let scroll = scrollView(in: panel.host), let document = scroll.documentView?.layer else { return false }
+		let leading = scroll.contentView.bounds.minX
+		let slot = leading..<(leading + Theme.rowPadding + Theme.cardSize.width)
+		func committed(_ layer: CALayer) -> Bool {
+			if layer.contents != nil {
+				let rect = document.convert(layer.bounds, from: layer)
+				if rect.maxX > slot.lowerBound, rect.minX < slot.upperBound { return true }
+			}
+			return (layer.sublayers ?? []).contains(where: committed)
+		}
+		return committed(document)
+	}
+
+	/// In-process proxy: toggle to the panel on screen with its first card's layer contents committed,
+	/// then the end of the transaction that carries them.
+	static func proxyOpen(_ controller: AppController) async -> Double {
 		let start = ContinuousClock.now
 		controller.toggleHistory()
-		while !(controller.panel.isVisible && controller.panel.occlusionState.contains(.visible) && controller.model.cardsMounted) {
+		while !(controller.panel.isVisible && controller.panel.occlusionState.contains(.visible) && controller.model.cardsMounted
+			&& firstCardCommitted(controller.panel)) {
 			try? await Task.sleep(for: .milliseconds(1))
 			if ContinuousClock.now - start > .seconds(2) { break }
 		}
-		// One more frame so the first layout has committed.
 		await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
 			CATransaction.begin()
 			CATransaction.setCompletionBlock { c.resume() }
@@ -76,74 +101,167 @@ enum Bench {
 		return Double(elapsed.components.seconds) * 1_000 + Double(elapsed.components.attoseconds) / 1e15
 	}
 
+	/// Forces a redraw while hidden: a model change the strip's body reads, then a layout and a root-layer display.
+	static func hiddenControl(_ controller: AppController) async -> HiddenRender.Counters {
+		Diagnostics.reset()
+		controller.model.paused.toggle()
+		try? await Task.sleep(for: .milliseconds(100))
+		controller.panel.host.layoutSubtreeIfNeeded()
+		if let layer = controller.panel.contentView?.layer {
+			layer.setNeedsDisplay()
+			layer.displayIfNeeded()
+		}
+		let counters = counters()
+		controller.model.paused.toggle()
+		try? await Task.sleep(for: .milliseconds(100))
+		return counters
+	}
+
+	static func counters() -> HiddenRender.Counters {
+		HiddenRender.Counters(bodies: Diagnostics.bodyEvaluations, layerDisplays: Diagnostics.layerDisplays,
+			displayLinkTicks: Diagnostics.displayLinkTicks)
+	}
+
+	static func median(_ values: [Double]) -> Double { percentile(values, 0.5) }
+
+	static func ms(_ seconds: Double) -> Double { (seconds * 10_000).rounded() / 10 }
+
 	static func percentile(_ values: [Double], _ p: Double) -> Double {
 		let sorted = values.sorted()
 		guard !sorted.isEmpty else { return .nan }
 		return sorted[min(sorted.count - 1, Int((Double(sorted.count) * p).rounded(.up)) - 1)]
 	}
 
-	static func run(json: URL?, idleSeconds: Double, opens: Int, width: Double?) async -> Int32 {
+	struct Options {
+		var json: URL?
+		var idleSeconds = 60.0
+		var opens = 50
+		var width: Double?
+		var noSCK = false
+		var motionRounds = 3
+	}
+
+	static func run(_ options: Options) async -> Int32 {
 		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-bench-\(UUID().uuidString)")
 		defer { try? FileManager.default.removeItem(at: dir) }
 		let defaults = UserDefaults(suiteName: "copia-bench-\(UUID().uuidString)")!
 		defaults.set(true, forKey: "onboarded")
-		// Paused capture still polls the real pasteboard every 0.5 s, so idle CPU includes polling,
+		// Paused capture still polls the real pasteboard's change count every 0.5 s, so idle CPU includes polling,
 		// but nothing the user copies during the run is read or stored.
 		defaults.set(true, forKey: "paused")
 		do {
 			let controller = try AppController(directory: dir.appendingPathComponent("store"), defaults: defaults)
 			try await seed(controller.store, assets: dir.appendingPathComponent("assets"))
 			await controller.start(showOnboarding: false, menuAndHotkeys: false)
-			if let width, let screen = NSScreen.screens.first {
+			if let width = options.width, let screen = NSScreen.screens.first {
 				let v = screen.visibleFrame
 				controller.visibleFrameOverride = CGRect(x: v.minX, y: v.minY, width: min(width, v.width), height: v.height)
 			}
 			await controller.reload()
 
 			// Warm the panel once, then measure the hidden, idle state.
-			_ = await openLatency(controller)
+			_ = await proxyOpen(controller)
 			controller.toggleHistory()
 			try? await Task.sleep(for: .seconds(3))
 			let idleFootprint = footprintMB()
+			Diagnostics.reset()
 			let cpu0 = cpuSeconds(), wall0 = Date()
-			try? await Task.sleep(for: .seconds(idleSeconds))
+			try? await Task.sleep(for: .seconds(options.idleSeconds))
 			let idleCPU = (cpuSeconds() - cpu0) / Date().timeIntervalSince(wall0) * 100
+			let idle = counters()
+			let windowsOnScreen = NSApp.windows.filter(\.isVisible).count
 			let hiddenOK = !controller.panel.isVisible && !controller.model.cardsMounted && controller.thumbnails.entryCount == 0
+			let control = await hiddenControl(controller)
+			let hidden = HiddenRender.evaluate(idle: idle, windowsOnScreen: windowsOnScreen, control: control)
 
-			var latencies: [Double] = []
-			var openFootprint = 0.0
-			var firstOpenFootprint = 0.0
-			for i in 0..<opens {
-				latencies.append(await openLatency(controller))
-				if i == 0 {
-					firstOpenFootprint = footprintMB()
-					if let hold = ProcessInfo.processInfo.environment["COPIA_BENCH_HOLD"].flatMap(Double.init) {
-						print("HOLDING pid=\(getpid())"); fflush(stdout)
-						try? await Task.sleep(for: .seconds(hold))
-					}
-				}
-				if i == 0 {
-					// Scroll through the whole row so every card and thumbnail is realised once.
-					for _ in 0..<controller.model.visibleClips.count { controller.model.move(1) }
-					try? await Task.sleep(for: .milliseconds(500))
-					openFootprint = max(openFootprint, footprintMB())
-				}
-				controller.toggleHistory()
-				try? await Task.sleep(for: .milliseconds(350))
+			// Memory with the strip open: realise every card and thumbnail once.
+			_ = await proxyOpen(controller)
+			let firstOpenFootprint = footprintMB()
+			if let hold = ProcessInfo.processInfo.environment["COPIA_BENCH_HOLD"].flatMap(Double.init) {
+				print("HOLDING pid=\(getpid())"); fflush(stdout)
+				try? await Task.sleep(for: .seconds(hold))
 			}
-			openFootprint = max(openFootprint, footprintMB())
+			for _ in 0..<controller.model.visibleClips.count { controller.model.move(1) }
+			try? await Task.sleep(for: .milliseconds(500))
+			var openFootprint = footprintMB()
+			controller.toggleHistory()
+			try? await Task.sleep(for: .milliseconds(350))
+
+			let screenRecording = CGPreflightScreenCaptureAccess()
+			let path = BenchPlan.path(screenRecording: screenRecording, noSCK: options.noSCK)
+			var checks: [(String, Bool)] = []
+			var report: [String: Any] = [:]
+			var latencies: [Double] = []
+			var openMethod = "proxy: toggle to the panel on screen with its first card's layer contents committed"
+			if path == .screenCaptureKit {
+				do {
+					let run = try await RecordedRun.start(controller)
+					latencies = await run.latencies(options.opens)
+					openMethod = "screenCaptureKit: toggle to the first presented frame showing the first card"
+					let motion = await run.motion(rounds: options.motionRounds)
+					let scroll = await run.scroll(velocity: 4_000, seconds: 5)
+					let frozen = await run.scroll(velocity: 0, seconds: 1.5)
+					await run.finish()
+					report["refreshHz"] = (1 / run.refresh).rounded()
+					report["scroll"] = [
+						"velocityPointsPerSecond": 4_000, "seconds": 5,
+						"freshFraction": scroll.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+						"onTimeFraction": scroll.map { ($0.onTimeFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+						"presentedFrames": scroll?.presented ?? 0,
+						"frozenControlFreshFraction": frozen.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+						"frozenControlOnTimeFraction": frozen.map { ($0.onTimeFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+					] as [String: Any]
+					checks.append(("scrollSmoothness", scroll?.passes ?? false))
+					// The negative control must fail the same check, or the check proves nothing.
+					checks.append(("scrollFrozenControlFails", frozen.map { !$0.passes } ?? false))
+					var motionReport: [String: Any] = [:]
+					for event in SettleBudget.events {
+						for reduced in [false, true] {
+							let key = "\(event)" + (reduced ? ".reduced" : "")
+							let samples = motion[key] ?? []
+							let settled = samples.compactMap { $0?.seconds }
+							let limit = SettleBudget.limit(event, reduced: reduced)
+							let passes = !samples.isEmpty && settled.count == samples.count && median(settled) <= limit
+							checks.append(("motionSettle.\(key)", passes))
+							motionReport[key] = [
+								"analyticMs": ms(SettleBudget.analytic(event, reduced: reduced)), "limitMs": ms(limit),
+								"medianMs": settled.isEmpty ? NSNull() : ms(median(settled)) as Any,
+								"samplesMs": samples.map { $0.map { ms($0.seconds) } ?? -1 },
+								"fromTriggerMs": samples.map { $0.map { ms($0.fromTrigger) } ?? -1 },
+							] as [String: Any]
+						}
+					}
+					report["motionSettle"] = motionReport
+				} catch {
+					checks.append(("screenCaptureKitStarted", false))
+					report["screenCaptureKitError"] = "\(error)"
+				}
+			}
+			if latencies.isEmpty {
+				for _ in 0..<options.opens {
+					latencies.append(await proxyOpen(controller))
+					controller.toggleHistory()
+					try? await Task.sleep(for: .milliseconds(350))
+				}
+				openFootprint = max(openFootprint, footprintMB())
+			}
 			let p95 = percentile(latencies, 0.95)
 
-			let checks: [(String, Bool)] = [
+			checks = [
 				("idleCPUPercent < \(Budgets.idleCPUPercent)", idleCPU < Budgets.idleCPUPercent),
 				("idleFootprintMB < \(Budgets.idleFootprintMB)", idleFootprint < Budgets.idleFootprintMB),
 				("openFootprintMB < \(Budgets.openFootprintMB)", openFootprint < Budgets.openFootprintMB),
 				("openP95ms < \(Budgets.openP95ms)", p95 < Budgets.openP95ms),
 				("hiddenReleasesCards", hiddenOK),
-			]
-			let report: [String: Any] = [
+			] + hidden.failures.map { ($0, false) } + checks
+			let skips = BenchPlan.skips(path: path, screenRecording: screenRecording)
+			report.merge([
+				"path": path.rawValue,
+				"screenRecording": screenRecording,
+				"openMethod": openMethod,
+				"skipped": skips.map { ["check": $0.check, "reason": $0.reason] },
 				"clips": controller.model.clips.count,
-				"idleSeconds": idleSeconds,
+				"idleSeconds": options.idleSeconds,
 				"idleCPUPercent": (idleCPU * 1_000).rounded() / 1_000,
 				"idleFootprintMB": (idleFootprint * 10).rounded() / 10,
 				"openFootprintMB": (openFootprint * 10).rounded() / 10,
@@ -155,6 +273,12 @@ enum Bench {
 				"stripWidthPoints": controller.panel.frame.width,
 				"backingScale": controller.panel.backingScaleFactor,
 				"hiddenReleasesCards": hiddenOK,
+				"hidden": [
+					"bodies": idle.bodies, "layerDisplays": idle.layerDisplays, "displayLinkTicks": idle.displayLinkTicks,
+					"windowsOnScreen": windowsOnScreen,
+					"controlBodies": control.bodies, "controlLayerDisplays": control.layerDisplays,
+					"displayLinks": "Copia owns no display link, so displayLinkTicks stays 0 by construction",
+				] as [String: Any],
 				"failed": checks.filter { !$0.1 }.map(\.0),
 				"arch": {
 					#if arch(arm64)
@@ -163,9 +287,9 @@ enum Bench {
 					"x86_64"
 					#endif
 				}(),
-			]
+			]) { _, new in new }
 			let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-			if let json { try data.write(to: json) }
+			if let json = options.json { try data.write(to: json) }
 			print(String(decoding: data, as: UTF8.self))
 			return checks.allSatisfy(\.1) ? 0 : 1
 		} catch {
@@ -182,11 +306,15 @@ enum Main {
 		func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
 		let app = NSApplication.shared
 		app.setActivationPolicy(.accessory)
+		var options = Bench.Options()
+		options.json = value("--json").map { URL(fileURLWithPath: $0) }
+		options.idleSeconds = value("--idle").flatMap(Double.init) ?? 60
+		options.opens = value("--opens").flatMap(Int.init) ?? 50
+		options.width = value("--width").flatMap(Double.init)
+		options.noSCK = args.contains("--no-sck")
+		options.motionRounds = value("--motion-rounds").flatMap(Int.init) ?? 3
 		Task {
-			let code = await Bench.run(json: value("--json").map { URL(fileURLWithPath: $0) },
-				idleSeconds: Double(value("--idle") ?? "60") ?? 60, opens: Int(value("--opens") ?? "50") ?? 50,
-				width: value("--width").flatMap(Double.init))
-			exit(code)
+			exit(await Bench.run(options))
 		}
 		app.run()
 	}

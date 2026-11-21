@@ -24,7 +24,10 @@ public final class StripPanel: NSPanel {
 		isReleasedWhenClosed = false
 		host.sizingOptions = []
 		host.autoresizingMask = [.width, .height]
-		contentView = host
+		let root = CountingRootView()
+		root.wantsLayer = true
+		root.addSubview(host)
+		contentView = root
 	}
 
 	override public var canBecomeKey: Bool { true }
@@ -50,4 +53,22 @@ public final class StripPanel: NSPanel {
 		resignKey()
 		orderOut(nil)
 	}
+}
+
+/// The panel's root layer. Every display and draw is counted, so the benchmark can show a hidden strip draws nothing.
+public final class CountingRootLayer: CALayer {
+	override public func display() {
+		MainActor.assumeIsolated { Diagnostics.layerDisplay() }
+		super.display()
+	}
+
+	override public func draw(in ctx: CGContext) {
+		MainActor.assumeIsolated { Diagnostics.layerDisplay() }
+		super.draw(in: ctx)
+	}
+}
+
+/// The panel's content view: holds the hosting view on a counting root layer.
+final class CountingRootView: NSView {
+	override func makeBackingLayer() -> CALayer { CountingRootLayer() }
 }
