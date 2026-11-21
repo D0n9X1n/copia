@@ -94,6 +94,15 @@ public enum Theme {
 		top * alpha + bottom * (1 - alpha)
 	}
 
+	/// Pure black or pure white, whichever contrasts more with `background`; always ≥ 4.58:1.
+	static func extremeInk(on background: SIMD3<Double>) -> SIMD3<Double> {
+		let black = SIMD3<Double>(0, 0, 0), white = SIMD3<Double>(1, 1, 1)
+		return contrast(black, background) >= contrast(white, background) ? black : white
+	}
+
+	/// The hex label's ink on a color swatch.
+	static func swatchInk(on swatch: SIMD3<Double>) -> SIMD3<Double> { extremeInk(on: swatch) }
+
 	/// The lowest contrast of header ink over any allowed tint band, composited over the card.
 	static func minimumHeaderContrast(dark: Bool) -> Double {
 		let card = rgb(dark ? Hex.cardDark : Hex.cardLight)

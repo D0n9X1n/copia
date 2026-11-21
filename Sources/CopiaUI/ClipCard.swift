@@ -327,12 +327,12 @@ private struct CardBody: View {
 	private var colorBody: some View {
 		let hex = clip.colorHex ?? clip.text
 		let rgb = Theme.rgb(UInt32(hex.dropFirst(), radix: 16) ?? 0)
-		let useDark = Theme.contrast(SIMD3(0.114, 0.114, 0.122), rgb) >= Theme.contrast(SIMD3(1, 1, 1), rgb)
+		let ink = Theme.swatchInk(on: rgb)
 		return ZStack {
 			Rectangle().fill(Color(.sRGB, red: rgb.x, green: rgb.y, blue: rgb.z))
 			Text(hex.uppercased())
 				.font(.system(size: 15, weight: .semibold, design: .monospaced))
-				.foregroundStyle(useDark ? Color(white: 0.11) : .white)
+				.foregroundStyle(Color(.sRGB, red: ink.x, green: ink.y, blue: ink.z))
 		}
 	}
 

@@ -38,4 +38,19 @@ import AppKit
 	@Test func unknownSourceUsesNeutralTint() {
 		#expect(Theme.sourceTint(for: nil) == Theme.neutralTint)
 	}
+
+	@Test(arguments: [(0xFFFFFF as UInt32, false), (0x000000, true), (0x808080, false)])
+	func swatchInkIsBlackOrWhiteAndReachesAA(hex: UInt32, expectWhite: Bool) {
+		let swatch = Theme.rgb(hex)
+		let ink = Theme.swatchInk(on: swatch)
+		#expect(ink == (expectWhite ? SIMD3(1, 1, 1) : SIMD3(0, 0, 0)))
+		#expect(Theme.contrast(ink, swatch) >= 4.5)
+	}
+
+	@Test func swatchInkReachesAAOnEveryGray() {
+		for v in 0...255 {
+			let swatch = SIMD3(repeating: Double(v) / 255)
+			#expect(Theme.contrast(Theme.swatchInk(on: swatch), swatch) >= 4.5)
+		}
+	}
 }
