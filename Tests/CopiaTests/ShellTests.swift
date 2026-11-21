@@ -69,3 +69,46 @@ import SwiftUI
 		#expect(Theme.contrast(label, sheen) >= 4.5)
 	}
 }
+
+/// Erase History asks first; only Erase in the confirmation runs the erase.
+@MainActor
+@Suite struct EraseConfirmationTests {
+	final class Spy { var erases = 0 }
+
+	static func model(_ spy: Spy) -> ShellModel {
+		let model = ShellModel()
+		model.erase = { spy.erases += 1 }
+		return model
+	}
+
+	@Test func requestOnlyAsks() {
+		let spy = Spy(), model = Self.model(spy)
+		model.requestErase()
+		#expect(model.eraseConfirmation)
+		#expect(spy.erases == 0)
+	}
+
+	@Test func confirmErasesOnce() {
+		let spy = Spy(), model = Self.model(spy)
+		model.requestErase()
+		model.confirmErase()
+		model.confirmErase()
+		#expect(spy.erases == 1)
+		#expect(!model.eraseConfirmation)
+	}
+
+	@Test func cancelLeavesDataUntouched() {
+		let spy = Spy(), model = Self.model(spy)
+		model.requestErase()
+		model.cancelErase()
+		model.confirmErase()
+		#expect(spy.erases == 0)
+		#expect(!model.eraseConfirmation)
+	}
+
+	@Test func confirmWithoutRequestDoesNothing() {
+		let spy = Spy(), model = Self.model(spy)
+		model.confirmErase()
+		#expect(spy.erases == 0)
+	}
+}
