@@ -32,7 +32,7 @@ swift build -c release --arch arm64 --arch x86_64
 
 `scripts/build-app.sh` 构建通用 release 二进制文件并组装 `dist/Copia.app`。应用包含有 KeyboardShortcuts 资源包，以及由 `actool` 从 `Resources/AppIcon.icon` 编译的图标。随后脚本使用 Apple Development 身份签名；如果二进制文件不同时包含 arm64 和 x86_64 两个架构就失败（`scripts/check-archs.sh`）；最后生成 `dist/Copia-0.0.1.zip`。在 CI 中使用 `--unsigned`。
 
-Garland 图标是一个 Icon Composer 包：三张卡片用黄色夹子挂在弧线上，背景为紫色渐变。六层 SVG 分别绘制卡片、卡片细节、夹子和弧线。macOS 27 会加上 Liquid Glass 材质、高光以及深色和着色变体。可用 `swift scripts/render-icon.swift dist/Copia.app icon.png` 预览。
+Garland 图标是一个 Icon Composer 包：三张卡片用黄色夹子挂在弧线上，背景为紫色渐变。六层 SVG 分别绘制卡片、卡片细节、夹子和弧线。macOS 27 会加上 Liquid Glass 材质和高光。浅色与深色外观都使用选定的浅色图案：紫色背景和白色卡片。可用 `swift scripts/render-icon.swift dist/Copia.app icon.png` 预览。
 
 ### CI
 

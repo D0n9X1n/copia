@@ -183,12 +183,12 @@ enum ReadmeRunner {
 	}
 }
 
-/// Copia's icon exported from the Icon Composer document, so each appearance gets its own variant.
+/// Copia's light Garland artwork, shared by both appearances.
 enum AppIcons {
 	static let ictool = ProcessInfo.processInfo.environment["ICTOOL"]
 		?? "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
 
-	/// Exports `Default` and `Dark` renditions at 1024 px into `directory`.
+	/// Exports both native renditions for review; user-facing content uses `Default` in both modes.
 	static func export(to directory: URL) throws {
 		try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 		for rendition in ["Default", "Dark"] {
@@ -204,7 +204,7 @@ enum AppIcons {
 		}
 	}
 
-	/// Light and dark icons on the macOS icon grid, for the onboarding window.
+	/// The same light icon on the macOS icon grid for both onboarding appearances.
 	@MainActor
 	static func images(in directory: URL) throws -> (light: NSImage, dark: NSImage) {
 		try export(to: directory)
@@ -212,12 +212,13 @@ enum AppIcons {
 			let cg = try padded(directory.appendingPathComponent("icon-\(rendition).png"), pixels: 512)
 			return NSImage(cgImage: cg, size: NSSize(width: 256, height: 256))
 		}
-		return (try load("Default"), try load("Dark"))
+		let light = try load("Default")
+		return (light, light)
 	}
 
 	/// The README header icons: 256 px, on the icon grid with a soft shadow.
 	static func writeReadmeIcons(from directory: URL, to output: URL) throws {
-		for (rendition, mode) in [("Default", "light"), ("Dark", "dark")] {
+		for (rendition, mode) in [("Default", "light"), ("Default", "dark")] {
 			let cg = try padded(directory.appendingPathComponent("icon-\(rendition).png"), pixels: 256)
 			let ctx = try context(width: cg.width, height: cg.height)
 			ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))

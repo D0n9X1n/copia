@@ -60,7 +60,8 @@ import CopiaFixtures
 	@Test func garlandPackageReferencesEveryLayerInFrontToBackOrder() throws {
 		let data = try Data(contentsOf: Self.assets.deletingLastPathComponent().appendingPathComponent("icon.json"))
 		let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-		let fill = try #require(json["fill"] as? [String: Any])
+		let fills = try #require(json["fill-specializations"] as? [[String: Any]])
+		let fill = try #require(fills.first { $0["appearance"] == nil }?["value"] as? [String: Any])
 		#expect(fill["linear-gradient"] as? [String] == [
 			"display-p3:0.71440,0.49450,0.97025,1.00000", "display-p3:0.38364,0.15943,0.80706,1.00000"
 		])
@@ -96,6 +97,16 @@ import CopiaFixtures
 			#expect(details.filter { $0.contains("fill=\"#C07BFF\"") && $0.contains("height=\"62\"") }.count == 1)
 			#expect(details.filter { $0.contains("fill=\"#1D1D1F\"") && $0.contains("fill-opacity=\"0.2\"") }.count == 2)
 		}
+	}
+
+	@Test func darkAppearanceKeepsTheLightGarlandArtwork() throws {
+		let data = try Data(contentsOf: Self.assets.deletingLastPathComponent().appendingPathComponent("icon.json"))
+		let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+		let fills = try #require(json["fill-specializations"] as? [[String: Any]])
+		let light = try #require(fills.first { $0["appearance"] == nil }?["value"] as? [String: Any])
+		let dark = try #require(fills.first { $0["appearance"] as? String == "dark" }?["value"] as? [String: Any])
+		#expect(light["linear-gradient"] as? [String] == dark["linear-gradient"] as? [String])
+
 	}
 
 }

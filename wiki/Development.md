@@ -32,7 +32,7 @@ Tests use Swift Testing and need no environment variables. The store tests run a
 
 `scripts/build-app.sh` builds a universal release binary and assembles `dist/Copia.app`. The bundle includes the KeyboardShortcuts resource bundle and the icon compiled by `actool` from `Resources/AppIcon.icon`. The script then signs with the Apple Development identity, fails unless the binary has both the arm64 and the x86_64 slice (`scripts/check-archs.sh`), and writes `dist/Copia-0.0.1.zip`. Use `--unsigned` in CI.
 
-The Garland icon is an Icon Composer package: three cards hanging from a curved line with yellow pegs over a violet gradient. Six SVG layers separate the cards, their details, the pegs and the line. macOS 27 adds the Liquid Glass material, highlights and the dark and tinted variants. Preview it with `swift scripts/render-icon.swift dist/Copia.app icon.png`.
+The Garland icon is an Icon Composer package: three cards hanging from a curved line with yellow pegs over a violet gradient. Six SVG layers separate the cards, their details, the pegs and the line. macOS 27 adds the Liquid Glass material and highlights. Both light and dark appearances keep the chosen light artwork: a violet background and white cards. Preview it with `swift scripts/render-icon.swift dist/Copia.app icon.png`.
 
 ### CI
 
