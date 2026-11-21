@@ -45,7 +45,7 @@ import CopiaFixtures
 		let rects = svg.matches(of: /<rect\b[^>]*>/).map { String($0.output) }
 		let header = try #require(rects.first { $0.contains("fill=\"#8A3CF0\"") })
 		#expect(header.contains("height=\"74\""))
-		#expect(!header.contains("fill-opacity"))
+		#expect(!header.contains("opacity"))
 		#expect(rects.filter { $0.contains("fill=\"#1D1D1F\"") && $0.contains("fill-opacity=\"0.2\"") }.count == 3)
 	}
 
@@ -60,12 +60,42 @@ import CopiaFixtures
 	@Test func garlandPackageReferencesEveryLayerInFrontToBackOrder() throws {
 		let data = try Data(contentsOf: Self.assets.deletingLastPathComponent().appendingPathComponent("icon.json"))
 		let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+		let fill = try #require(json["fill"] as? [String: Any])
+		#expect(fill["linear-gradient"] as? [String] == [
+			"display-p3:0.71440,0.49450,0.97025,1.00000", "display-p3:0.38364,0.15943,0.80706,1.00000"
+		])
 		let groups = try #require(json["groups"] as? [[String: Any]])
 		let layers = groups.flatMap { $0["layers"] as? [[String: Any]] ?? [] }
+		let side = try #require(layers.first { $0["image-name"] as? String == "side-cards.svg" })
+		#expect(side["opacity"] as? Double == 0.84)
+		let front = try #require(layers.first { $0["image-name"] as? String == "front-details.svg" })
+		#expect((front["opacity"] as? Double ?? 1) == 1)
+		let frontGroup = try #require(groups.first)
+		#expect((frontGroup["opacity"] as? Double ?? 1) == 1)
 		let names = layers.compactMap { $0["image-name"] as? String }
 		#expect(names == ["pegs.svg", "front-details.svg", "front-card.svg", "side-details.svg", "side-cards.svg", "line.svg"])
 		for name in names { #expect(FileManager.default.fileExists(atPath: Self.assets.appendingPathComponent(name).path)) }
 		#expect(layers.filter { $0["glass"] as? Bool == true }.compactMap { $0["image-name"] as? String }
 			== ["front-card.svg", "side-cards.svg"])
 	}
+
+	@Test func garlandHasTwoTiltedSideCardsWithHeadersAndBars() throws {
+		let cards = try String(contentsOf: Self.assets.appendingPathComponent("side-cards.svg"), encoding: .utf8)
+		let rects = cards.matches(of: /<rect\b[^>]*>/).map { String($0.output) }
+		#expect(rects.count == 2)
+		for rect in rects {
+			#expect(rect.contains("width=\"220\"") && rect.contains("height=\"280\""))
+			#expect(rect.contains("fill=\"#FFFFFF\""))
+		}
+		#expect(cards.contains("rotate(-9 306 330)") && cards.contains("rotate(9 718 330)"))
+		let details = try String(contentsOf: Self.assets.appendingPathComponent("side-details.svg"), encoding: .utf8)
+		let groups = details.matches(of: /<g transform="rotate\([^"]*\)">.*?<\/g><rect.*?<\/g>/).map { String($0.output) }
+		#expect(groups.count == 2)
+		for group in groups {
+			let details = group.matches(of: /<rect\b[^>]*>/).map { String($0.output) }
+			#expect(details.filter { $0.contains("fill=\"#C07BFF\"") && $0.contains("height=\"62\"") }.count == 1)
+			#expect(details.filter { $0.contains("fill=\"#1D1D1F\"") && $0.contains("fill-opacity=\"0.2\"") }.count == 2)
+		}
+	}
+
 }
