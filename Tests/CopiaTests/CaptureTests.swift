@@ -10,7 +10,8 @@ private func draft(_ items: PasteboardItemData..., at date: Date = .distantPast)
 	ClipDraft(items: items, copiedAt: date)
 }
 
-private func t(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: 1_800_000_000 + seconds) }
+/// A monotonic timestamp for ActivationLog, in seconds.
+private func t(_ seconds: TimeInterval) -> TimeInterval { 1_000 + seconds }
 
 @Suite struct CaptureTests {
 	@Test func classifiesEveryKind() {
@@ -120,6 +121,20 @@ private func t(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: 1_
 		late.roll(at: t(0.5))
 		late.activated("com.1password.1password", at: t(0.4))
 		#expect(late.candidates(until: t(1.0), currentFrontmost: "com.apple.Safari") == ["com.1password.1password", "com.apple.Safari"])
+	}
+
+	/// The app frontmost at poll time is always a candidate, whatever the stamps say: an ignored app in front always skips.
+	@Test func theFrontmostAppAtPollTimeIsAlwaysACandidate() {
+		// The reviewer's sequence: an editor at 100, the ignored app stamped 99.8, a poll at 99.9 with it still in front.
+		var stepped = ActivationLog(frontmost: "com.apple.TextEdit", at: t(100))
+		stepped.activated("com.1password.1password", at: t(99.8))
+		let candidates = stepped.candidates(until: t(99.9), currentFrontmost: "com.1password.1password")
+		#expect(candidates.contains("com.1password.1password"))
+		#expect(Capture.decide(types: [PasteboardTypes.string], draft: draft(item((PasteboardTypes.string, "secret"))),
+			candidates: candidates, ignoredApps: ["com.1password.1password"]) == .skipIgnoredApp)
+		// Its activation was never logged at all.
+		var missed = ActivationLog(frontmost: "com.apple.TextEdit", at: t(0))
+		#expect(missed.candidates(until: t(0.5), currentFrontmost: "com.1password.1password").contains("com.1password.1password"))
 	}
 
 	@Test func aWindowClosedWithoutACopyDropsTheAppsItSaw() {

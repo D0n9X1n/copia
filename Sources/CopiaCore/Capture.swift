@@ -115,35 +115,39 @@ public enum Capture {
 
 /// Every app activation with its timestamp. A poll's window runs from the previous poll to this one, and its
 /// candidates are the apps frontmost at any time in it: the one in front when it opened, then each activated in it.
+/// Times are seconds on a monotonic clock (the watcher uses system uptime), never the wall clock, which can step back.
 public struct ActivationLog: Sendable {
 	/// Sorted by time; equal times keep the order they were logged in.
-	private var entries: [(bundleID: String, at: Date)] = []
-	private var windowStart: Date
+	private var entries: [(bundleID: String, at: TimeInterval)] = []
+	private var windowStart: TimeInterval
 
-	public init(frontmost: String? = nil, at time: Date) {
+	public init(frontmost: String? = nil, at time: TimeInterval) {
 		windowStart = time
 		if let frontmost { entries = [(frontmost, time)] }
 	}
 
-	public mutating func activated(_ bundleID: String, at time: Date) {
+	public mutating func activated(_ bundleID: String, at time: TimeInterval) {
 		let index = entries.lastIndex { $0.at <= time }.map { $0 + 1 } ?? 0
 		entries.insert((bundleID, time), at: index)
 	}
 
 	/// Every app that could have made the copy seen at the poll at `now`, then closes the window there.
-	/// The poll's own reading of the frontmost app counts as an activation at `now`.
-	public mutating func candidates(until now: Date, currentFrontmost: String?) -> [String] {
+	/// The poll's own reading of the frontmost app counts as an activation at `now`, and that app is always a
+	/// candidate, so an ignored app in front at the poll always skips the copy.
+	public mutating func candidates(until now: TimeInterval, currentFrontmost: String?) -> [String] {
 		if let currentFrontmost { activated(currentFrontmost, at: now) }
 		let opening = entries.last { $0.at <= windowStart }.map(\.bundleID)
 		let during = entries.filter { $0.at > windowStart && $0.at <= now }.map(\.bundleID)
 		var seen: [String] = []
-		for id in [opening].compactMap({ $0 }) + during where !seen.contains(id) { seen.append(id) }
+		for id in [opening].compactMap({ $0 }) + during + [currentFrontmost].compactMap({ $0 }) where !seen.contains(id) {
+			seen.append(id)
+		}
 		roll(at: now)
 		return seen
 	}
 
 	/// Closes the window at a poll with no copy. Keeps the app in front at `now` and anything stamped later.
-	public mutating func roll(at now: Date) {
+	public mutating func roll(at now: TimeInterval) {
 		if let base = entries.lastIndex(where: { $0.at <= now }) { entries.removeFirst(base) }
 		windowStart = now
 	}

@@ -39,7 +39,10 @@ public final class PasteboardWatcher {
 	public private(set) var lastDecision: Capture.Decision?
 
 	let source: PasteboardSource
+	/// Stamps copies.
 	let now: () -> Date
+	/// Stamps activations and polls: monotonic, so a wall clock that steps back cannot reorder the windows.
+	let uptime: () -> TimeInterval
 	let frontmost: () -> String?
 	let appName: (String) -> String?
 	private var lastChange: Int
@@ -49,6 +52,7 @@ public final class PasteboardWatcher {
 
 	public init(source: PasteboardSource = GeneralPasteboard(), ignoredApps: Set<String> = [],
 		now: @escaping () -> Date = Date.init,
+		uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
 		frontmost: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
 		appName: @escaping (String) -> String? = { id in
 			NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.localizedName
@@ -57,10 +61,11 @@ public final class PasteboardWatcher {
 		self.source = source
 		self.ignoredApps = ignoredApps
 		self.now = now
+		self.uptime = uptime
 		self.frontmost = frontmost
 		self.appName = appName
 		lastChange = source.changeCount
-		log = ActivationLog(frontmost: frontmost(), at: now())
+		log = ActivationLog(frontmost: frontmost(), at: uptime())
 	}
 
 	public func start() {
@@ -85,18 +90,18 @@ public final class PasteboardWatcher {
 	}
 
 	/// Logs an activation at the time it is reported.
-	public func appActivated(_ bundleID: String) { log.activated(bundleID, at: now()) }
+	public func appActivated(_ bundleID: String) { log.activated(bundleID, at: uptime()) }
 
 	public func setPaused(_ value: Bool) {
 		paused = value
 		// Resuming starts from the current contents, so anything copied while paused is never captured.
-		if !value { lastChange = source.changeCount; _ = log.candidates(until: now(), currentFrontmost: frontmost()) }
+		if !value { lastChange = source.changeCount; _ = log.candidates(until: uptime(), currentFrontmost: frontmost()) }
 	}
 
 	/// One poll. Called by the timer; tests call it directly.
 	public func tick() {
 		let change = source.changeCount
-		let pollTime = now()
+		let pollTime = uptime()
 		// Every poll closes the window, so only apps in front since the previous poll can count as the source.
 		guard change != lastChange else { log.roll(at: pollTime); return }
 		lastChange = change

@@ -7,6 +7,8 @@ import CopiaCore
 final class FaultyFiles: FileOps, @unchecked Sendable {
 	let live = LiveFileOps()
 	var failMoveContaining: String?
+	/// Matches only the source path, so a rollback move out of trash can fail while the move into trash succeeds.
+	var failMoveFromContaining: String?
 	var failWriteContaining: String?
 	var failRemoveContaining: String?
 	func write(_ data: Data, to url: URL) throws {
@@ -15,6 +17,7 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 	}
 	func move(_ from: URL, to: URL) throws {
 		if let f = failMoveContaining, from.path.contains(f) || to.path.contains(f) { failMoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
+		if let f = failMoveFromContaining, from.path.contains(f) { failMoveFromContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.move(from, to: to)
 	}
 	func remove(_ url: URL) throws {
@@ -158,6 +161,66 @@ private func fileCount(_ dir: URL, _ sub: String) -> Int {
 		await store.failNextWrite()
 		await #expect(throws: StoreError.self) { try await store.delete(clip.key) }
 		try await expectWhole(store, dir, clip)
+		try await store.sweep()
+		try await expectWhole(store, dir, clip)
+	}
+
+	/// The thumbnail fails to reach trash and the blob cannot move back: the delete throws, and the blob sits in trash
+	/// under a row that is still live.
+	private func strandBlobInTrash(_ store: ClipStore, _ dir: URL, _ faulty: FaultyFiles) async throws -> StoredClip {
+		let (clip, _) = try await store.insert(text("keep me"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		faulty.failMoveContaining = "thumbs/"
+		faulty.failMoveFromContaining = "trash/\(clip.key).plist"
+		await #expect(throws: (any Error).self) { try await store.delete(clip.key) }
+		#expect(try await store.fetch(clip.key) != nil)
+		#expect(fileCount(dir, "blobs") == 0 && fileCount(dir, "trash") == 1)
+		return clip
+	}
+
+	/// Every pass that empties or cleans files first moves a live row's stranded blob home, so the row stays whole.
+	@Test(arguments: ["emptyTrash", "sweep", "removeOrphans"])
+	func aBlobStrandedByAFailedDeleteRollbackGoesHomeBeforeCleanup(pass: String) async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let clip = try await strandBlobInTrash(store, dir, faulty)
+		switch pass {
+		case "emptyTrash": await store.emptyTrash()
+		case "sweep": try await store.sweep()
+		default: try await store.removeOrphans()
+		}
+		try await expectWhole(store, dir, clip)
+		try await store.sweep()
+		try await expectWhole(store, dir, clip)
+	}
+
+	/// The row delete fails and the thumbnail cannot move back: emptying trash moves it home instead of removing it.
+	@Test func aThumbnailStrandedByAFailedDeleteRollbackGoesHome() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let (clip, _) = try await store.insert(text("keep me"))
+		try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, image: Data([1]))
+		await store.failNextWrite()
+		faulty.failMoveFromContaining = "trash/\(clip.key).png"
+		await #expect(throws: StoreError.self) { try await store.delete(clip.key) }
+		#expect(fileCount(dir, "thumbs") == 0 && fileCount(dir, "trash") == 1)
+		await store.emptyTrash()
+		try await expectWhole(store, dir, clip)
+	}
+
+	/// If moving the stranded blob home fails too, it stays in trash and its row stays live; a later pass recovers it.
+	@Test func aStrandedBlobWhoseMoveHomeFailsIsKeptNotRemoved() async throws {
+		let faulty = FaultyFiles()
+		let (store, dir) = try tempStore(files: faulty); defer { try? FileManager.default.removeItem(at: dir) }
+		let clip = try await strandBlobInTrash(store, dir, faulty)
+		faulty.failMoveContaining = "trash/\(clip.key).plist"
+		await store.emptyTrash()
+		#expect(try await store.fetch(clip.key) != nil)
+		#expect(fileCount(dir, "trash") == 1)
+		faulty.failMoveContaining = "trash/\(clip.key).plist"
+		try await store.sweep()
+		#expect(try await store.fetch(clip.key) != nil)
+		#expect(fileCount(dir, "trash") == 1)
 		try await store.sweep()
 		try await expectWhole(store, dir, clip)
 	}

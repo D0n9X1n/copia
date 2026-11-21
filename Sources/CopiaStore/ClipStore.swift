@@ -182,6 +182,8 @@ public actor ClipStore {
 
 	/// Moves the clip's files to trash for undo, then removes the row and FTS entry in one transaction.
 	/// Either all of it happens or nothing does: a failed move or row delete puts the moved files back and throws.
+	/// A file that cannot move back stays in trash under its live row; `emptyTrash`, `removeOrphans` and `sweep`
+	/// move it home before they remove anything.
 	public func delete(_ key: String) throws -> DeletedClip? {
 		guard let clip = try fetch(key) else { return nil }
 		var moved: [(file: URL, trashed: URL)] = []
@@ -225,8 +227,32 @@ public actor ClipStore {
 	}
 
 	/// Best effort: trash only holds undo copies of items already deleted.
+	/// A trash file whose row is still live is moved home, never removed. If the live rows or the trash cannot be
+	/// read, nothing is removed.
 	public func emptyTrash() {
-		for url in (try? files.list(trash)) ?? [] { try? files.remove(url) }
+		guard let keys = try? Set(strings("SELECT id FROM clips", [])), let listed = try? files.list(trash) else { return }
+		emptyTrash(listed, live: keys)
+	}
+
+	/// Moves each trash file whose key has a live row back to its empty home path, then removes every other trash
+	/// file. A file whose move home fails stays in trash; returns the keys whose blob is still there.
+	@discardableResult
+	private func emptyTrash(_ listed: [URL], live keys: Set<String>) -> Set<String> {
+		var kept = Set<URL>(), stuckBlobs = Set<String>()
+		for url in listed {
+			let key = url.deletingPathExtension().lastPathComponent
+			let home: URL? = switch url.pathExtension {
+			case "plist": blobURL(key)
+			case "png": thumbURL(key)
+			default: nil
+			}
+			// A home copy that already exists is the live one; the trash copy is redundant and goes below.
+			guard keys.contains(key), let home, !files.exists(home) else { continue }
+			kept.insert(url)
+			do { try files.move(url, to: home) } catch { if url.pathExtension == "plist" { stuckBlobs.insert(key) } }
+		}
+		for url in listed where !kept.contains(url) { try? files.remove(url) }
+		return stuckBlobs
 	}
 
 	/// Deletes clips last copied before `cutoff`, with their FTS entries and files.
@@ -263,25 +289,27 @@ public actor ClipStore {
 		if left > 0 { throw StoreError.filesLeft(left) }
 	}
 
-	/// The hourly pass: removes blob and thumbnail files that have no row, left by a delete, prune or erase whose
-	/// removal failed. Trash is left alone, so an open undo survives.
+	/// The hourly pass: moves a live row's files home from trash (a delete whose rollback failed), then removes blob
+	/// and thumbnail files that have no row, left by a prune or erase whose removal failed. Undo copies in trash stay.
 	public func removeOrphans() throws {
 		let keys = Set(try strings("SELECT id FROM clips", []))
+		emptyTrash(((try? files.list(trash)) ?? []).filter { keys.contains($0.deletingPathExtension().lastPathComponent) }, live: keys)
 		for url in try files.list(blobs) + files.list(thumbs) where !keys.contains(url.deletingPathExtension().lastPathComponent) {
 			try? files.remove(url)
 		}
 	}
 
-	/// Launch cleanup: empty trash, drop files without rows and rows without blobs.
+	/// Launch cleanup: move live rows' files home from trash, empty trash, drop files without rows and rows without blobs.
 	/// Rows are dropped only for blobs a successful listing shows are absent; a folder that cannot be read stops the sweep.
 	public func sweep() throws {
-		emptyTrash()
 		let keys = Set(try strings("SELECT id FROM clips", []))
+		// A blob that still cannot move home is in trash, not lost: its row stays.
+		let stuck = emptyTrash(try files.list(trash), live: keys)
 		let blobFiles = try files.list(blobs), thumbFiles = try files.list(thumbs)
 		for url in blobFiles + thumbFiles where !keys.contains(url.deletingPathExtension().lastPathComponent) {
 			try? files.remove(url)
 		}
-		let present = Set(blobFiles.map { $0.deletingPathExtension().lastPathComponent })
+		let present = Set(blobFiles.map { $0.deletingPathExtension().lastPathComponent }).union(stuck)
 		let missing = keys.subtracting(present)
 		if !missing.isEmpty {
 			try transaction {
