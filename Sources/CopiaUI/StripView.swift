@@ -349,7 +349,11 @@ struct CardAccessibility {
 	var label: String {
 		let kind = CardPresentation(clip: clip).typeLabel
 		let source = clip.sourceName ?? "Unknown app"
-		let age = ClipCard.relative(clip.timestamp, now: now)
-		return "\(kind) from \(source), \(age == "Now" ? "just now" : age + " ago"): \(preview)"
+		let spoken = switch ClipCard.relative(clip.timestamp, now: now) {
+		case "Now": "just now"
+		case "Yesterday": "yesterday"
+		case let age: age + " ago"
+		}
+		return "\(kind) from \(source), \(spoken): \(preview)"
 	}
 }

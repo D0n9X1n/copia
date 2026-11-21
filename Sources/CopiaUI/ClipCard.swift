@@ -214,7 +214,7 @@ struct ClipCard: View {
 		.frame(height: Theme.footerHeight)
 	}
 
-	static func relative(_ date: Date, now: Date) -> String {
+	nonisolated static func relative(_ date: Date, now: Date) -> String {
 		let seconds = max(0, now.timeIntervalSince(date))
 		switch seconds {
 		case ..<60: return "Now"
