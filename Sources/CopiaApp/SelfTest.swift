@@ -43,8 +43,18 @@ public enum SelfTest {
 		var violations: [String] = []
 		let identity = ObjectIdentifier(controller.panel).debugDescription
 
-		for (index, screen) in NSScreen.screens.enumerated() {
+		let screens = NSScreen.screens
+		cycles: for (index, screen) in screens.enumerated() {
 			for cycle in 0..<10 {
+				let tag = "display \(index) cycle \(cycle)", closeCount = controller.model.closeCount
+				guard !controller.panel.isVisible, !controller.model.cardsMounted, !controller.model.isClosing else {
+					violations.append("\(tag): history was not closed at cycle start")
+					break cycles
+				}
+				func samePresentation() -> Bool {
+					controller.panel.isVisible && controller.panel.isKeyWindow && controller.model.cardsMounted
+						&& !controller.model.isClosing && controller.model.closeCount == closeCount
+				}
 				controller.toggleHistory(on: screen)
 				try? await Task.sleep(for: .milliseconds(cycle == 0 && index == 0 ? Int(hold * 1000) : 250))
 				// The frame the strip should fill: the screen it opened on, or the benchmark's override.
@@ -52,7 +62,7 @@ public enum SelfTest {
 				let frameProblems = visible.map { Self.frameViolations(panel: controller.panel.frame, visible: $0) }
 					?? ["panel is on no screen"]
 				// Type one character through the window server's key path, as a user would.
-				let typed = Self.type("q", into: controller.panel)
+				let typed = samePresentation() && Self.type("q", into: controller.panel)
 				try? await Task.sleep(for: .milliseconds(60))
 				let query = controller.model.query
 				controller.model.query = ""
@@ -64,12 +74,15 @@ public enum SelfTest {
 					frameProblems: frameProblems,
 					typedQuery: typed ? query : "<not sent>",
 					cardsMountedAfterClose: false)
-				controller.toggleHistory(on: screen)
+				if samePresentation() {
+					controller.toggleHistory(on: screen)
+				} else {
+					violations.append("\(tag): history presentation interrupted")
+				}
 				try? await Task.sleep(for: .milliseconds(400))
 				sample.cardsMountedAfterClose = controller.model.cardsMounted || controller.panel.isVisible
 				samples.append(sample)
 
-				let tag = "display \(index) cycle \(cycle)"
 				if sample.panelIdentity != identity { violations.append("\(tag): panel recreated") }
 				if !sample.panelVisible { violations.append("\(tag): panel not visible") }
 				if !sample.panelIsKey { violations.append("\(tag): panel not key, typing would not reach search") }
@@ -78,26 +91,32 @@ public enum SelfTest {
 				for problem in sample.frameProblems { violations.append("\(tag): \(problem)") }
 				if sample.typedQuery != "q" { violations.append("\(tag): typing reached \"\(sample.typedQuery)\", not the search") }
 				if sample.cardsMountedAfterClose { violations.append("\(tag): still visible after close") }
+				if !violations.isEmpty { break cycles }
 			}
 		}
 
-		let pid = ProcessInfo.processInfo.processIdentifier
-		let initiallyInactive = NSWorkspace.shared.frontmostApplication?.processIdentifier != pid
-		controller.model.actions.openSettings()
-		let settings = controller.settings()
-		for _ in 0..<100 where !settings.isKeyWindow || !settings.isMainWindow || NSWorkspace.shared.frontmostApplication?.processIdentifier != pid { try? await Task.sleep(for: .milliseconds(10)) }
-		let settingsFirstAction = initiallyInactive && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && settings.isVisible && settings.isKeyWindow && settings.isMainWindow
-		if !settingsFirstAction { violations.append("one Settings action did not activate the inactive app and its window") }
-		controller.openSettings()
-		if settings !== controller.settings() { violations.append("a repeated Settings action created another window") }
-		settings.orderOut(nil)
+		var settingsFirstAction = false
+		if !screens.isEmpty, violations.isEmpty, samples.count == screens.count * 10 {
+			let pid = ProcessInfo.processInfo.processIdentifier
+			let initiallyInactive = NSWorkspace.shared.frontmostApplication?.processIdentifier != pid
+			controller.model.actions.openSettings()
+			let settings = controller.settings()
+			for _ in 0..<100 where !settings.isKeyWindow || !settings.isMainWindow || NSWorkspace.shared.frontmostApplication?.processIdentifier != pid { try? await Task.sleep(for: .milliseconds(10)) }
+			settingsFirstAction = initiallyInactive && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && settings.isVisible && settings.isKeyWindow && settings.isMainWindow
+			if !settingsFirstAction { violations.append("one Settings action did not activate the inactive app and its window") }
+			controller.openSettings()
+			if settings !== controller.settings() { violations.append("a repeated Settings action created another window") }
+			settings.orderOut(nil)
+		} else if violations.isEmpty {
+			violations.append("no complete display cycles")
+		}
 
 		let report: [String: Any] = [
 			"schema": 4,
 			"settingsFirstAction": settingsFirstAction,
 			// A full-screen Space cannot be entered from a script reliably; run the same check by hand over one.
 			"fullScreenSpace": "manual",
-			"displays": NSScreen.screens.count,
+			"displays": screens.count,
 			"cycles": samples.count,
 			"violations": violations,
 			"samples": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(samples))) ?? [],

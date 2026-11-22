@@ -4,7 +4,12 @@
 
 ### Install
 
-Download the universal `Copia-<version>.zip` from [GitHub Releases](https://github.com/D0n9X1n/copia/releases), unzip it and move `Copia.app` to `/Applications`. Both the Apple silicon and Intel slices require macOS 26 or later. See **Verification** in the notes for that release for actual runs on Intel hardware and macOS 26. Compare the ZIP’s SHA-256 with the accompanying `.sha256` file before extracting.
+From [GitHub Releases](https://github.com/D0n9X1n/copia/releases), download the app for your Mac's chip:
+
+- Apple silicon: `Copia-<version>-arm64.zip`
+- Intel: `Copia-<version>-x86_64.zip`
+
+Not sure which? Apple menu → **About This Mac** shows **Chip** on Apple silicon and **Processor** on Intel. Both require macOS 26 or later. Compare the ZIP’s SHA-256 with its `.sha256` file before extracting, then unzip it and move `Copia.app` to `/Applications`. See **Verification** in the notes for that release for actual runs on Intel hardware and macOS 26.
 
 This build is signed with an Apple Development certificate but not notarized, so macOS blocks the first launch. Open **System Settings → Privacy & Security**, find the message about Copia and click **Open Anyway**.
 

@@ -4,7 +4,10 @@
 
 Copia keeps clipboard history locally on your Mac. Press ⌘Y, choose a card, then press ⌘V in the destination app. Picking a card copies it; no Accessibility permission is needed. **Start with [Usage](Usage).**
 
-The universal build targets macOS 26 or later on both architectures. See **Verification** in the [release notes](https://github.com/D0n9X1n/copia/releases) for whether that version ran on native Intel hardware or macOS 26.
+Each release has two downloads for macOS 26 or later: `Copia-<version>-arm64.zip` for Apple silicon Macs.
+`Copia-<version>-x86_64.zip` is for Intel Macs.
+
+Each app contains only its own architecture. Not sure which? Apple menu → **About This Mac** shows **Chip** on Apple silicon and **Processor** on Intel. Compare the ZIP’s SHA-256 with its `.sha256` file before extracting. See **Verification** in the [release notes](https://github.com/D0n9X1n/copia/releases) for which Intel hardware and macOS versions it ran on.
 
 ### Pages
 

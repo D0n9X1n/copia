@@ -4,7 +4,12 @@
 
 ### 安装
 
-从 [GitHub Releases](https://github.com/D0n9X1n/copia/releases) 下载通用的 `Copia-<版本号>.zip`，解压后把 `Copia.app` 移到 `/Applications`。Apple 芯片和 Intel 两个架构均要求 macOS 26 或更高版本。该版本是否经过 Intel 实机或 macOS 26 测试，请看发布说明中的 **Verification**。解压前请用随附的 `.sha256` 文件核对 ZIP 的 SHA-256。
+从 [GitHub Releases](https://github.com/D0n9X1n/copia/releases) 下载与 Mac 芯片对应的应用：
+
+- Apple 芯片：`Copia-<版本号>-arm64.zip`
+- Intel：`Copia-<版本号>-x86_64.zip`
+
+不确定？打开苹果菜单 → **关于本机**：显示 **芯片** 为 Apple 芯片，显示 **处理器** 为 Intel。两者均要求 macOS 26 或更高版本。解压前请用对应的 `.sha256` 文件核对 ZIP 的 SHA-256，然后解压并把 `Copia.app` 移到 `/Applications`。该版本是否经过 Intel 实机或 macOS 26 测试，请看发布说明中的 **Verification**。
 
 此版本使用 Apple Development 证书签名，但未经公证，因此 macOS 会阻止首次启动。打开 **系统设置 → 隐私与安全性**，找到关于 Copia 的提示，点按 **仍要打开**。
 

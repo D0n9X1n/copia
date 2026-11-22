@@ -38,3 +38,41 @@ import CopiaUI
 		#expect(belowDock.contains { $0.contains("leaves the visible frame") })
 	}
 }
+
+extension WindowTests {
+	@MainActor @Suite struct PackageSmokeInputTests {
+		enum Interruption: CaseIterable, Sendable { case beforeTyping, afterTyping, replacedPresentation }
+
+		@Test(arguments: Interruption.allCases) func interruptedPresentationIsNotTypedIntoOrToggledOpenAgain(_ phase: Interruption) async throws {
+			let rig = try AppRig(), controller = rig.controller
+			let report = rig.dir.appendingPathComponent("interrupted-smoke.json")
+			defer { controller.model.beginClose() }
+			var openings = 0
+			controller.model.onOpenFinish = { [weak controller] in
+				openings += 1
+				if openings == 1, phase != .afterTyping {
+					controller?.model.beginClose()
+					if phase == .replacedPresentation { controller?.toggleHistory(on: NSScreen.screens.first) }
+				}
+			}
+			let interruption = Task { @MainActor in
+				guard phase == .afterTyping else { return false }
+				guard await eventually({ controller.model.query == "q" }) else { return false }
+				controller.model.beginClose()
+				return true
+			}
+			let result = await SelfTest.run(controller: controller, output: report, hold: 0.15)
+			#expect(await interruption.value == (phase == .afterTyping))
+			let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: report)) as? [String: Any])
+			let samples = try #require(json["samples"] as? [[String: Any]])
+			#expect(result != 0)
+			#expect(openings == (phase == .replacedPresentation ? 2 : 1) && samples.count == 1)
+			let first = try #require(samples.first)
+			#expect(first["typedQuery"] as? String == (phase == .afterTyping ? "q" : "<not sent>"))
+			#expect(first["cardsMountedAfterClose"] as? Bool == (phase == .replacedPresentation))
+			#expect(controller.panel.isVisible == (phase == .replacedPresentation))
+			#expect(controller.model.cardsMounted == (phase == .replacedPresentation))
+			#expect((json["violations"] as? [String])?.contains("display 0 cycle 0: history presentation interrupted") == true)
+		}
+	}
+}

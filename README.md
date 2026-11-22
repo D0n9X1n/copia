@@ -82,7 +82,11 @@
 
 ## Get started
 
-1. Download the universal `Copia-<version>.zip` from the [latest release](https://github.com/D0n9X1n/copia/releases/latest), unzip it and move `Copia.app` to `/Applications`. Both slices target macOS 26 or later. See **Verification** in that release’s notes for whether it ran on native Intel hardware or macOS 26.
+1. From the [latest release](https://github.com/D0n9X1n/copia/releases/latest), download the app for your Mac:
+   - Apple silicon: `Copia-<version>-arm64.zip`
+   - Intel: `Copia-<version>-x86_64.zip`
+
+   Not sure which? Apple menu → **About This Mac** shows **Chip** on Apple silicon and **Processor** on Intel. Compare the ZIP’s SHA-256 with its `.sha256` file, unzip it and move `Copia.app` to `/Applications`. Both require macOS 26 or later. See **Verification** in that release’s notes for which Intel hardware and macOS versions it ran on.
 2. Open it. This build is signed but not notarized, so macOS blocks the first launch: open **System Settings → Privacy & Security** and click **Open Anyway** next to the message about Copia.
 3. Allow **clipboard access** for history. Copia writes your selection to the clipboard; it never types into another app. Press **⌘V** yourself.
 
@@ -122,7 +126,7 @@ Copia builds with SwiftPM and the Xcode 27.2 toolchain:
 ```sh
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 swift build && swift test
-scripts/build-app.sh          # dist/Copia.app and the ZIP named for VERSION
+scripts/build-app.sh          # dist/<arch>/Copia.app and Copia-<VERSION>-<arch>.zip for arm64 and x86_64
 ```
 
 The screenshots above are rendered from fixture data by `scripts/readme-media.sh`. See [Development](wiki/Development.md) for the rest.

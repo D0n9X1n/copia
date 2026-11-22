@@ -17,6 +17,17 @@ class PackagePolicy(unittest.TestCase):
         self.assertRegex((ROOT / 'VERSION').read_text(), r'^\d+\.\d+\.\d+\n\Z')
         self.assertNotRegex(build, r'COPIA_VERSION:-\d')
 
+    def test_both_architectures_share_one_app_identity_and_history_location(self):
+        # Switching between the Apple silicon and Intel downloads must keep the same history and settings.
+        build = (ROOT / 'scripts/build-app.sh').read_text()
+        self.assertEqual(build.count('<key>CFBundleIdentifier</key><string>app.copia.Copia</string>'), 1)
+        self.assertNotRegex(build, r'CFBundleIdentifier.*\$arch')
+        live = (ROOT / 'Sources/CopiaApp/AppController.swift').read_text().split('public static func live()', 1)[1].split('\n\t}', 1)[0]
+        self.assertIn('.applicationSupportDirectory, in: .userDomainMask', live)
+        self.assertIn('.appendingPathComponent("Copia", isDirectory: true)', live)
+        self.assertIn('defaults: .standard', live)
+        self.assertNotRegex(live, r'arm64|x86_64|#if arch')
+
     def test_stable_tag_matches_version_file_exactly(self):
         with tempfile.TemporaryDirectory() as folder:
             path = pathlib.Path(folder) / 'VERSION'

@@ -10,24 +10,31 @@ FAKE
 cat > "$work/xcrun" <<'FAKE'
 #!/bin/sh
 [ "$1" = vtool ] && [ "$2" = -arch ] && [ "$4" = -show-build ] && [ -f "$5" ] || exit 1
-case "$3" in arm64) floor=$ARM;; x86_64) floor=$INTEL;; *) exit 1;; esac
-printf 'Load command 1\n      cmd LC_BUILD_VERSION\n platform %s\n    minos %s\n      sdk 27.2\n' "${PLATFORM:-MACOS}" "$floor"
+case " $ARCHS " in *" $3 "*) ;; *) exit 1;; esac
+printf 'Load command 1\n      cmd LC_BUILD_VERSION\n platform %s\n    minos %s\n      sdk 27.2\n' "${PLATFORM:-MACOS}" "$FLOOR"
 FAKE
 chmod +x "$work/lipo" "$work/xcrun"; touch "$work/app"
 check() {
     local got=pass
-    PATH="$work:/usr/bin:/bin" ARCHS="$2" ARM="$3" INTEL="$4" PLATFORM="${5:-MACOS}" \
-        "$root/check-archs.sh" "$work/app" >/dev/null 2>&1 || got=fail
+    PATH="$work:/usr/bin:/bin" ARCHS="$3" FLOOR="$4" PLATFORM="${5:-MACOS}" \
+        "$root/check-archs.sh" "$work/app" "$2" >/dev/null 2>&1 || got=fail
     [ "$1" = "$got" ] || { echo "unexpected $got: $*"; exit 1; }
 }
-check pass 'arm64 x86_64' 26.0 26.0
-check pass 'x86_64 arm64' 26.0 26.0
-check pass ' x86_64   arm64 ' 26.0 26.0
-check fail 'arm64' 26.0 26.0
-check fail 'x86_64' 26.0 26.0
-check fail 'arm64 x86_64 arm64e' 26.0 26.0
-check fail 'arm64 x86_64' 26.1 26.0
-check fail 'arm64 x86_64' 26.0 25.0
-check fail 'arm64 x86_64' 26.0 ''
-check fail 'arm64 x86_64' 26.0 26.0 IOS
-echo 'ok   exact architecture set and macOS 26.0 per slice'
+check pass arm64 'arm64' 26.0
+check pass x86_64 'x86_64' 26.0
+check pass arm64 ' arm64 ' 26.0
+check fail arm64 'x86_64' 26.0
+check fail x86_64 'arm64' 26.0
+check fail arm64 'arm64 x86_64' 26.0
+check fail x86_64 'x86_64 arm64' 26.0
+check fail arm64 'arm64e' 26.0
+check fail arm64 '' 26.0
+check fail arm64 'arm64' 26.1
+check fail x86_64 'x86_64' 25.0
+check fail x86_64 'x86_64' ''
+check fail arm64 'arm64' 26.0 IOS
+check fail i386 'i386' 26.0
+check fail '' 'arm64' 26.0
+got=pass; PATH="$work:/usr/bin:/bin" ARCHS=arm64 FLOOR=26.0 "$root/check-archs.sh" "$work/app" >/dev/null 2>&1 || got=fail
+[ "$got" = fail ] || { echo 'missing architecture argument accepted'; exit 1; }
+echo 'ok   exactly the named architecture and macOS 26.0'

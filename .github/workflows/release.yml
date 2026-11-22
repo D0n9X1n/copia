@@ -50,7 +50,9 @@ jobs:
       id: ${{ steps.upload.outputs.artifact-id }}
       digest: ${{ steps.upload.outputs.artifact-digest }}
       coverage: ${{ steps.proof.outputs.coverage }}
-      zip-sha: ${{ steps.proof.outputs.zip-sha }}
+      toolchain: ${{ steps.proof.outputs.toolchain }}
+      zip-sha-arm64: ${{ steps.proof.outputs.zip-sha-arm64 }}
+      zip-sha-x86_64: ${{ steps.proof.outputs.zip-sha-x86_64 }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
@@ -58,6 +60,9 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.sha }}
           persist-credentials: false
+      - name: Require the native Apple silicon signer
+        run: |
+          native=$(scripts/prove-package.sh --native-arch); test "$native" = arm64
       - name: Signing keychain
         env:
           SIGNING_CERT_P12_BASE64: ${{ secrets.SIGNING_CERT_P12_BASE64 }}
@@ -74,13 +79,16 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/copia-signing.keychain-db"
           fi
           rm -f "$RUNNER_TEMP/copia-signing.p12" "$RUNNER_TEMP/AppleWWDRCAG3.cer"
-      - name: Verify archived code, deployment floors and native runtime
+      - name: Verify both archived apps, deployment floors and native arm64 runtime
         id: proof
         run: |
           WORK="$RUNNER_TEMP/copia-package-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           echo "WORK=$WORK" >> "$GITHUB_ENV"
           scripts/prove-package.sh signed "$WORK"
           printf 'coverage=%s\n' "$(cat "$WORK/coverage.txt")" >> "$GITHUB_OUTPUT"
+          sdk=$(xcrun --sdk macosx --show-sdk-version); xcode=$(xcodebuild -version); swift_version=$(swift --version 2>/dev/null)
+          toolchain=$(python3 -I scripts/package-proof.py toolchain "$sdk" "$xcode" "$swift_version")
+          printf 'toolchain=%s\n' "$toolchain" >> "$GITHUB_OUTPUT"
       - name: Upload exactly the verified public assets
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -97,8 +105,46 @@ jobs:
           printf 'Artifact SHA-256: %s\n\n' "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
           cat "$WORK/assets/"*.sha256 "$WORK/coverage.txt" >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
+  intel:
     needs: [validate, package]
+    runs-on: macos-26-intel
+    timeout-minutes: 20
+    outputs:
+      coverage: ${{ steps.smoke.outputs.coverage }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - name: Require native Intel on macOS 26
+        run: |
+          native=$(scripts/prove-package.sh --native-arch); test "$native" = x86_64
+          os=$(sw_vers -productVersion); [[ "$os" =~ ^26\.[0-9]+(\.[0-9]+)?$ ]]
+      - name: Receive the reviewed signed packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.package.outputs.id }}
+          DIGEST: ${{ needs.package.outputs.digest }}
+          ARM: ${{ needs.package.outputs.zip-sha-arm64 }}
+          INTEL: ${{ needs.package.outputs.zip-sha-x86_64 }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          version=$(python3 -I scripts/version.py VERSION "$GITHUB_REF_NAME")
+          work=$(mktemp -d "$RUNNER_TEMP/copia-intel.XXXXXX"); mkdir "$work/download"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$work/download/transport.zip"
+          python3 -I scripts/release-assets.py receive "$work/download/transport.zip" "$DIGEST" "$ARM" "$INTEL" "$version" "$work/assets"
+          printf 'WORK=%s\n' "$work" >> "$GITHUB_ENV"
+      - name: Native Intel signed packaged self-test
+        id: smoke
+        run: |
+          scripts/prove-package.sh signed "$WORK/proof" "$WORK/assets"
+          printf 'coverage=%s\n' "$(cat "$WORK/proof/coverage.txt")" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: [validate, package, intel]
     runs-on: macos-latest
     timeout-minutes: 30
     permissions:
@@ -117,30 +163,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_ID: ${{ needs.package.outputs.id }}
           DIGEST: ${{ needs.package.outputs.digest }}
-          REVIEWED_ZIP: ${{ needs.package.outputs.zip-sha }}
+          ARM: ${{ needs.package.outputs.zip-sha-arm64 }}
+          INTEL: ${{ needs.package.outputs.zip-sha-x86_64 }}
         run: |
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           version=$(python3 -I scripts/version.py VERSION "$GITHUB_REF_NAME")
           work=$(mktemp -d); mkdir "$work/download"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$work/download/transport.zip"
-          python3 -I scripts/release-assets.py receive "$work/download/transport.zip" "$DIGEST" "$REVIEWED_ZIP" "$version" "$work/assets"
+          python3 -I scripts/release-assets.py receive "$work/download/transport.zip" "$DIGEST" "$ARM" "$INTEL" "$version" "$work/assets"
           printf 'WORK=%s\nVERSION=%s\n' "$work" "$version" >> "$GITHUB_ENV"
-      - name: Independently verify the received signed universal app
+      - name: Independently verify both received signed apps
         run: python3 -I scripts/release-assets.py verify "$WORK/assets" "$VERSION" "$WORK/unpacked" signed
       - name: Prepare draft with explicitly reviewed assets
         env:
           GH_TOKEN: ${{ github.token }}
-          COVERAGE: ${{ needs.package.outputs.coverage }}
-          REVIEWED_ZIP: ${{ needs.package.outputs.zip-sha }}
+          TOOLCHAIN: ${{ needs.package.outputs.toolchain }}
+          COVERAGE_ARM64: ${{ needs.package.outputs.coverage }}
+          COVERAGE_X86_64: ${{ needs.intel.outputs.coverage }}
+          REVIEWED_ARM64: ${{ needs.package.outputs.zip-sha-arm64 }}
+          REVIEWED_X86_64: ${{ needs.package.outputs.zip-sha-x86_64 }}
         run: |
           python3 -I scripts/release-gate.py "$GITHUB_WORKSPACE" --publishing > "$WORK/notes"
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "Copia $GITHUB_REF_NAME" \
-            --notes-file "$WORK/notes" "$WORK/assets/Copia-$VERSION.zip" "$WORK/assets/Copia-$VERSION.zip.sha256"
+            --notes-file "$WORK/notes" \
+            "$WORK/assets/Copia-$VERSION-arm64.zip" "$WORK/assets/Copia-$VERSION-arm64.zip.sha256" \
+            "$WORK/assets/Copia-$VERSION-x86_64.zip" "$WORK/assets/Copia-$VERSION-x86_64.zip.sha256"
       - name: Recheck live evidence and draft bytes immediately before publication
         env:
           GH_TOKEN: ${{ github.token }}
-          COVERAGE: ${{ needs.package.outputs.coverage }}
-          REVIEWED_ZIP: ${{ needs.package.outputs.zip-sha }}
+          TOOLCHAIN: ${{ needs.package.outputs.toolchain }}
+          COVERAGE_ARM64: ${{ needs.package.outputs.coverage }}
+          COVERAGE_X86_64: ${{ needs.intel.outputs.coverage }}
+          REVIEWED_ARM64: ${{ needs.package.outputs.zip-sha-arm64 }}
+          REVIEWED_X86_64: ${{ needs.package.outputs.zip-sha-x86_64 }}
         run: |
           gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,assets > "$WORK/draft.json"
           python3 -I scripts/release-assets.py draft "$WORK/draft.json" "$WORK/assets" "$VERSION"
