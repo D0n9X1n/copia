@@ -5,8 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-# The release workflow passes the tag's version; local builds default to the current one.
-VERSION="${COPIA_VERSION:-0.0.1}"
+VERSION="$(python3 -I "$ROOT/scripts/version.py" "$ROOT/VERSION")"
 IDENTITY="${COPIA_SIGN_IDENTITY:-Apple Development}"
 SIGN=1
 CONFIG=release
@@ -35,7 +34,7 @@ cp -R "$RESOURCES" "$APP/Contents/Resources/"
 
 # Liquid Glass icon from the Icon Composer package (Assets.car + AppIcon.icns fallback).
 xcrun actool "$ROOT/Resources/AppIcon.icon" --compile "$APP/Contents/Resources" --platform macosx \
-	--minimum-deployment-target 27.0 --app-icon AppIcon \
+	--minimum-deployment-target 26.0 --app-icon AppIcon \
 	--output-partial-info-plist "$(mktemp -d)/partial.plist" >/dev/null
 [ -f "$APP/Contents/Resources/Assets.car" ] || { echo "icon compile failed" >&2; exit 1; }
 
@@ -53,7 +52,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleIconName</key><string>AppIcon</string>
 	<key>CFBundleShortVersionString</key><string>$VERSION</string>
 	<key>CFBundleVersion</key><string>$VERSION</string>
-	<key>LSMinimumSystemVersion</key><string>27.0</string>
+	<key>LSMinimumSystemVersion</key><string>26.0</string>
 	<key>LSUIElement</key><true/>
 	<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
 	<key>NSHumanReadableCopyright</key><string>Copia</string>
@@ -73,7 +72,7 @@ if [ "$CONFIG" = release ]; then
 	# A release build must hold both slices; a debug build is the host slice only.
 	"$ROOT/scripts/check-archs.sh" "$APP/Contents/MacOS/Copia"
 	rm -f "$DIST/Copia-$VERSION.zip"
-	ditto -c -k --keepParent "$APP" "$DIST/Copia-$VERSION.zip"
+	ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIST/Copia-$VERSION.zip"
 	echo "$DIST/Copia-$VERSION.zip"
 fi
 echo "$APP"

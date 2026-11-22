@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
 	name: "Copia",
-	platforms: [.macOS(.v27)],
+	platforms: [.macOS(.v26)],
 	products: [
 		.executable(name: "Copia", targets: ["Copia"]),
 		.executable(name: "copia-render", targets: ["CopiaRender"]),

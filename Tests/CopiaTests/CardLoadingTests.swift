@@ -11,7 +11,7 @@ import CopiaCore
 	static func darkestArt(_ clip: Clip) throws -> Double {
 		_ = NSApplication.shared
 		let card = ClipCard(clip: clip, tint: Theme.neutralTint, icon: nil, badge: nil, hovered: false, selected: false,
-			removing: false, now: clip.timestamp, highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
+			removing: false, age: ClipCard.relative(clip.timestamp, now: clip.timestamp), highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
 			.environment(\.colorScheme, .light)
 		let renderer = ImageRenderer(content: card)
 		renderer.scale = 2

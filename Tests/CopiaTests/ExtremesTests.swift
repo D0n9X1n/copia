@@ -5,16 +5,19 @@ import CopiaCore
 import CopiaFixtures
 @testable import CopiaUI
 
-/// The brief's extremes: labels 40% longer after translation (tail-truncate, never clip), and 10,000 items.
-@MainActor
-@Suite(.serialized) struct ExtremesTests {
+extension WindowTests {
+	/// The brief's extremes: labels 40% longer after translation (tail-truncate, never clip), and 10,000 items.
+	@MainActor @Suite struct ExtremesTests {}
+}
+
+extension WindowTests.ExtremesTests {
 	/// The footer label's room: the card less 12 pt padding on each side and the 4 pt spacer before the badge.
 	static let footerRoom = Theme.cardSize.width - 2 * 12 - 4
 	static let footerFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
 
 	func card(_ clip: Clip) -> ClipCard {
 		ClipCard(clip: clip, tint: Theme.neutralTint, icon: nil, badge: nil, hovered: false, selected: false, removing: false,
-			now: Fixtures.now, highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
+			age: ClipCard.relative(clip.timestamp, now: Fixtures.now), highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
 	}
 
 	/// One card in a real, transparent window far off every screen; its texts as VoiceOver reads them.
@@ -94,8 +97,8 @@ import CopiaFixtures
 		#expect(model.selectedIndex == 5_000)
 
 		model.commandHeld = true
-		#expect(model.badge(for: clips[8].id) == 9)
-		#expect(model.badge(for: clips[9].id) == nil)
+		#expect(model.badge(at: 8) == 9)
+		#expect(model.badge(at: 9) == nil)
 		model.commandHeld = false
 
 		model.query = "History item 9999"

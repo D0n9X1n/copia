@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import ScreenCaptureKit
+import ImageIO
 import CopiaCore
 import CopiaUI
 import CopiaFixtures
@@ -50,10 +52,6 @@ enum RenderRunner {
 			list.append(Scene(name: "05-extremes-\(mode)", dark: dark, clips: { _, e in e + [Fixtures.failed, Fixtures.pending] }))
 			list.append(Scene(name: "05-sheet-\(mode)", dark: dark, clips: { _, e in e + [Fixtures.failed, Fixtures.pending] }, sheet: true))
 			list.append(Scene(name: "06-delete-toast-\(mode)", dark: dark, prepare: { m in m.select(m.clips[1].id); await m.deleteSelected() }))
-			list.append(Scene(name: "06-ax-toast-\(mode)", dark: dark, prepare: { m in
-				m.actions.paste = { _, _, _ in .accessibilityRequired }
-				await m.paste(plain: false)
-			}))
 			list.append(Scene(name: "06-storage-cleanup-\(mode)", dark: dark, prepare: { $0.storageStatus = .cleanupPending }))
 			list.append(Scene(name: "06-storage-recovery-\(mode)", dark: dark, prepare: { $0.storageStatus = .recoveryRequired }))
 			list.append(Scene(name: "07-reduce-transparency-\(mode)", dark: dark, overrides: CopiaOverrides(reduceTransparency: true)))
@@ -110,7 +108,7 @@ enum RenderRunner {
 			let clips = scene.clips(assets.mixed, assets.extremes)
 			if scene.sheet {
 				panel.orderOut(nil)
-				let region = try await captureSheet(scene, clips: clips, stage: visible, screen: screen, to: url)
+				let region = try await captureSheet(scene, clips: clips, stage: visible, screen: screen, wallpaper: wallpaper, to: url)
 				manifest.append(["scene": scene.name, "file": url.lastPathComponent, "dark": scene.dark,
 					"wallpaperDark": scene.wallpaperDark, "frame": NSStringFromRect(region)])
 				print("rendered \(scene.name)")
@@ -125,7 +123,7 @@ enum RenderRunner {
 
 			let region = PanelLayout.stripFrame(in: visible).insetBy(dx: -28, dy: -28).intersection(visible)
 			let probes = scene.checkContrast ? contrastProbes(in: panel, region: region) : []
-			try capture(region, on: screen, to: url)
+			try await capture(region, on: screen, windows: [wallpaper, panel], to: url)
 			var row: [String: Any] = ["scene": scene.name, "file": url.lastPathComponent, "dark": scene.dark,
 				"wallpaperDark": scene.wallpaperDark, "frame": NSStringFromRect(panel.frame)]
 			if scene.checkContrast {
@@ -189,7 +187,7 @@ enum RenderRunner {
 	}
 
 	/// Shows every card at once on a glass sheet centered on the stage, waits for its previews, and captures it.
-	static func captureSheet(_ scene: Scene, clips: [Clip], stage: CGRect, screen: NSScreen, to url: URL) async throws -> CGRect {
+	static func captureSheet(_ scene: Scene, clips: [Clip], stage: CGRect, screen: NSScreen, wallpaper: NSWindow, to url: URL) async throws -> CGRect {
 		let thumbnails = ThumbnailCache()
 		let host = NSHostingView(rootView: CardSheet(clips: clips, thumbnails: thumbnails, now: Fixtures.now)
 			.environment(\.copiaOverrides, scene.overrides))
@@ -207,7 +205,7 @@ enum RenderRunner {
 		try await waitForPreviews(clips, in: thumbnails)
 		window.invalidateShadow()
 		let region = window.frame.insetBy(dx: -28, dy: -28).intersection(stage)
-		try capture(region, on: screen, to: url)
+		try await capture(region, on: screen, windows: [wallpaper, window], to: url)
 		return region
 	}
 
@@ -274,13 +272,13 @@ enum RenderRunner {
 					name: "10-settings-storage-\(name)-\(mode)", output: output, stage: stage))
 			}
 			shell.storageStatus = .ready
-			rows.append(try await captureEraseConfirmation(name: "10-settings-erase-confirm-\(mode)", output: output, stage: stage, screen: screen))
+			rows.append(try await captureEraseConfirmation(name: "10-settings-erase-confirm-\(mode)", output: output, stage: stage, screen: screen, wallpaper: wallpaper))
 			for (index, step) in OnboardingStep.allCases.enumerated() {
-				for granted in [false, true] where step == .accessibility || step == .pasteboard || granted {
+				for granted in [false, true] where step == .pasteboard || granted {
 					let model = ShellModel()
 					model.onboardingStep = index
-					model.permissions = PermissionState(accessibility: granted, pasteboard: granted ? .allow : .ask)
-					let suffix = step == .accessibility || step == .pasteboard ? (granted ? "-granted" : "-needed") : ""
+					model.permissions = PermissionState(pasteboard: granted ? .allow : .ask)
+					let suffix = step == .pasteboard ? (granted ? "-granted" : "-needed") : ""
 					rows.append(try await capture(OnboardingView(model: model, icon: appIcon),
 						title: "", name: "11-onboarding-\(index + 1)-\(step.title.lowercased().replacingOccurrences(of: " ", with: "-"))\(suffix)-\(mode)", output: output, stage: stage,
 						screen: screen, hiddenTitle: true))
@@ -354,7 +352,7 @@ enum RenderRunner {
 
 	/// Settings → General with the Erase History confirmation up. The dialog is its own sheet window,
 	/// so this captures the screen region around the window and its sheet rather than one window.
-	static func captureEraseConfirmation(name: String, output: URL, stage: CGRect, screen: NSScreen) async throws -> [String: Any] {
+	static func captureEraseConfirmation(name: String, output: URL, stage: CGRect, screen: NSScreen, wallpaper: NSWindow) async throws -> [String: Any] {
 		let model = ShellModel()
 		let window = settingsWindow(model: model, tab: .general, level: .floating + 1)
 		window.setFrameOrigin(NSPoint(x: stage.midX - window.frame.width / 2, y: stage.midY - window.frame.height / 2))
@@ -364,25 +362,31 @@ enum RenderRunner {
 		try await Task.sleep(for: .milliseconds(400))
 		model.requestErase()
 		try await Task.sleep(for: .milliseconds(900))
-		let covered = window.attachedSheet.map { window.frame.union($0.frame) } ?? window.frame
+		guard let sheet = window.attachedSheet else { throw RenderError.captureFailed(name) }
+		let covered = window.frame.union(sheet.frame)
 		let url = output.appendingPathComponent("\(name).png")
-		try capture(covered.insetBy(dx: -24, dy: -24).intersection(stage), on: screen, to: url)
+		try await capture(covered.insetBy(dx: -24, dy: -24).intersection(stage), on: screen, windows: [wallpaper, window, sheet], to: url)
 		print("rendered \(name)")
 		return ["scene": name, "file": url.lastPathComponent]
 	}
 
-	/// Captures a screen region (AppKit coordinates) so the glass is captured with what it blurs.
-	static func capture(_ rect: CGRect, on screen: NSScreen, to url: URL) throws {
-		let mainHeight = NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY
-		let r = CGRect(x: rect.minX, y: mainHeight - rect.maxY, width: rect.width, height: rect.height).integral
-		let process = Process()
-		process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-		process.arguments = ["-x", "-R\(Int(r.minX)),\(Int(r.minY)),\(Int(r.width)),\(Int(r.height))", url.path]
-		try process.run()
-		process.waitUntilExit()
-		guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: url.path) else {
-			throw RenderError.captureFailed(url.lastPathComponent)
-		}
+	static func capture(_ rect: CGRect, on screen: NSScreen, windows: [NSWindow], to url: URL) async throws {
+		let content = try await SCShareableContent.currentProcess
+		let ids = Set(windows.map { CGWindowID($0.windowNumber) })
+		let owned = content.windows.filter { ids.contains($0.windowID) }
+		guard !owned.isEmpty, owned.count == windows.count,
+			let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
+			let display = content.displays.first(where: { $0.displayID == id }) else { throw RenderError.captureFailed(url.lastPathComponent) }
+		let filter = SCContentFilter(display: display, including: owned)
+		let config = SCStreamConfiguration()
+		config.sourceRect = CGRect(x: rect.minX - screen.frame.minX, y: screen.frame.maxY - rect.maxY, width: rect.width, height: rect.height)
+		config.width = Int((rect.width * screen.backingScaleFactor).rounded())
+		config.height = Int((rect.height * screen.backingScaleFactor).rounded())
+		config.showsCursor = false
+		let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+		guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { throw RenderError.captureFailed(url.lastPathComponent) }
+		CGImageDestinationAddImage(dest, image, nil)
+		guard CGImageDestinationFinalize(dest) else { throw RenderError.captureFailed(url.lastPathComponent) }
 	}
 
 	enum RenderError: Error { case noScreen, captureFailed(String) }

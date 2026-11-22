@@ -1,72 +1,149 @@
 name: Release
 
-# Pushing a tag such as v0.0.1 builds the universal app, signs it, and publishes it as a GitHub Release.
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Establish event commit and main ancestry before running tag source
+        id: source
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = false
+          sha=$(git rev-parse --verify "${GITHUB_SHA}^{commit}")
+          test "$(git rev-parse HEAD)" = "$sha"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$sha" refs/remotes/origin/main
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+      - name: Validate release range and exact main push evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/release-gate.py "$GITHUB_WORKSPACE" >> "$GITHUB_STEP_SUMMARY"
+
+  package:
+    needs: validate
+    environment: release
     runs-on: xcode-27
     timeout-minutes: 40
-    # Signing secrets live in this environment, which only v* tags may use.
-    environment: release
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+      coverage: ${{ steps.proof.outputs.coverage }}
+      zip-sha: ${{ steps.proof.outputs.zip-sha }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Toolchain
-        run: |
-          xcodebuild -version
-          swift --version
-
-      - name: Test
-        run: swift test
-
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
       - name: Signing keychain
         env:
           SIGNING_CERT_P12_BASE64: ${{ secrets.SIGNING_CERT_P12_BASE64 }}
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         run: scripts/ci-keychain.sh
-
       - name: Build and sign
-        run: |
-          export COPIA_VERSION="${GITHUB_REF_NAME#v}" COPIA_TIMESTAMP=1
-          scripts/build-app.sh
-          codesign --verify --deep --strict --verbose=2 dist/Copia.app
-          codesign -dvv dist/Copia.app 2>&1 | grep -E '^(Identifier|TeamIdentifier|Timestamp|Authority=Apple Development)' | sed -E 's/^(Authority=Apple Development).*/\1/'
-          lipo -archs dist/Copia.app/Contents/MacOS/Copia | grep -q 'x86_64 arm64'
-          spctl -a -vv dist/Copia.app 2>&1 || true
-
-      - name: Publish
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          ZIP="dist/Copia-$VERSION.zip"
-          shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
-          cat > "$RUNNER_TEMP/notes.md" <<NOTES
-          Download \`Copia-$VERSION.zip\`, unzip it and move \`Copia.app\` to \`/Applications\`.
-
-          This build is signed but not notarized. On first launch macOS blocks it: open **System Settings → Privacy & Security** and click **Open Anyway** next to the message about Copia.
-
-          Requires macOS 27.
-          NOTES
-          gh release create "$GITHUB_REF_NAME" "$ZIP" "$ZIP.sha256" --verify-tag --title "Copia $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
-
+          COPIA_TIMESTAMP: '1'
+        run: scripts/build-app.sh
       - name: Remove signing keychain
         if: always()
         run: |
-          if [ -n "${KEYCHAIN_PATH:-}" ]; then
-            security delete-keychain "$KEYCHAIN_PATH" || true
+          if [[ -e "$RUNNER_TEMP/copia-signing.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/copia-signing.keychain-db"
           fi
-          rm -f "$RUNNER_TEMP/copia-signing.p12"
+          rm -f "$RUNNER_TEMP/copia-signing.p12" "$RUNNER_TEMP/AppleWWDRCAG3.cer"
+      - name: Verify archived code, deployment floors and native runtime
+        id: proof
+        run: |
+          WORK="$RUNNER_TEMP/copia-package-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+          scripts/prove-package.sh signed "$WORK"
+          printf 'coverage=%s\n' "$(cat "$WORK/coverage.txt")" >> "$GITHUB_OUTPUT"
+      - name: Upload exactly the verified public assets
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ github.run_attempt }}
+          path: ${{ env.WORK }}/assets/
+          if-no-files-found: error
+          compression-level: 0
+      - name: Record reviewed digest
+        env:
+          DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          test -n "$DIGEST"
+          printf 'Artifact SHA-256: %s\n\n' "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          cat "$WORK/assets/"*.sha256 "$WORK/coverage.txt" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: [validate, package]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - name: Check immutable transport and package checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.package.outputs.id }}
+          DIGEST: ${{ needs.package.outputs.digest }}
+          REVIEWED_ZIP: ${{ needs.package.outputs.zip-sha }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          version=$(python3 -I scripts/version.py VERSION "$GITHUB_REF_NAME")
+          work=$(mktemp -d); mkdir "$work/download"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$work/download/transport.zip"
+          python3 -I scripts/release-assets.py receive "$work/download/transport.zip" "$DIGEST" "$REVIEWED_ZIP" "$version" "$work/assets"
+          printf 'WORK=%s\nVERSION=%s\n' "$work" "$version" >> "$GITHUB_ENV"
+      - name: Independently verify the received signed universal app
+        run: python3 -I scripts/release-assets.py verify "$WORK/assets" "$VERSION" "$WORK/unpacked" signed
+      - name: Prepare draft with explicitly reviewed assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COVERAGE: ${{ needs.package.outputs.coverage }}
+          REVIEWED_ZIP: ${{ needs.package.outputs.zip-sha }}
+        run: |
+          python3 -I scripts/release-gate.py "$GITHUB_WORKSPACE" --publishing > "$WORK/notes"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "Copia $GITHUB_REF_NAME" \
+            --notes-file "$WORK/notes" "$WORK/assets/Copia-$VERSION.zip" "$WORK/assets/Copia-$VERSION.zip.sha256"
+      - name: Recheck live evidence and draft bytes immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COVERAGE: ${{ needs.package.outputs.coverage }}
+          REVIEWED_ZIP: ${{ needs.package.outputs.zip-sha }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,assets > "$WORK/draft.json"
+          python3 -I scripts/release-assets.py draft "$WORK/draft.json" "$WORK/assets" "$VERSION"
+          python3 -I scripts/release-gate.py "$GITHUB_WORKSPACE" --publishing > "$WORK/current"
+          cmp "$WORK/notes" "$WORK/current"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --verify-tag --notes-file "$WORK/notes"

@@ -2,7 +2,9 @@
 
 [English](Home)
 
-Copia 是一款 macOS 27 剪贴板管理器。每次 ⌘C 都会被保留，⌘Y 会在屏幕底部打开一条 Liquid Glass 卡片栏。选中卡片，它就会粘贴到你刚才使用的应用里。**请先阅读[用法](Usage-zh-CN)。**
+Copia 在 Mac 本地保存剪贴板历史。按 ⌘Y 选择卡片，再到目标应用按 ⌘V。选择卡片只会复制，不需要辅助功能权限。**请先阅读[用法](Usage-zh-CN)。**
+
+通用包的两个架构均以 macOS 26 为最低系统版本。该版本是否在 Intel 实机或 macOS 26 上运行过，请看[发布说明](https://github.com/D0n9X1n/copia/releases)中的 **Verification**。
 
 ### 页面
 

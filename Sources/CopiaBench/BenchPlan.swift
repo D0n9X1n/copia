@@ -13,7 +13,7 @@ enum BenchPlan {
 	}
 
 	/// Checks that need recorded frames, so they only run on the ScreenCaptureKit path.
-	static let recordedChecks: [String] = ["scrollSmoothness"]
+	static let recordedChecks: [String] = ["scrollSmoothness", "pointerSelection.presentedTargetRing"]
 		+ ["open", "close", "lens", "delete", "undo"].flatMap { ["motionSettle.\($0)", "motionSettle.\($0).reduced"] }
 
 	static func path(screenRecording: Bool, noSCK: Bool) -> Path {

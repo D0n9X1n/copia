@@ -90,7 +90,7 @@ final class Recorder: NSObject, SCStreamOutput, @unchecked Sendable {
 
 	/// Starts recording the panel's frame. The filter holds only the bench's own panel and wallpaper windows.
 	@MainActor
-	func start(panel: NSWindow, wallpaper: NSWindow, framesPerSecond: Int) async throws {
+	func start(panel: NSWindow, wallpaper: NSWindow) async throws {
 		let content = try await SCShareableContent.currentProcess
 		let ids = Set([panel.windowNumber, wallpaper.windowNumber].map { CGWindowID($0) })
 		let windows = content.windows.filter { ids.contains($0.windowID) }
@@ -99,21 +99,28 @@ final class Recorder: NSObject, SCStreamOutput, @unchecked Sendable {
 			let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
 			let display = content.displays.first(where: { $0.displayID == displayID }) else { throw Failure.noDisplay }
 		let filter = SCContentFilter(display: display, including: windows)
-		let config = SCStreamConfiguration()
 		let frame = panel.frame
-		config.sourceRect = CGRect(x: frame.minX - screen.frame.minX, y: screen.frame.maxY - frame.maxY,
+		let rect = CGRect(x: frame.minX - screen.frame.minX, y: screen.frame.maxY - frame.maxY,
 			width: CGFloat(width), height: CGFloat(height))
+		let config = configuration(sourceRect: rect)
+		let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+		try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+		try await stream.startCapture()
+		self.stream = stream
+	}
+
+	func configuration(sourceRect: CGRect) -> SCStreamConfiguration {
+		let config = SCStreamConfiguration()
+		config.sourceRect = sourceRect
 		config.width = width
 		config.height = height
 		config.captureResolution = .nominal
 		config.pixelFormat = kCVPixelFormatType_32BGRA
 		config.showsCursor = false
-		config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(framesPerSecond))
+		// A nominal 1/120 throttle can drop real presentations slightly less than 1/120 s apart.
+		config.minimumFrameInterval = .zero
 		config.queueDepth = 8
-		let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-		try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
-		try await stream.startCapture()
-		self.stream = stream
+		return config
 	}
 
 	@MainActor
@@ -163,8 +170,8 @@ final class Recorder: NSObject, SCStreamOutput, @unchecked Sendable {
 		let time = HostClock.seconds(ticks)
 		let mode = lock.withLock { self.mode }
 		if case let .hashes(rows) = mode {
-			let band = Luma(bgra: base, bytesPerRow: bytesPerRow, x: 0, y: rows.lowerBound, width: width, height: rows.count)
-			let frame = Smoothness.Frame(time: time, hash: band.hash())
+			let hash = Luma.hash(bgra: base, bytesPerRow: bytesPerRow, x: 0, y: rows.lowerBound, width: width, height: rows.count)
+			let frame = Smoothness.Frame(time: time, hash: hash)
 			lock.withLock { hashes.append(frame) }
 			return
 		}

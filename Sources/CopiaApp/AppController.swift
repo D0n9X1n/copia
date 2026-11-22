@@ -25,6 +25,10 @@ struct Preferences {
 		get { defaults.bool(forKey: "paused") }
 		nonmutating set { defaults.set(newValue, forKey: "paused") }
 	}
+	var showMenuBarIcon: Bool {
+		get { defaults.object(forKey: "showMenuBarIcon") as? Bool ?? true }
+		nonmutating set { defaults.set(newValue, forKey: "showMenuBarIcon") }
+	}
 	var onboarded: Bool {
 		get { defaults.bool(forKey: "onboarded") }
 		nonmutating set { defaults.set(newValue, forKey: "onboarded") }
@@ -52,7 +56,7 @@ final class MainAppLogin: LoginService {
 	func unregister() throws { try SMAppService.mainApp.unregister() }
 }
 
-/// Wires the store, capture, previews and paste into the strip, menu bar, Settings and onboarding.
+/// Wires history, capture and clipboard writes into the strip, menu and Settings.
 @MainActor
 public final class AppController {
 	public let model: StripModel
@@ -63,13 +67,15 @@ public final class AppController {
 	public let store: ClipStore
 	let watcher: PasteboardWatcher
 	let previewer: Previewer
-	let paster = Paster()
+	let paster: Paster
+	private let sources: SourceAppearance
+	private let observesWorkspace: Bool
+	private var observers: [NSObjectProtocol] = []
 	let prefs: Preferences
 	private var menu: MenuBarController?
-	private var index = ClipIndex<DeletedClip>()
+	private var index = ClipIndex()
 	private var reloads = 0
 	private var lastDeliveredUndoSequence: UInt64 = 0
-	private var target: NSRunningApplication?
 	private var retentionTimer: Timer?
 	private var settingsWindow: NSWindow?
 	private var onboardingWindow: NSWindow?
@@ -83,19 +89,33 @@ public final class AppController {
 	var now: () -> Date = Date.init
 	static let retentionInterval: TimeInterval = 3_600
 
-	public convenience init(directory: URL? = nil, defaults: UserDefaults = .standard) throws {
-		try self.init(directory: directory, defaults: defaults, pasteboard: GeneralPasteboard(), login: MainAppLogin(),
-			permissions: AppController.livePermissions, links: LiveLinkFetcher(), files: LiveFileThumbnails())
+	public static func live() throws -> AppController {
+		let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+			.appendingPathComponent("Copia", isDirectory: true)
+		let board = NSPasteboard.general
+		return try AppController(directory: dir, defaults: .standard, pasteboard: GeneralPasteboard(board), writerBoard: board,
+			login: MainAppLogin(), permissions: livePermissions, links: LiveLinkFetcher(), files: LiveFileThumbnails(), observesWorkspace: true)
 	}
 
-	init(directory: URL?, defaults: UserDefaults, pasteboard: PasteboardSource, login: LoginService,
+	public static func scratch(directory: URL, defaults: UserDefaults, pasteboard: NSPasteboard) throws -> AppController {
+		let services = ScratchServices()
+		return try AppController(directory: directory, defaults: defaults, pasteboard: GeneralPasteboard(pasteboard), writerBoard: pasteboard,
+			login: services, permissions: { PermissionState(pasteboard: .allow) }, links: services, files: services)
+	}
+
+	init(directory: URL, defaults: UserDefaults, pasteboard: PasteboardSource, writerBoard: NSPasteboard, login: LoginService,
 		permissions: @escaping () -> PermissionState, links: LinkFetching, files: FileThumbnailing,
-		storageFiles: any FileOps = LiveFileOps()) throws {
+		storageFiles: any FileOps = LiveFileOps(), observesWorkspace: Bool = false) throws {
 		prefs = Preferences(defaults: defaults)
-		let dir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-			.appendingPathComponent("Copia", isDirectory: true)
-		store = try ClipStore(directory: dir, files: storageFiles)
-		watcher = PasteboardWatcher(source: pasteboard, ignoredApps: Set(prefs.ignoredApps))
+		self.observesWorkspace = observesWorkspace
+		sources = observesWorkspace ? .shared : .fixtures
+		store = try ClipStore(directory: directory, files: storageFiles)
+		paster = Paster(pasteboard: writerBoard)
+		if observesWorkspace {
+			watcher = PasteboardWatcher(source: pasteboard, ignoredApps: Set(prefs.ignoredApps))
+		} else {
+			watcher = PasteboardWatcher(source: pasteboard, ignoredApps: Set(prefs.ignoredApps), frontmost: { nil }, appName: { _ in nil })
+		}
 		previewer = Previewer(store: store, links: links, files: files)
 		self.login = login
 		self.permissions = permissions
@@ -103,6 +123,15 @@ public final class AppController {
 		model.paused = prefs.paused
 		wire()
 	}
+
+	isolated deinit {
+		watcher.stop()
+		retentionTimer?.invalidate()
+		permissionPoll?.cancel()
+		for observer in observers { NotificationCenter.default.removeObserver(observer) }
+	}
+
+	public var capturePollCount: Int { watcher.pollCount }
 
 	// MARK: Launch
 
@@ -113,14 +142,16 @@ public final class AppController {
 		await previewer.resumePending()
 		await refreshStorageStatus()
 		watcher.setPaused(prefs.paused || model.storageStatus == .recoveryRequired)
-		watcher.start()
+		watcher.start(observingWorkspace: observesWorkspace)
 		guard menuAndHotkeys else { return }
+		MenuBarController.migratePauseShortcut(in: prefs.defaults)
 		menu = MenuBarController(actions: .init(
 			history: { [weak self] in self?.toggleHistory() },
 			pause: { [weak self] in self?.togglePause() },
 			settings: { [weak self] in self?.openSettings() },
 			quit: { NSApp.terminate(nil) }))
 		menu?.setPaused(prefs.paused || model.storageStatus == .recoveryRequired)
+		menu?.setVisible(prefs.showMenuBarIcon)
 		KeyboardShortcuts.onKeyUp(for: .copiaHistory) { [weak self] in self?.toggleHistory() }
 		KeyboardShortcuts.onKeyUp(for: .copiaPause) { [weak self] in self?.togglePause() }
 		let timer = Timer(timeInterval: Self.retentionInterval, repeats: true) { [weak self] _ in
@@ -130,11 +161,11 @@ public final class AppController {
 		RunLoop.main.add(timer, forMode: .common)
 		retentionTimer = timer
 		refreshPermissions()
-		if showOnboarding, !prefs.onboarded || !permissions().accessibility { openOnboarding() }
+		if showOnboarding, !prefs.onboarded { openOnboarding() }
 	}
 
 	private func wire() {
-		panel.host.rootView = AnyView(StripView(model: model, focus: focus, thumbnails: thumbnails))
+		panel.host.rootView = AnyView(StripView(model: model, focus: focus, thumbnails: thumbnails, sources: sources))
 		model.announce = { [weak self] text in
 			guard let panel = self?.panel else { return }
 			NSAccessibility.post(element: panel, notification: .announcementRequested,
@@ -143,73 +174,86 @@ public final class AppController {
 		model.onOpenFinish = { [weak self] in self?.panel.invalidateShadow() }
 		model.onCloseStart = { [weak self] in
 			guard let self else { return }
-			CopiaDebug.log("closeStart key=\(panel.isKeyWindow)")
 			panel.resignKey()
-			let cutoff = lastDeliveredUndoSequence
+			let cutoff = lastDeliveredUndoSequence, deferCleanup = model.isClosingAfterCopy
 			index.clearDeletions()
-			Task { await self.store.emptyTrash(through: cutoff); await self.refreshStorageStatus() }
+			Task {
+				if let retired = await self.store.emptyTrash(through: cutoff, deferCleanup: deferCleanup) {
+					_ = self.model.clock.after(StripModel.toastLifetime) { [weak self] in
+						guard let self else { return }
+						Task { await self.store.cleanRetiredSnapshots(retired); await self.refreshStorageStatus() }
+					}
+				}
+				await self.refreshStorageStatus()
+			}
 		}
 		model.onCloseFinish = { [weak self] in
 			guard let self else { return }
 			panel.hide()
 			thumbnails.removeAll()
 		}
-		model.onUndoExpired = { [weak self] id in
-			guard let self, let gone = index.takeDeletion(for: id) else { return }
-			Task { await self.store.invalidateUndo(gone); await self.refreshStorageStatus() }
+		model.onUndoExpired = { [weak self] token in
+			guard let self, index.canRestore(token) else { return }
+			index.forget(token)
+			Task { await self.store.invalidateGroup(token); await self.refreshStorageStatus() }
 		}
-		model.actions = StripActions(
-			paste: { [weak self] id, plain, beginClose in
-				guard let self, let key = index.keys[id] else { return .copied }
-				do {
-					let items = try await store.items(for: key)
-					return await paster.paste(items, plain: plain, target: target, beginClose: beginClose)
-				} catch {
-					await refreshStorageStatus()
-					throw actionError(error)
+		model.actions.openSettings = { [weak self] in self?.openSettings() }
+		model.actions.write = { [weak self] id, plain in
+			guard let self, let key = index.keys[id] else { throw StoreError.missingBlob }
+			let close = model.closeCount
+			do {
+				let items = try await store.items(for: key)
+				guard model.closeCount == close else { throw CancellationError() }
+				try paster.write(items, plain: plain)
+			} catch { await refreshStorageStatus(); throw actionError(error) }
+		}
+		model.actions.delete = { [weak self] ids in
+			guard let self else { throw StoreError.missingBlob }
+			let keys = try ids.map { id in
+				guard let key = index.keys[id] else { throw StoreError.missingBlob }
+				return key
+			}
+			let close = model.closeCount
+			do {
+				let group = try await store.deleteGroup(keys)
+				lastDeliveredUndoSequence = max(lastDeliveredUndoSequence, group.issuedSequence)
+				index.noteDeleted(ids, token: group.token)
+				if close != model.closeCount {
+					index.forget(group.token)
+					await store.invalidateGroup(group.token)
 				}
-			},
-			copy: { [weak self] id in
-				guard let self, let key = index.keys[id] else { return }
-				do { paster.write(try await store.items(for: key), plain: false) }
-				catch { await refreshStorageStatus(); throw actionError(error) }
-			},
-			delete: { [weak self] id in
-				guard let self, let key = index.keys[id] else { return }
-				let close = model.closeCount
-				do {
-					if let gone = try await store.delete(key) {
-						lastDeliveredUndoSequence = max(lastDeliveredUndoSequence, gone.issuedSequence)
-						index.noteDeleted(id, gone)
-						if close != model.closeCount {
-							_ = index.takeDeletion(for: id)
-							await store.invalidateUndo(gone)
-						}
-					}
-					await refreshStorageStatus()
-				} catch {
-					await refreshStorageStatus()
-					throw actionError(error)
+				await refreshStorageStatus()
+				return group.token
+			} catch { await refreshStorageStatus(); throw actionError(error) }
+		}
+		model.actions.restore = { [weak self] token in
+			guard let self, index.canRestore(token) else { throw StripActionError.undoExpired }
+			do {
+				let restored = try await store.restoreGroup(token)
+				index.noteRestored(token, keys: Dictionary(uniqueKeysWithValues: restored.map { (ClipDraft.uuid(forKey: $0.key), $0.key) }))
+				var clips: [Clip] = []
+				for row in restored {
+					clips.append(Self.clip(from: row, thumbnail: await store.thumbnail(for: row.key)))
+					previewer.generate(for: row)
 				}
-			},
-			restore: { _, _ in },
-			openAccessibilitySettings: { Permissions.requestAccessibility(); Permissions.openAccessibilitySettings() })
+				await refreshStorageStatus()
+				return clips
+			} catch {
+				if case StoreError.undoExpired = error { index.forget(token) }
+				await refreshStorageStatus(); throw actionError(error)
+			}
+		}
+		model.actions.setPinned = { [weak self] id, pinned in
+			guard let self, let key = index.keys[id] else { throw StoreError.missingBlob }
+			do {
+				try await store.setPinned(key, to: pinned)
+				index.noteChanged()
+				await reload()
+			} catch { await refreshStorageStatus(); throw actionError(error) }
+		}
 		model.actions.search = { [weak self] query in
 			guard let self, let keys = try? await store.search(query) else { return [] }
 			return Set(keys.map(ClipDraft.uuid(forKey:)))
-		}
-		model.actions.restore = { [weak self] clip, _ in
-			guard let self else { throw StripActionError.undoExpired }
-			guard let gone = index.deletion(for: clip.id) else { throw StripActionError.undoExpired }
-			do {
-				let restored = try await store.restore(gone)
-				index.noteRestored(clip.id, key: gone.clip.key)
-				previewer.generate(for: restored)
-				await refreshStorageStatus()
-			} catch {
-				await refreshStorageStatus()
-				throw actionError(error)
-			}
 		}
 		watcher.onDraft = { [weak self] draft in
 			guard let self else { return }
@@ -221,57 +265,29 @@ public final class AppController {
 			}
 		}
 		previewer.onSaved = { [weak self] in Task { await self?.reload() } }
-		panel.onKeyEquivalent = { [weak self] event in self?.keyEquivalent(event) ?? false }
+		panel.onKeyEquivalent = { [weak self] event in
+			guard let self else { return false }
+			return focus.handleKeyEquivalent(event, model: model)
+		}
 		panel.onFlagsChanged = { [weak self] flags in self?.model.commandHeld = flags.contains(.command) }
-		NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
+		observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
 			MainActor.assumeIsolated {
 				guard let self, self.model.cardsMounted, !self.model.isClosing else { return }
 				self.model.beginClose()
 			}
-		}
+		})
 		wireShell()
 	}
 
 	// MARK: Strip
 
-	public func toggleHistory() {
-		if panel.isVisible, model.cardsMounted {
-			model.beginClose()
-			return
-		}
-		let front = NSWorkspace.shared.frontmostApplication
-		target = front?.bundleIdentifier == Bundle.main.bundleIdentifier ? target : front
-		let mouse = NSEvent.mouseLocation
-		guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main else { return }
+	public func toggleHistory(on chosenScreen: NSScreen? = nil) {
+		if panel.isVisible, model.cardsMounted { model.beginClose(); return }
+		guard let screen = chosenScreen ?? NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main else { return }
 		model.open()
 		panel.show(on: screen, visibleFrame: visibleFrameOverride)
 		focus.focus()
-		CopiaDebug.log("opened visible=\(panel.isVisible) key=\(panel.isKeyWindow) frame=\(panel.frame)")
 		DispatchQueue.main.async { [weak self] in self?.model.animateIn() }
-	}
-
-	private func keyEquivalent(_ event: NSEvent) -> Bool {
-		let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-		guard flags.contains(.command), let chars = event.charactersIgnoringModifiers?.lowercased() else { return false }
-		let plain = flags.contains(.shift)
-		if let digit = Int(chars), (1...9).contains(digit) {
-			Task { await model.paste(position: digit, plain: plain) }
-			return true
-		}
-		switch chars {
-		case "!", "@", "#", "$", "%", "^", "&", "*", "(":
-			let position = Array("!@#$%^&*(").firstIndex(of: Character(chars))! + 1
-			Task { await model.paste(position: position, plain: true) }
-			return true
-		case "c":
-			if let id = model.selectedID { Task { await model.perform(.copy, id: id) } }
-			return true
-		case "z":
-			Task { await model.undo() }
-			return true
-		default:
-			return false
-		}
 	}
 
 	/// Shows the store's current history. The newest reload wins, and one that raced a delete or restore fetches again.
@@ -308,7 +324,7 @@ public final class AppController {
 		return Clip(id: ClipDraft.uuid(forKey: s.key), kind: s.kind, text: s.title, isCode: s.isCode,
 			sourceName: s.sourceName, sourceBundleID: s.sourceBundle, timestamp: s.lastCopied, meta: s.meta,
 			preview: s.kind == .text || s.kind == .richText || s.kind == .color ? .pending : preview,
-			fileNames: s.fileNames, colorHex: s.colorHex, url: s.url.flatMap(URL.init(string:)))
+			fileNames: s.fileNames, colorHex: s.colorHex, url: s.url.flatMap(URL.init(string:)), isPinned: s.isPinned)
 	}
 
 	func prune() async {
@@ -389,6 +405,14 @@ public final class AppController {
 		shell.ignoredApps = prefs.ignoredApps
 		shell.paused = prefs.paused
 		shell.login = login.status
+		shell.showMenuBarIcon = prefs.showMenuBarIcon
+		shell.setShowMenuBarIcon = { [weak self] visible in
+			guard let self else { return }
+			prefs.showMenuBarIcon = visible
+			shell.showMenuBarIcon = visible
+			menu?.setVisible(visible)
+		}
+		shell.togglePause = { [weak self] in self?.togglePause() }
 		shell.setLogin = { [weak self] on in
 			guard let self else { return }
 			do {
@@ -407,17 +431,15 @@ public final class AppController {
 			self?.watcher.ignoredApps = Set(apps)
 		}
 		shell.erase = { [weak self] in Task { await self?.erase() } }
-		shell.requestAccessibility = { Permissions.requestAccessibility() }
-		shell.openAccessibility = { Permissions.openAccessibilitySettings() }
-		shell.openPasteboard = { Permissions.openPasteboardSettings() }
+		if observesWorkspace { shell.openPasteboard = { Permissions.openPasteboardSettings() } }
 		shell.openHistory = { [weak self] in self?.toggleHistory() }
 		shell.finishOnboarding = { [weak self] in
 			self?.prefs.onboarded = true
 			self?.onboardingWindow?.close()
 		}
-		NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+		observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
 			MainActor.assumeIsolated { self?.refreshPermissions() }
-		}
+		})
 	}
 
 	static func livePermissions() -> PermissionState {
@@ -427,7 +449,7 @@ public final class AppController {
 		case .ask: .ask
 		default: .unset
 		}
-		return PermissionState(accessibility: Permissions.accessibilityTrusted, pasteboard: pasteboard)
+		return PermissionState(pasteboard: pasteboard)
 	}
 
 	func refreshPermissions() {
@@ -437,8 +459,9 @@ public final class AppController {
 	public func openSettings() {
 		let window = settings()
 		if !window.isVisible { window.center() }
-		NSApp.activate()
 		window.makeKeyAndOrderFront(nil)
+		NSApp.activate(ignoringOtherApps: true)
+		window.makeMain()
 	}
 
 	/// The one Settings window, made on first use and kept after it closes.

@@ -6,11 +6,20 @@ import CopiaCore
 @MainActor
 @Observable
 public final class StripModel {
+	public enum InputIntent { case results, search }
+	public var intent: InputIntent = .results
+	/// Nil means a single primary; an empty frozen group must never acquire the next match.
+	private var frozenIDs: Set<UUID>?
+	public var selectedIDs: Set<UUID> { frozenIDs ?? selectedID.map { [$0] } ?? [] }
+	var groupCount: Int? { frozenIDs?.count }
+	func isSelected(_ id: UUID) -> Bool { frozenIDs?.contains(id) ?? (selectedID == id) }
 	public private(set) var clips: [Clip]
 	public private(set) var selectedID: UUID?
 	public var query = "" {
 		didSet {
 			guard query != oldValue else { return }
+			searchRevision += 1
+			storeMatches = []
 			reconcileSelection(preferredIndex: 0)
 			searchTask?.cancel()
 			searchTask = Task { [weak self] in
@@ -26,6 +35,7 @@ public final class StripModel {
 	public var hoveredID: UUID?
 	public private(set) var toast: Toast?
 	public private(set) var isClosing = false
+	public private(set) var isClosingAfterCopy = false
 	/// Cards are dropped while the strip is hidden so their views and images can be freed.
 	public private(set) var cardsMounted = false
 	/// Drives the open/close slide: false = below and transparent, true = in place.
@@ -43,17 +53,20 @@ public final class StripModel {
 	@ObservationIgnored public var onCloseFinish: () -> Void = {}
 	@ObservationIgnored public var onUndoExpired: (UUID) -> Void = { _ in }
 
-	/// IDs the store's full-text search matched for `storeQuery`.
+	/// Full-text matches for the current query revision.
 	private var storeMatches: Set<UUID> = []
-	@ObservationIgnored private var storeQuery = ""
+	@ObservationIgnored private var searchRevision = 0
 	@ObservationIgnored private var searchTask: Task<Void, Never>?
 	/// Typing pauses this long before the store is searched.
 	public static let searchDelay: Duration = .milliseconds(120)
-	@ObservationIgnored private var undoEntry: (clip: Clip, index: Int)?
+	@ObservationIgnored private var undoEntry: (token: UUID, members: Set<UUID>, primary: UUID)?
 	@ObservationIgnored private var cancelToast: ToastClock.Cancel?
 	/// Undo lasts 3 s from the delete, whatever toast is shown meanwhile.
 	@ObservationIgnored private var cancelUndoDeadline: ToastClock.Cancel?
 	@ObservationIgnored private var busy = false
+	/// A reload can invalidate the store group before its token is delivered to the UI.
+	@ObservationIgnored private var pendingDelete: Set<UUID> = []
+	@ObservationIgnored private var deleteConflicted = false
 	@ObservationIgnored private var presentation = 0
 	/// Changes as soon as close starts, so a pending delete cannot create undo in a later presentation.
 	public private(set) var closeCount = 0
@@ -73,7 +86,7 @@ public final class StripModel {
 	public var visibleClips: [Clip] {
 		let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !q.isEmpty else { return clips }
-		let stored = storeQuery == q ? storeMatches : []
+		let stored = storeMatches
 		return clips.filter { clip in
 			stored.contains(clip.id)
 				|| clip.text.localizedStandardContains(q)
@@ -86,9 +99,10 @@ public final class StripModel {
 	public func searchStore() async {
 		let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !q.isEmpty else { return }
+		searchRevision += 1
+		let revision = searchRevision
 		let found = await actions.search(q)
-		guard q == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-		storeQuery = q
+		guard revision == searchRevision else { return }
 		storeMatches = found
 		reconcileSelection(preferredIndex: 0)
 	}
@@ -96,15 +110,28 @@ public final class StripModel {
 	public var selectedIndex: Int? { visibleClips.firstIndex { $0.id == selectedID } }
 
 	/// The ⌘1–9 badge number for a clip, shown only while ⌘ is held.
-	public func badge(for id: UUID) -> Int? {
-		guard commandHeld, let i = visibleClips.prefix(9).firstIndex(where: { $0.id == id }) else { return nil }
-		return i + 1
-	}
+	public func badge(at index: Int) -> Int? { commandHeld && (0..<9).contains(index) ? index + 1 : nil }
 
 	// MARK: Selection
 
+	public func selectAllResults() {
+		let visible = visibleClips
+		frozenIDs = Set(visible.map(\.id))
+		if selectedID == nil { selectedID = visible.first?.id }
+	}
+
+	public func selectOnPress(_ id: UUID) {
+		intent = .results
+		guard selectedID != id || frozenIDs != nil else { return }
+		frozenIDs = nil
+		selectedID = id
+	}
+
 	public func select(_ id: UUID) {
-		guard visibleClips.contains(where: { $0.id == id }), id != selectedID else { return }
+		guard visibleClips.contains(where: { $0.id == id }) else { return }
+		intent = .results
+		frozenIDs = nil
+		guard id != selectedID else { return }
 		animator.run(.lens, { self.selectedID = id }, {})
 	}
 
@@ -122,6 +149,13 @@ public final class StripModel {
 
 	private func reconcileSelection(preferredIndex: Int) {
 		let visible = visibleClips
+		if let frozenIDs {
+			let remaining = frozenIDs.intersection(visible.lazy.map(\.id))
+			self.frozenIDs = remaining
+			if let selectedID, remaining.contains(selectedID) { return }
+			selectedID = visible.first { remaining.contains($0.id) }?.id
+			return
+		}
 		if let selectedID, visible.contains(where: { $0.id == selectedID }) { return }
 		selectedID = visible.isEmpty ? nil : visible[min(max(preferredIndex, 0), visible.count - 1)].id
 	}
@@ -129,9 +163,11 @@ public final class StripModel {
 	/// Replaces the clip list (B2 pushes store changes here). Keeps the selection when it is still visible.
 	public func applySnapshot(_ newClips: [Clip]) {
 		let oldIndex = selectedIndex ?? 0
-		let inserted = newClips.first.map { first in !clips.contains { $0.id == first.id } } ?? false
+		let previews = Dictionary(uniqueKeysWithValues: clips.map { ($0.id, $0.preview) })
+		let inserted = newClips.first.map { previews[$0.id] == nil } ?? false
 		let previewsChanged = newClips.contains { new in
-			clips.first { $0.id == new.id }.map { $0.preview != new.preview } ?? false
+			Diagnostics.previewComparisons += 1
+			return previews[new.id].map { $0 != new.preview } ?? false
 		}
 		let apply = {
 			self.clips = newClips
@@ -149,37 +185,48 @@ public final class StripModel {
 	// MARK: Delete and undo
 
 	public func deleteSelected() async {
-		guard storageStatus != .recoveryRequired, !isClosing, !busy, let id = selectedID, let index = clips.firstIndex(where: { $0.id == id }) else { return }
+		await delete(ids: selectedIDs)
+	}
+
+	func delete(ids: Set<UUID>) async {
+		guard storageStatus != .recoveryRequired, !isClosing, !busy, !ids.isEmpty else { return }
+		let ordered = visibleClips.lazy.map(\.id).filter(ids.contains)
+		let targets = Array(ordered)
+		guard targets.count == ids.count, let first = targets.first, removingIDs.isDisjoint(with: ids) else { return }
+		let primary = selectedID.flatMap { ids.contains($0) ? $0 : nil } ?? first
+		let index = selectedIndex ?? 0, close = closeCount
 		busy = true
-		defer { busy = false }
-		let clip = clips[index]
-		let beganBeforeClose = closeCount
-		let visibleBefore = visibleClips
-		let visibleIndex = visibleBefore.firstIndex { $0.id == id } ?? 0
+		pendingDelete = ids
+		deleteConflicted = false
+		defer { busy = false; pendingDelete = [] }
+		let token: UUID
 		do {
-			try await actions.delete(id)
+			token = try await actions.delete(targets)
 		} catch {
-			showActionError(error, operation: "delete")
+			showActionError(error, operation: "delete", close: close)
 			return
 		}
-		guard closeCount == beganBeforeClose else {
-			clips.removeAll { $0.id == id }
-			reconcileSelection(preferredIndex: visibleIndex)
+		guard !deleteConflicted else { return }
+		guard closeCount == close else {
+			clips.removeAll { ids.contains($0.id) }
+			reconcileSelection(preferredIndex: index)
 			return
 		}
-		animator.run(.delete, { self.removingIDs.insert(id) }, {
-			// An undo during the animation already put the card back.
-			guard self.removingIDs.remove(id) != nil else { return }
+		animator.run(.delete, { self.removingIDs.formUnion(ids) }, {
+			// An intervening undo or recopy can already have reclaimed these cards.
+			let stillRemoving = self.removingIDs.intersection(ids)
+			guard !stillRemoving.isEmpty else { return }
+			self.removingIDs.subtract(stillRemoving)
 			self.animator.run(.reflow, {
-				self.clips.removeAll { $0.id == id }
-				let remaining = visibleBefore.filter { $0.id != id }
-				self.selectedID = remaining.isEmpty ? nil : remaining[min(visibleIndex, remaining.count - 1)].id
+				self.clips.removeAll { stillRemoving.contains($0.id) }
+				if self.frozenIDs == ids { self.frozenIDs = nil }
+				self.reconcileSelection(preferredIndex: index)
 			}, {})
 		})
 		endUndo(expired: true)
-		undoEntry = (clip, index)
+		undoEntry = (token, ids, primary)
 		cancelUndoDeadline = clock.after(Self.toastLifetime) { [weak self] in
-			guard let self, self.undoEntry?.clip.id == clip.id else { return }
+			guard let self, self.undoEntry?.token == token else { return }
 			self.endUndo(expired: true)
 		}
 		show(.deleted)
@@ -188,78 +235,107 @@ public final class StripModel {
 
 	public var canUndo: Bool { undoEntry != nil }
 
-	/// Ends the pending undo if it is for one of `ids`: the item was copied again or history was erased.
+	/// A recopy of any member invalidates the whole transaction.
 	public func cancelUndo(for ids: Set<UUID>) {
-		guard let entry = undoEntry, ids.contains(entry.clip.id) else { return }
+		if !ids.isDisjoint(with: pendingDelete) { deleteConflicted = true }
+		removingIDs.subtract(ids)
+		guard let entry = undoEntry, !ids.isDisjoint(with: entry.members) else { return }
 		endUndo()
 		if toast == .deleted { dismissToast() }
 	}
 
 	public func undo() async {
-		guard storageStatus != .recoveryRequired, !busy, let entry = undoEntry else { return }
+		guard storageStatus != .recoveryRequired, !busy, !isClosing, let entry = undoEntry else { return }
 		busy = true
 		defer { busy = false }
+		let close = closeCount
+		let restored: [Clip]
 		do {
-			try await actions.restore(entry.clip, entry.index)
+			restored = try await actions.restore(entry.token)
 		} catch {
-			showActionError(error, operation: "restore")
+			showActionError(error, operation: "restore", close: close)
 			return
 		}
 		endUndo()
-		dismissToast()
+		removingIDs.subtract(entry.members)
 		animator.run(.undo, {
-			self.removingIDs.remove(entry.clip.id)
-			if !self.clips.contains(where: { $0.id == entry.clip.id }) {
-				self.clips.insert(entry.clip, at: min(entry.index, self.clips.count))
-			}
-			if !self.visibleClips.contains(where: { $0.id == entry.clip.id }) { self.query = "" }
-			self.selectedID = entry.clip.id
+			// A fresh store snapshot can already include a newer recopy or preview. Keep it.
+			let existing = Set(self.clips.map(\.id))
+			self.clips = (self.clips + restored.filter { !existing.contains($0.id) }).sorted(by: Self.historyOrder)
+			guard close == self.closeCount else { return }
+			self.dismissToast()
+			if !entry.members.isSubset(of: self.visibleClips.lazy.map(\.id)) { self.query = "" }
+			self.frozenIDs = entry.members.count > 1 ? entry.members : nil
+			self.selectedID = entry.primary
+			self.reconcileSelection(preferredIndex: 0)
 		}, {})
 	}
 
-	// MARK: Paste and actions
-
-	public func paste(plain: Bool) async {
-		guard let id = selectedID else { return }
-		await paste(id: id, plain: plain)
+	/// Matches store ordering: pin, last copied, then content key (the UUID is its prefix).
+	nonisolated private static func historyOrder(_ a: Clip, _ b: Clip) -> Bool {
+		if a.isPinned != b.isPinned { return a.isPinned }
+		if a.timestamp != b.timestamp { return a.timestamp > b.timestamp }
+		return a.id < b.id
 	}
 
-	/// ⌘1–9 / ⇧⌘1–9: paste the item at that position.
-	public func paste(position: Int, plain: Bool) async {
-		let visible = visibleClips
-		guard (1...9).contains(position), position <= visible.count else { return }
-		selectedID = visible[position - 1].id
-		await paste(id: visible[position - 1].id, plain: plain)
+	// MARK: Card actions
+
+	private var writing = false
+
+	/// Resolve targets synchronously, and never deliver a queued UI command into a later presentation.
+	func request(_ operation: @escaping @MainActor () async -> Void) {
+		let generation = presentation, close = closeCount
+		Task {
+			guard cardsMounted, !isClosing, presentation == generation, close == closeCount else { return }
+			await operation()
+		}
 	}
 
-	/// One paste at a time: a second would rewrite the clipboard before the first one's ⌘V.
-	private var isPasting = false
+	func requestCopy(id: UUID?, plain: Bool, dismiss: Bool) {
+		guard let id else { return }
+		request { await self.copy(id: id, plain: plain, dismiss: dismiss) }
+	}
 
-	private func paste(id: UUID, plain: Bool) async {
-		guard storageStatus != .recoveryRequired, !isClosing, !isPasting else { return }
-		isPasting = true
-		defer { isPasting = false }
+	public func copy(id: UUID, plain: Bool, dismiss: Bool) async {
+		guard storageStatus != .recoveryRequired, cardsMounted, !isClosing, !writing else { return }
+		let close = closeCount
+		writing = true
+		defer { writing = false }
 		do {
-			let result = try await actions.paste(id, plain) { [weak self] in self?.beginClose() }
-			if result == .accessibilityRequired { show(.accessibilityRequired) }
+			try await actions.write(id, plain)
+			guard dismiss, close == closeCount else { return }
+			isClosingAfterCopy = true
+			beginClose()
 		} catch {
-			showActionError(error, operation: "paste")
+			showActionError(error, operation: "copy", close: close)
 		}
 	}
 
 	public func perform(_ action: CardAction, id: UUID) async {
-		guard storageStatus != .recoveryRequired else { return }
-		if selectedID != id { selectedID = id }
+		guard storageStatus != .recoveryRequired, visibleClips.contains(where: { $0.id == id }) else { return }
+		selectOnPress(id)
 		switch action {
-		case .paste: await paste(id: id, plain: false)
-		case .pastePlain: await paste(id: id, plain: true)
-		case .copy:
-			do { try await actions.copy(id) } catch { showActionError(error, operation: "copy") }
-		case .delete: await deleteSelected()
+		case .activate, .copyPlain, .copy: await copy(id: id, plain: action == .copyPlain, dismiss: action != .copy)
+		case .delete: await delete(ids: [id])
+		case .pin: await togglePin(id)
 		}
 	}
 
-	public func openAccessibilitySettings() { actions.openAccessibilitySettings() }
+	func togglePin(_ id: UUID) async {
+		guard storageStatus != .recoveryRequired, !busy, !isClosing, let clip = clips.first(where: { $0.id == id }) else { return }
+		let pinned = !clip.isPinned, close = closeCount
+		busy = true
+		defer { busy = false }
+		do {
+			try await actions.setPinned(id, pinned)
+			if let i = clips.firstIndex(where: { $0.id == id }), clips[i].isPinned != pinned {
+				clips[i].isPinned = pinned
+				clips.sort(by: Self.historyOrder)
+			}
+		} catch {
+			showActionError(error, operation: pinned ? "pin" : "unpin", close: close)
+		}
+	}
 
 	// MARK: Keys
 
@@ -268,18 +344,15 @@ public final class StripModel {
 		if !query.isEmpty { query = "" } else { beginClose() }
 	}
 
-	/// ⌫ deletes the selected card only when no search is typed.
-	public func backspace() async {
-		guard query.isEmpty else { return }
-		await deleteSelected()
-	}
-
 	// MARK: Open and close
 
 	/// Mounts the cards in their hidden position. Call `animateIn()` once the panel is on screen.
 	public func open() {
 		presentation += 1
+		intent = .results
+		frozenIDs = nil
 		isClosing = false
+		isClosingAfterCopy = false
 		query = ""
 		appeared = false
 		cardsMounted = true
@@ -297,6 +370,8 @@ public final class StripModel {
 		guard cardsMounted, !isClosing else { return }
 		isClosing = true
 		closeCount += 1
+		endUndo()
+		dismissToast()
 		let generation = presentation
 		onCloseStart()
 		animator.run(.close, { self.appeared = false }, {
@@ -308,6 +383,7 @@ public final class StripModel {
 	private func finishClose() {
 		cardsMounted = false
 		isClosing = false
+		isClosingAfterCopy = false
 		commandHeld = false
 		hoveredID = nil
 		endUndo()
@@ -317,7 +393,8 @@ public final class StripModel {
 
 	// MARK: Toasts
 
-	private func showActionError(_ error: Error, operation: String) {
+	private func showActionError(_ error: Error, operation: String, close: Int) {
+		guard close == closeCount || error as? StripActionError == .outcomeUnknown else { return }
 		switch error as? StripActionError {
 		case .outcomeUnknown:
 			storageStatus = .recoveryRequired
@@ -340,7 +417,7 @@ public final class StripModel {
 	}
 
 	private func endUndo(expired: Bool = false) {
-		let id = undoEntry?.clip.id
+		let id = undoEntry?.token
 		undoEntry = nil
 		cancelUndoDeadline?()
 		cancelUndoDeadline = nil

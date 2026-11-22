@@ -1,11 +1,55 @@
 import Testing
 import AppKit
 import SwiftUI
+import KeyboardShortcuts
 import CopiaFixtures
 @testable import CopiaUI
 
-@MainActor
-@Suite struct SettingsWindowTests {
+extension WindowTests {
+	@MainActor @Suite struct SettingsWindowTests {}
+}
+
+extension WindowTests.SettingsWindowTests {
+	@Test func generalControlsHideTheIconAndStillPauseAndResume() async throws {
+		AccessibilityNode.enableInProcess()
+		let model = ShellModel()
+		#expect(model.showMenuBarIcon)
+		var visibilityRequests: [Bool] = []
+		model.setShowMenuBarIcon = { [weak model] in visibilityRequests.append($0); model?.showMenuBarIcon = $0 }
+		model.togglePause = { [weak model] in model?.paused.toggle() }
+		// Host only General: this test never creates recorders or binds live shortcuts.
+		let view = NSHostingView(rootView: SettingsView(model: model))
+		let window = NSWindow(contentRect: CGRect(x: -6000, y: -6000, width: SettingsView.width, height: SettingsView.height),
+			styleMask: .borderless, backing: .buffered, defer: false)
+		window.contentView = view
+		window.alphaValue = 0
+		window.orderFrontRegardless()
+		defer { window.orderOut(nil) }
+		func press(_ label: String) async throws {
+			try await Task.sleep(for: .milliseconds(150))
+			view.layoutSubtreeIfNeeded()
+			let nodes = AccessibilityNode(view).all
+			let control = try #require(nodes.first { node in
+				guard ["AXCheckBox", "AXSwitch", "AXButton"].contains(node.role ?? "") else { return false }
+				if node.label == label { return true }
+				let key = "accessibilityTitleUIElement"
+				guard node.object.responds(to: NSSelectorFromString(key)), let title = node.object.value(forKey: key) as? NSObject else { return false }
+				return AccessibilityNode(title).value == label
+			})
+			let press = NSSelectorFromString("accessibilityPerformPress")
+			try #require(control.object.responds(to: press))
+			typealias Press = @convention(c) (AnyObject, Selector) -> Bool
+			_ = unsafeBitCast(control.object.method(for: press), to: Press.self)(control.object, press)
+		}
+		try await press("Show menu bar icon")
+		#expect(visibilityRequests == [false])
+		#expect(!model.showMenuBarIcon)
+		try await press("Pause Capture")
+		#expect(model.paused)
+		try await press("Resume Capture")
+		#expect(!model.paused)
+	}
+
 	@Test func toolbarTabsAreGeneralShortcutsPrivacyWithTheirSymbols() throws {
 		_ = NSApplication.shared
 		let window = SettingsView.makeSettingsWindow(model: ShellModel(), initialTab: .privacy)
@@ -268,12 +312,45 @@ import CopiaFixtures
 /// The status menu, checked without a live status bar.
 @MainActor
 @Suite struct MenuTests {
+	@Test func pauseHasNoInitialGlobalShortcut() {
+		#expect(KeyboardShortcuts.Name.copiaPause.initialShortcut == nil)
+	}
+
+	@Test func migrationOnlyClearsTheOldDefaultOnce() throws {
+		func encode(_ shortcut: KeyboardShortcuts.Shortcut) throws -> String {
+			String(decoding: try JSONEncoder().encode(shortcut), as: UTF8.self)
+		}
+		let old = try encode(.init(.t, modifiers: .command))
+		let custom = try encode(.init(.t, modifiers: [.shift, .command]))
+		for initial: Any? in [old, custom, false, nil] {
+			let suite = "copia.shortcuts.\(UUID().uuidString)"
+			let defaults = try #require(UserDefaults(suiteName: suite))
+			defer { defaults.removePersistentDomain(forName: suite) }
+			let key = "KeyboardShortcuts_copiaPause"
+			defaults.set(initial, forKey: key)
+			defaults.set("unrelated", forKey: "sentinel")
+			MenuBarController.migratePauseShortcut(in: defaults)
+			if initial as? String == custom {
+				#expect(defaults.object(forKey: key) as? String == custom)
+			} else if initial is Bool {
+				#expect(defaults.object(forKey: key) as? Bool == false)
+			} else {
+				#expect(defaults.object(forKey: key) == nil)
+			}
+			#expect(defaults.string(forKey: "sentinel") == "unrelated")
+			// An intentional recording of ⌘T after migration survives a relaunch, even on a fresh install.
+			defaults.set(old, forKey: key)
+			MenuBarController.migratePauseShortcut(in: defaults)
+			#expect(defaults.string(forKey: key) == old)
+		}
+	}
+
 	@Test func titlesKeyEquivalentsAndActions() {
 		let items = MenuBarController.items(paused: false)
 		#expect(items.map { $0.isSeparatorItem ? "-" : $0.title } == ["Open History", "Pause Capture", "-", "Settings…", "Quit"])
 		let rows = items.filter { !$0.isSeparatorItem }
-		#expect(rows.map(\.keyEquivalent) == ["y", "t", ",", "q"])
-		#expect(rows.allSatisfy { $0.keyEquivalentModifierMask == .command })
+		#expect(rows.map(\.keyEquivalent) == ["", "", ",", "q"])
+		#expect(rows.suffix(2).allSatisfy { $0.keyEquivalentModifierMask == .command })
 		#expect(rows.map(\.action) == [#selector(MenuBarController.history), #selector(MenuBarController.pause),
 			#selector(MenuBarController.openSettings), #selector(MenuBarController.quitApp)])
 	}
@@ -298,9 +375,11 @@ import CopiaFixtures
 /// The onboarding status glyph follows each injected permission state.
 @MainActor
 @Suite struct PermissionGlyphTests {
-	@Test func accessibilityGrantedOrRevoked() {
-		#expect(PermissionGlyph(accessibility: true) == .granted)
-		#expect(PermissionGlyph(accessibility: false) == .needed)
+	@Test func onboardingAsksOnlyForClipboardAccess() {
+		#expect(OnboardingStep.allCases.map(\.title) == ["Welcome", "Pasteboard", "Try it"])
+	}
+
+	@Test func glyphsDistinguishGrantedFromNeeded() {
 		#expect(PermissionGlyph.granted.symbol == "checkmark.circle.fill")
 		#expect(PermissionGlyph.needed.symbol == "exclamationmark.triangle.fill")
 		#expect(PermissionGlyph.granted.isGranted && !PermissionGlyph.needed.isGranted)
@@ -327,23 +406,23 @@ import CopiaFixtures
 		let expected: [(PermissionState.Pasteboard, PermissionGlyph)] = [(.unset, .needed), (.ask, .needed), (.allow, .granted), (.deny, .needed)]
 		for (state, glyph) in expected {
 			#expect(PermissionGlyph(pasteboard: state) == glyph, "\(state)")
-			#expect(PermissionState(accessibility: false, pasteboard: state).pasteboardGlyph == glyph, "\(state)")
+			#expect(PermissionState(pasteboard: state).pasteboardGlyph == glyph, "\(state)")
 		}
 	}
 
 	@Test func modelChangeRedrawsTheGlyphWithoutRelaunch() {
 		final class Flag: @unchecked Sendable { var fired = 0 }
 		let model = ShellModel(), flag = Flag()
-		func read() -> (PermissionGlyph, PermissionGlyph) {
-			withObservationTracking { (model.permissions.accessibilityGlyph, model.permissions.pasteboardGlyph) }
+		func read() -> PermissionGlyph {
+			withObservationTracking { model.permissions.pasteboardGlyph }
 				onChange: { flag.fired += 1 }
 		}
-		#expect(read() == (.needed, .needed))
-		model.permissions = PermissionState(accessibility: true, pasteboard: .allow)
+		#expect(read() == .needed)
+		model.permissions = PermissionState(pasteboard: .allow)
 		#expect(flag.fired == 1)
-		#expect(read() == (.granted, .granted))
-		model.permissions = PermissionState(accessibility: false, pasteboard: .deny)
+		#expect(read() == .granted)
+		model.permissions = PermissionState(pasteboard: .deny)
 		#expect(flag.fired == 2)
-		#expect(read() == (.needed, .needed))
+		#expect(read() == .needed)
 	}
 }

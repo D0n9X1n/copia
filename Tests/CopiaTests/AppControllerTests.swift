@@ -56,19 +56,20 @@ final class AppRig {
 	let suite = "copia-tests-\(UUID().uuidString)"
 	let defaults: UserDefaults
 	let pasteboard = FakePasteboard()
+	let board = NSPasteboard.withUniqueName()
 	let login = FakeLogin()
 	let links = CountingLinks()
 	let thumbs = CountingThumbnails()
-	var permissions = PermissionState(accessibility: false, pasteboard: .unset)
+	var permissions = PermissionState(pasteboard: .unset)
 	let controller: AppController
 
 	init(dir shared: URL? = nil, storageFiles: any FileOps = LiveFileOps()) throws {
 		dir = shared ?? FileManager.default.temporaryDirectory.appendingPathComponent("copia-app-\(UUID().uuidString)")
 		ownsDirectory = shared == nil
 		defaults = UserDefaults(suiteName: suite)!
-		var rig: AppRig?
-		controller = try AppController(directory: dir, defaults: defaults, pasteboard: pasteboard, login: login,
-			permissions: { rig?.permissions ?? PermissionState(accessibility: false, pasteboard: .unset) },
+		weak var rig: AppRig?
+		controller = try AppController(directory: dir, defaults: defaults, pasteboard: pasteboard, writerBoard: board, login: login,
+			permissions: { rig?.permissions ?? PermissionState(pasteboard: .unset) },
 			links: links, files: thumbs, storageFiles: storageFiles)
 		rig = self
 		controller.model.animator = .immediate
@@ -90,7 +91,8 @@ final class AppRig {
 		(try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent(sub).path).count) ?? 0
 	}
 
-	deinit {
+	isolated deinit {
+		board.releaseGlobally()
 		if ownsDirectory { try? FileManager.default.removeItem(at: dir) }
 		UserDefaults.standard.removePersistentDomain(forName: suite)
 	}
@@ -111,8 +113,11 @@ func eventually(_ condition: () async throws -> Bool) async rethrows -> Bool {
 	return try await condition()
 }
 
-@MainActor
-@Suite(.serialized) struct AppControllerTests {
+extension WindowTests {
+	@MainActor @Suite struct AppControllerTests {}
+}
+
+extension WindowTests.AppControllerTests {
 	@Test func anInsertWhileOpenKeepsTheSelectionAndARecopyMovesToTheFront() async throws {
 		let r = try AppRig()
 		try await r.copy("one"); try await r.copy("two"); try await r.copy("three")
@@ -422,6 +427,100 @@ func eventually(_ condition: () async throws -> Bool) async rethrows -> Bool {
 		#expect(r.titles().isEmpty)
 	}
 
+	@Test func groupedUndoRestoresPinsAndKeepsLaterCopies() async throws {
+		let r = try AppRig(), model = r.controller.model
+		try await r.copy("first member"); try await r.copy("second member")
+		let pinned = try #require(model.clips.last?.id)
+		try await model.actions.setPinned(pinned, true)
+		model.open()
+		model.selectAllResults()
+		await model.deleteSelected()
+		#expect(r.titles().isEmpty && model.canUndo)
+		try await r.copy("later item")
+		await model.undo()
+		#expect(r.titles() == ["first member", "later item", "second member"])
+		#expect(model.clips.first?.isPinned == true)
+		#expect(try await r.controller.store.recent().map(\.title) == r.titles())
+		#expect(!model.canUndo)
+	}
+
+	@Test func recopyOfOneGroupMemberNeverOverwritesTheNewCopy() async throws {
+		let r = try AppRig(), model = r.controller.model
+		try await r.copy("red"); try await r.copy("blue")
+		model.open(); model.selectAllResults()
+		await model.deleteSelected()
+		try await r.copy("red")
+		#expect(!model.canUndo)
+		await model.undo()
+		#expect(r.titles() == ["red"])
+		#expect(try await r.controller.store.recent().map(\.title) == ["red"])
+	}
+
+	@Test func activationWithUndoPendingOnlyCopiesAndReclaimsSnapshotsWithoutAWarning() async throws {
+		let r = try AppRig(), model = r.controller.model, clock = ClockProbe()
+		var cleanupScheduled = false
+		model.clock = ToastClock { delay, fire in
+			if !model.cardsMounted { cleanupScheduled = true }
+			return clock.clock.after(delay, fire)
+		}
+		try await r.copy("one"); try await r.copy("two")
+		model.open()
+		model.select(try #require(model.clips.first { $0.text == "two" }?.id))
+		await model.deleteSelected()
+		let id = try #require(model.selectedID)
+		let before = try FileManager.default.subpathsOfDirectory(atPath: r.dir.path).sorted()
+		await model.copy(id: id, plain: false, dismiss: true)
+		#expect(r.board.string(forType: .string) == "one")
+		#expect(!model.cardsMounted && !model.canUndo)
+		try #require(await eventually { cleanupScheduled })
+		#expect(await r.controller.store.cleanupPending == false)
+		#expect(model.storageStatus == .ready && r.controller.shell.storageStatus == .ready)
+		#expect(try FileManager.default.subpathsOfDirectory(atPath: r.dir.path).sorted() == before)
+		clock.advance(by: StripModel.toastLifetime)
+		#expect(await eventually { r.fileCount("trash") == 0 })
+		#expect(await r.controller.store.cleanupPending == false)
+		#expect(model.storageStatus == .ready && r.controller.shell.storageStatus == .ready)
+	}
+
+	@Test func writingAFileReferenceDoesNotMaterializeItsContents() async throws {
+		let r = try AppRig()
+		let ref = r.dir.appendingPathComponent("never-created.pdf")
+		let bytes = Data(ref.absoluteString.utf8)
+		let clip = try await r.controller.store.insert(ClipDraft(items: [PasteboardItemData([(PasteboardTypes.fileURL, bytes)])], copiedAt: .now)).clip
+		await r.controller.reload()
+		let id = ClipDraft.uuid(forKey: clip.key)
+		let before = try FileManager.default.subpathsOfDirectory(atPath: r.dir.path).sorted()
+		try await r.controller.model.actions.write(id, false)
+		#expect(r.board.pasteboardItems?.first?.data(forType: .fileURL) == bytes)
+		#expect(r.board.types?.contains(.init(PasteboardTypes.marker)) == true)
+		#expect(try FileManager.default.subpathsOfDirectory(atPath: r.dir.path).sorted() == before)
+		#expect(!FileManager.default.fileExists(atPath: ref.path))
+	}
+
+	@Test func missingCardCannotReportASuccessfulCopy() async throws {
+		let r = try AppRig(), count = r.board.changeCount
+		await #expect(throws: (any Error).self) { try await r.controller.model.actions.write(UUID(), false) }
+		#expect(r.board.changeCount == count)
+	}
+
+	@Test func hidingMenuIconPersistsWithoutPausingTheWatcher() async throws {
+		let r = try AppRig()
+		await r.launch(); defer { r.stop() }
+		#expect(r.controller.shell.showMenuBarIcon)
+		r.controller.shell.setShowMenuBarIcon(false)
+		#expect(!Preferences(defaults: r.defaults).showMenuBarIcon)
+		#expect(!r.controller.shell.showMenuBarIcon && !r.controller.watcher.paused)
+		r.pasteboard.copy("captured without a status icon")
+		r.controller.watcher.tick()
+		#expect(await eventually { r.titles().contains("captured without a status icon") })
+		r.controller.shell.togglePause()
+		#expect(r.controller.watcher.paused)
+		r.controller.shell.togglePause()
+		#expect(!r.controller.watcher.paused)
+		r.controller.shell.setShowMenuBarIcon(true)
+		#expect(Preferences(defaults: r.defaults).showMenuBarIcon)
+	}
+
 	@Test func settingsPersist() throws {
 		let suite = "copia-tests-\(UUID().uuidString)"
 		defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
@@ -463,11 +562,9 @@ func eventually(_ condition: () async throws -> Bool) async rethrows -> Bool {
 	@Test func onboardingFollowsPermissionChangesLive() throws {
 		let r = try AppRig()
 		for pasteboard in [PermissionState.Pasteboard.unset, .ask, .allow, .deny] {
-			for accessibility in [false, true] {
-				r.permissions = PermissionState(accessibility: accessibility, pasteboard: pasteboard)
-				r.controller.refreshPermissions()
-				#expect(r.controller.shell.permissions == r.permissions)
-			}
+			r.permissions = PermissionState(pasteboard: pasteboard)
+			r.controller.refreshPermissions()
+			#expect(r.controller.shell.permissions == r.permissions)
 		}
 	}
 

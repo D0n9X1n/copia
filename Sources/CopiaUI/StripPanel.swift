@@ -33,6 +33,20 @@ public final class StripPanel: NSPanel {
 	override public var canBecomeKey: Bool { true }
 	override public var canBecomeMain: Bool { false }
 
+	/// DragGesture also recognizes a contextual down. Keep that event out of primary selection,
+	/// including when the menu tracks its own nested events inside sendEvent.
+	var openContextMenu: ((NSEvent) -> Bool)?
+	private(set) var handlingContextClick = false
+
+	override public func sendEvent(_ event: NSEvent) {
+		let previous = handlingContextClick
+		handlingContextClick = previous || event.type == .rightMouseDown || event.type == .rightMouseDragged
+			|| (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+		defer { handlingContextClick = previous }
+		if !previous, handlingContextClick, event.type != .rightMouseDragged, openContextMenu?(event) == true { return }
+		super.sendEvent(event)
+	}
+
 	override public func performKeyEquivalent(with event: NSEvent) -> Bool {
 		onKeyEquivalent(event) || super.performKeyEquivalent(with: event)
 	}

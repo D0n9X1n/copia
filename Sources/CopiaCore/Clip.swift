@@ -37,6 +37,7 @@ public struct Clip: Identifiable, Equatable, Sendable {
 	public var fileNames: [String]
 	public var colorHex: String?
 	public var url: URL?
+	public var isPinned: Bool
 
 	public init(
 		id: UUID,
@@ -50,7 +51,8 @@ public struct Clip: Identifiable, Equatable, Sendable {
 		preview: Preview = .pending,
 		fileNames: [String] = [],
 		colorHex: String? = nil,
-		url: URL? = nil
+		url: URL? = nil,
+		isPinned: Bool = false
 	) {
 		self.id = id
 		self.kind = kind
@@ -64,5 +66,6 @@ public struct Clip: Identifiable, Equatable, Sendable {
 		self.fileNames = fileNames
 		self.colorHex = colorHex
 		self.url = url
+		self.isPinned = isPinned
 	}
 }

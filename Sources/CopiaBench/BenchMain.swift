@@ -152,13 +152,11 @@ enum Bench {
 	static func run(_ options: Options) async -> Int32 {
 		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-bench-\(UUID().uuidString)")
 		defer { try? FileManager.default.removeItem(at: dir) }
-		let defaults = UserDefaults(suiteName: "copia-bench-\(UUID().uuidString)")!
-		defaults.set(true, forKey: "onboarded")
-		// Paused capture still polls the real pasteboard's change count every 0.5 s, so idle CPU includes polling,
-		// but nothing the user copies during the run is read or stored.
-		defaults.set(true, forKey: "paused")
+		let suite = "copia-bench-\(UUID())"
+		let defaults = UserDefaults(suiteName: suite)!, board = NSPasteboard.withUniqueName()
+		defer { board.releaseGlobally(); defaults.removePersistentDomain(forName: suite) }
 		do {
-			let controller = try AppController(directory: dir.appendingPathComponent("store"), defaults: defaults)
+			let controller = try AppController.scratch(directory: dir.appendingPathComponent("store"), defaults: defaults, pasteboard: board)
 			try await seed(controller.store, assets: dir.appendingPathComponent("assets"))
 			await controller.start(showOnboarding: false, menuAndHotkeys: false)
 			if let screen = NSScreen.screens.first {
@@ -174,9 +172,10 @@ enum Bench {
 			try? await Task.sleep(for: .seconds(3))
 			let idleFootprint = footprintMB()
 			Diagnostics.reset()
-			let cpu0 = cpuSeconds(), wall0 = Date()
+			let cpu0 = cpuSeconds(), wall0 = Date(), polls0 = controller.capturePollCount
 			try? await Task.sleep(for: .seconds(options.idleSeconds))
 			let idleCPU = (cpuSeconds() - cpu0) / Date().timeIntervalSince(wall0) * 100
+			let idlePolls = controller.capturePollCount - polls0
 			let idle = counters()
 			let windowsOnScreen = NSApp.windows.filter(\.isVisible).count
 			let hiddenOK = !controller.panel.isVisible && !controller.model.cardsMounted && controller.thumbnails.entryCount == 0
@@ -211,12 +210,20 @@ enum Bench {
 			if path == .screenCaptureKit {
 				do {
 					let run = try await RecordedRun.start(controller)
+					let pointer = await run.pointerSelections()
 					let presentedOpens = await run.latencies(options.opens)
 					let motion = await run.motion(rounds: options.motionRounds)
 					let scroll = await run.scroll(velocity: 4_000, seconds: 5)
 					let frozen = await run.scroll(velocity: 0, seconds: 1.5)
 					await run.finish()
 					let refreshHz = (1 / run.refresh).rounded()
+					presented.append(("pointerSelection.presentedTargetRing", RecordedRun.pointerSnapPasses(pointer)))
+					report["pointerSelection"] = [
+						"method": "owned windows: mouse-down dispatch, layout/transaction flush, first presented target ring at half settled contrast",
+						"dispatchMs": pointer.map { $0.dispatch.map(ms) as Any? ?? NSNull() },
+						"transactionFlushMs": pointer.map { ms($0.commit) },
+						"presentedTargetRingMs": pointer.map { $0.presented.map(ms) as Any? ?? NSNull() },
+					] as [String: Any]
 					report["refreshHz"] = refreshHz
 					report["presentedFramesGate"] = BenchPlan.gatesPresentedFrames(refreshHz: refreshHz)
 					report["presentedOpen"] = [
@@ -228,15 +235,16 @@ enum Bench {
 					presented.append(("presentedOpenP95ms < \(Budgets.openP95ms)", percentile(presentedOpens, 0.95) < Budgets.openP95ms))
 					report["scroll"] = [
 						"velocityPointsPerSecond": 4_000, "seconds": 5,
-						"freshFraction": scroll.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
-						"onTimeFraction": scroll.map { ($0.onTimeFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
-						"presentedFrames": scroll?.presented ?? 0,
-						"frozenControlFreshFraction": frozen.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
-						"frozenControlOnTimeFraction": frozen.map { ($0.onTimeFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+						"drive": scroll.evidence, "frozenControlDrive": frozen.evidence,
+						"freshFraction": scroll.result.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+						"onTimeFraction": scroll.result.map { ($0.onTimeFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+						"presentedFrames": scroll.result?.presented as Any? ?? NSNull(),
+						"frozenControlFreshFraction": frozen.result.map { ($0.freshFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
+						"frozenControlOnTimeFraction": frozen.result.map { ($0.onTimeFraction * 1_000).rounded() / 1_000 } ?? NSNull(),
 					] as [String: Any]
-					presented.append(("scrollSmoothness", scroll?.passes ?? false))
+					presented.append(("scrollSmoothness", scroll.result?.passes ?? false))
 					// The negative control must fail the same check, or the check proves nothing. It gates at any refresh.
-					checks.append(("scrollFrozenControlFails", frozen.map { !$0.passes } ?? false))
+					checks.append(("scrollFrozenControlFails", frozen.result.map { !$0.passes } ?? false))
 					var motionReport: [String: Any] = [:]
 					for event in SettleBudget.events {
 						for reduced in [false, true] {
@@ -244,12 +252,13 @@ enum Bench {
 							let samples = motion[key] ?? []
 							let settled = samples.compactMap { $0?.seconds }
 							let limit = SettleBudget.limit(event, reduced: reduced)
-							let passes = !samples.isEmpty && settled.count == samples.count && median(settled) <= limit
+							let passes = !samples.isEmpty && samples.count == options.motionRounds && settled.count == samples.count && median(settled) <= limit
 							presented.append(("motionSettle.\(key)", passes))
 							motionReport[key] = [
 								"analyticMs": ms(SettleBudget.analytic(event, reduced: reduced)), "limitMs": ms(limit),
 								"medianMs": settled.isEmpty ? NSNull() : ms(median(settled)) as Any,
 								"samplesMs": samples.map { $0.map { ms($0.seconds) } ?? -1 },
+								"interruptedRounds": run.motionInterruptions[key] ?? [],
 								"fromTriggerMs": samples.map { $0.map { ms($0.fromTrigger) } ?? -1 },
 							] as [String: Any]
 						}
@@ -283,6 +292,7 @@ enum Bench {
 				("openFootprintMB < \(Budgets.openFootprintMB)", openFootprint < Budgets.openFootprintMB),
 				("openP95ms < \(Budgets.openP95ms)", p95 < Budgets.openP95ms),
 				("hiddenReleasesCards", hiddenOK),
+				("privateBoardPollingActive", options.idleSeconds < 1 || idlePolls > 0),
 			] + hidden.failures.map { ($0, false) } + checks
 			let skips = BenchPlan.skips(path: path, screenRecording: screenRecording)
 			report.merge([
@@ -292,6 +302,7 @@ enum Bench {
 				"skipped": skips.map { ["check": $0.check, "reason": $0.reason] },
 				"clips": controller.model.clips.count,
 				"idleSeconds": options.idleSeconds,
+				"privateBoardPolls": idlePolls,
 				"idleCPUPercent": (idleCPU * 1_000).rounded() / 1_000,
 				"idleFootprintMB": (idleFootprint * 10).rounded() / 10,
 				"openFootprintMB": (openFootprint * 10).rounded() / 10,

@@ -23,6 +23,18 @@ public enum PanelLayout {
 		Theme.rowPadding + CGFloat(index) * (Theme.cardSize.width + Theme.cardGap)
 	}
 
+	static func visibleSlots(offset: CGFloat, viewport: CGFloat, count: Int) -> Range<Int> {
+		let stride = Theme.cardSize.width + Theme.cardGap
+		let first = min(count, max(0, Int(floor((offset - Theme.rowPadding) / stride))))
+		let end = min(count, max(first, Int(ceil((offset + viewport - Theme.rowPadding) / stride))))
+		return first..<end
+	}
+
+	static func mountedSlots(around visible: Range<Int>, count: Int) -> Range<Int> {
+		let batch = 4
+		return max(0, (visible.lowerBound / batch - 1) * batch)..<min(count, ((visible.upperBound + batch - 1) / batch + 1) * batch)
+	}
+
 	public static func contentWidth(count: Int) -> CGFloat {
 		guard count > 0 else { return 2 * Theme.rowPadding }
 		return 2 * Theme.rowPadding + CGFloat(count) * Theme.cardSize.width + CGFloat(count - 1) * Theme.cardGap
