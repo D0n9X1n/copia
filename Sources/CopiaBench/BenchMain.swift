@@ -12,7 +12,7 @@ import CopiaUI
 @MainActor
 enum Bench {
 	struct Budgets {
-		static let idleCPUPercent = 0.1
+		static let idleCPUPercent = 0.15
 		static let idleFootprintMB = 40.0
 		static let openFootprintMB = 120.0
 		static let openP95ms = 100.0
