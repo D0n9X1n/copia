@@ -172,6 +172,7 @@ public struct StripView: View {
 			.background {
 				if primary {
 					LensRing(removing: model.removingIDs.contains(clip.id)).matchedGeometryEffect(id: "lens", in: lensSpace)
+						.allowsHitTesting(false)
 				}
 			}
 			.overlay {
@@ -179,6 +180,7 @@ public struct StripView: View {
 					RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)
 				}
 			}
+			.contentShape(.interaction, Rectangle())
 			.focusEffectDisabled()
 			.onHover { inside in
 				if inside { model.hoveredID = clip.id } else if model.hoveredID == clip.id { model.hoveredID = nil }

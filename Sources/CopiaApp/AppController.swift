@@ -431,7 +431,10 @@ public final class AppController {
 			self?.watcher.ignoredApps = Set(apps)
 		}
 		shell.erase = { [weak self] in Task { await self?.erase() } }
-		if observesWorkspace { shell.openPasteboard = { Permissions.openPasteboardSettings() } }
+		if observesWorkspace {
+			shell.openPasteboard = { Permissions.openPasteboardSettings() }
+			shell.latestVersion = { try await ReleaseLookup.latest() }
+		}
 		shell.openHistory = { [weak self] in self?.toggleHistory() }
 		shell.finishOnboarding = { [weak self] in
 			self?.prefs.onboarded = true

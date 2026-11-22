@@ -31,7 +31,7 @@
 - **⌘C is all it takes.** Text, rich text, images, links, files and colors appear newest first below your pins. Copy something again and it moves to the front of its group.
 - **⌘Y brings it back.** The strip opens over whatever you are doing on the display under your pointer. Select a card on press; use Return to copy it and dismiss the strip.
 - **Measured, not assumed.** Earlier local runs opened in 79 ms (p95 93 ms) and idled at 0.05% CPU and 31 MB. Earlier CI missed the historical <0.1% CPU limit and open-latency budget; fresh CI under the revised <0.15% CPU limit is required before release.
-- **Private by default.** Concealed copies and password managers are never stored, you can pause capture from the menu, and nothing leaves your Mac except a link's one-time preview request.
+- **Private by default.** Concealed copies and password managers are never stored. Links make a one-time preview request. Settings → About checks for updates only when you ask; GitHub sees your IP address and the generic `Copia` user agent, not your version or clipboard history.
 - **Yours, on disk.** History is one SQLite file plus thumbnails in Application Support. Deleting a card keeps a short-lived undo snapshot; any pending file cleanup is reported.
 
 ## A closer look

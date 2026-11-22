@@ -221,7 +221,8 @@ enum Bench {
 					report["pointerSelection"] = [
 						"method": "owned windows: mouse-down dispatch, layout/transaction flush, first presented target ring at half settled contrast",
 						"dispatchMs": pointer.map { $0.dispatch.map(ms) as Any? ?? NSNull() },
-						"transactionFlushMs": pointer.map { ms($0.commit) },
+						"transactionFlushMs": pointer.map { $0.commit.map(ms) as Any? ?? NSNull() },
+						"invalidReasons": pointer.map { $0.failure?.rawValue as Any? ?? NSNull() },
 						"presentedTargetRingMs": pointer.map { $0.presented.map(ms) as Any? ?? NSNull() },
 					] as [String: Any]
 					report["refreshHz"] = refreshHz

@@ -19,6 +19,52 @@ extension WindowTests.StripCopyTests {
 		PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///fixture/never-opened.txt".utf8))]),
 	] }
 
+	@Test func repeatedPressAtSecondCardNeverActivatesFormerFourthCard() async throws {
+		let clips = Array(Fixtures.tenThousand.prefix(4))
+		let host = InputHost(clips: clips), board = NSPasteboard.withUniqueName(), writer = Paster(pasteboard: board)
+		defer { host.close(); board.releaseGlobally() }
+		var writes: [UUID] = []
+		host.model.actions.write = { id, plain in
+			let clip = try #require(clips.first { $0.id == id })
+			try writer.write([PasteboardItemData([(PasteboardTypes.string, Data(clip.text.utf8))])], plain: plain)
+			writes.append(id)
+		}
+		func center(_ clip: Clip) throws -> CGPoint {
+			let node = try #require(host.cards.first { $0.label.hasSuffix(clip.text) })
+			let point = host.panel.convertPoint(fromScreen: CGPoint(x: node.frame.midX, y: node.frame.midY))
+			try #require(CGRect(origin: .zero, size: host.panel.frame.size).contains(point))
+			return point
+		}
+		await host.settle(250)
+		for (round, keyboard) in [false, false, true].enumerated() {
+			if round > 0 {
+				host.panel.hide(); host.model.open(); host.panel.orderFrontRegardless(); host.panel.makeKey()
+				host.model.animateIn(); await host.settle(250)
+			}
+			let fourth = try center(clips[3])
+			host.mouse(.leftMouseDown, at: fourth); host.mouse(.leftMouseUp, at: fourth)
+			try #require(host.model.selectedID == clips[3].id)
+			await host.settle(90)
+			let second = try center(clips[1]), before = writes.count
+			host.mouse(.leftMouseDown, at: second)
+			#expect(host.model.selectedID == clips[1].id)
+			host.mouse(.leftMouseUp, at: second); await host.settle(110)
+			#expect(host.cards.contains { $0.label.hasSuffix(clips[1].text) && $0.isSelected })
+			#expect(writes.count == before && host.model.cardsMounted)
+			if keyboard {
+				host.key("\r", code: 36)
+			} else {
+				host.mouse(.leftMouseDown, at: second, count: 2)
+				#expect(host.model.selectedID == clips[1].id)
+				host.mouse(.leftMouseUp, at: second, count: 2)
+			}
+			await host.settle(300)
+			#expect(Array(writes.dropFirst(before)) == [clips[1].id])
+			#expect(board.string(forType: .string) == clips[1].text)
+			#expect(!host.model.cardsMounted)
+		}
+	}
+
 	@Test func activationRoutesWriteOrderedItemsWithMarkersToPrivateBoard() async throws {
 		for route in ["Return", "Shift-Return", "Cmd-1", "Shift-Cmd-1", "Cmd-C", "Double-click", "AX activation", "AX plain", "AX copy"] {
 			let host = InputHost(), board = NSPasteboard.withUniqueName(), writer = Paster(pasteboard: board)

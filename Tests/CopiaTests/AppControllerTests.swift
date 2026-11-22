@@ -540,7 +540,7 @@ extension WindowTests.AppControllerTests {
 		let window = r.controller.settings()
 		let tabs = try #require(window.contentViewController as? NSTabViewController)
 		#expect(tabs.tabStyle == .toolbar)
-		#expect(tabs.tabViewItems.map(\.label) == ["General", "Shortcuts", "Privacy"])
+		#expect(tabs.tabViewItems.map(\.label) == ["General", "Shortcuts", "Privacy", "About"])
 		#expect(r.controller.settings() === window)
 	}
 

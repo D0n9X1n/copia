@@ -39,6 +39,17 @@ import Testing
 		#expect(!RecordedRun.pointerSnapPasses([.init(dispatch: nil, commit: 0.008, presented: 0.03)] + [20, 25, 30, 35].map(sample)))
 	}
 
+	@Test func rejectedPointerPressCannotPassWithStaleOrInterruptedTimings() {
+		let good = RecordedRun.PointerSample(dispatch: 0.004, commit: 0.008, presented: 0.025)
+		for reason in [RecordedRun.PointerFailure.panelChanged, .targetAlreadySelected, .targetChanged, .eventUnavailable, .targetUnavailable, .ringNotPresented] {
+			let rejected = RecordedRun.PointerSample(dispatch: 0.001, commit: 0.002, presented: 0.003, failure: reason)
+			#expect(!RecordedRun.pointerSnapPasses([good, good, rejected, good, good]))
+		}
+		#expect(RecordedRun.pointerPressFailure(samePresentation: false, targetAlreadySelected: true) == .panelChanged)
+		#expect(RecordedRun.pointerPressFailure(samePresentation: true, targetAlreadySelected: true) == .targetAlreadySelected)
+		#expect(RecordedRun.pointerPressFailure(samePresentation: true, targetAlreadySelected: false) == nil)
+	}
+
 	@Test @MainActor func pointerTimingRequiresChangedPixelsOnTheClickedRing() {
 		let before = Luma(width: 3, height: 2, fill: 30)
 		var other = before, half = before, final = before
