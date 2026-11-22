@@ -23,9 +23,9 @@ enum SettleBudget {
 	/// A delete starts reflow from the fade completion. Budget the full fade, then the reflow's settle time;
 	/// the budget follows that scheduled sequence rather than assuming the animations overlap.
 	static func analytic(_ event: MotionEvent, reduced: Bool) -> Double {
-		let curve = Motion.value(event, reduced: reduced)
+		let curve = Motion.settleCeiling(event, reduced: reduced)
 		guard event == .delete else { return settle(curve) }
-		return logicalDuration(curve) + settle(Motion.value(.reflow, reduced: reduced))
+		return logicalDuration(curve) + settle(Motion.settleCeiling(.reflow, reduced: reduced))
 	}
 
 	static func limit(_ event: MotionEvent, reduced: Bool) -> Double {

@@ -1,8 +1,12 @@
 import AppKit
 import SwiftUI
+import Testing
 import CopiaCore
 import CopiaFixtures
 @testable import CopiaUI
+
+/// Native key-window ownership is process-wide, including across independently serialized suites.
+@Suite(.serialized) enum WindowTests {}
 
 typealias AXNode = AccessibilityNode
 
@@ -14,9 +18,14 @@ final class StripHost {
 	var requests: [MotionEvent] = []
 
 	init(clips: [Clip] = Fixtures.mixed, width: CGFloat = 1440, thumbnails: ThumbnailCache = ThumbnailCache(),
-		overrides: CopiaOverrides = CopiaOverrides(), appear: Bool = true) {
+		overrides: CopiaOverrides = CopiaOverrides(), appear: Bool = true, now: @escaping () -> Date = { Fixtures.now }) {
 		AccessibilityNode.enableInProcess()
 		model = StripModel(clips: clips)
+		var groups: [UUID: [Clip]] = [:]
+		model.actions.delete = { ids in
+			let token = UUID(); groups[token] = clips.filter { ids.contains($0.id) }; return token
+		}
+		model.actions.restore = { groups.removeValue(forKey: $0) ?? [] }
 		window = NSWindow(contentRect: CGRect(x: -6000, y: -6000, width: width, height: Theme.panelHeight),
 			styleMask: .borderless, backing: .buffered, defer: false)
 		window.isReleasedWhenClosed = false
@@ -27,7 +36,7 @@ final class StripHost {
 			completion()
 		}
 		window.contentView = NSHostingView(rootView: StripView(model: model, focus: SearchFocus(), thumbnails: thumbnails,
-			now: { Fixtures.now }).environment(\.copiaOverrides, overrides))
+			now: now, sources: .fixtures).environment(\.copiaOverrides, overrides))
 		model.open()
 		window.orderFrontRegardless()
 		if appear { model.animateIn() }

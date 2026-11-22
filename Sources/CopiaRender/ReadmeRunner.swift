@@ -57,7 +57,7 @@ enum ReadmeRunner {
 			doc.setFrameOrigin(NSPoint(x: hero.midX - doc.frame.width / 2, y: hero.maxY - 64 - doc.frame.height))
 			doc.orderFrontRegardless()
 			try await RenderRunner.showStrip(Scene(name: "hero", dark: dark), clips: mixed, in: hero, panel: panel)
-			try shoot(hero, name: "hero-\(mode)", width: 1800, radius: 28, output: output, work: work, screen: screen)
+			try await shoot(hero, windows: [wallpaper, doc, panel], name: "hero-\(mode)", width: 1800, radius: 28, output: output, work: work, screen: screen)
 			doc.orderOut(nil)
 
 			// Feature tiles: a two-card strip with wallpaper around it.
@@ -70,7 +70,7 @@ enum ReadmeRunner {
 				var scene = Scene(name: tile.name, dark: dark)
 				scene.prepare = tile.prepare
 				try await RenderRunner.showStrip(scene, clips: tile.clips, in: visible, panel: panel)
-				try shoot(region, name: "\(tile.name)-\(mode)", width: Int(size.width * 2), radius: 24,
+				try await shoot(region, windows: [wallpaper, panel], name: "\(tile.name)-\(mode)", width: Int(size.width * 2), radius: 24,
 					output: output, work: work, screen: screen)
 			}
 			panel.orderOut(nil)
@@ -145,9 +145,9 @@ enum ReadmeRunner {
 	}
 
 	/// Captures `region`, then scales it to `width` pixels with rounded corners.
-	static func shoot(_ region: CGRect, name: String, width: Int, radius: CGFloat, output: URL, work: URL, screen: NSScreen) throws {
+	static func shoot(_ region: CGRect, windows: [NSWindow], name: String, width: Int, radius: CGFloat, output: URL, work: URL, screen: NSScreen) async throws {
 		let raw = work.appendingPathComponent("\(name)-raw.png")
-		try RenderRunner.capture(region, on: screen, to: raw)
+		try await RenderRunner.capture(region, on: screen, windows: windows, to: raw)
 		try finish(raw, to: output.appendingPathComponent("\(name).png"), width: width, radius: radius)
 		print("rendered readme \(name)")
 	}

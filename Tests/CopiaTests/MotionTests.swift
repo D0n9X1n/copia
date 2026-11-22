@@ -3,20 +3,38 @@ import Foundation
 @testable import CopiaUI
 
 @Suite struct MotionTests {
-	@Test func normalTableMatchesBrief() {
-		#expect(Motion.value(.open, reduced: false) == .spring(response: 0.32, damping: 0.86))
-		#expect(Motion.value(.close, reduced: false) == .easeIn(0.18))
-		#expect(Motion.value(.lens, reduced: false) == .spring(response: 0.22, damping: 0.9))
+	@Test func normalPlaybackKeepsTheOriginalSpringShapes() {
+		#expect(Motion.value(.open, reduced: false) == .spring(response: 0.23, damping: 0.86))
+		#expect(Motion.value(.close, reduced: false) == .easeIn(0.125))
+		#expect(Motion.value(.lens, reduced: false) == .spring(response: 0.16, damping: 0.9))
 		#expect(Motion.value(.delete, reduced: false) == .easeInOut(0.2))
-		#expect(Motion.value(.reflow, reduced: false) == .spring(response: 0.3, damping: 0.9))
+		#expect(Motion.value(.reflow, reduced: false) == .spring(response: 0.16, damping: 0.9))
 		#expect(Motion.value(.loading, reduced: false) == .linear(0.15))
 	}
 
 	@Test func reducedMotionFollowsBrief() {
 		#expect(Motion.value(.lens, reduced: true) == .none)
-		for event in MotionEvent.allCases where event != .lens {
-			#expect(Motion.value(event, reduced: true) == .linear(0.15))
+		for event in [MotionEvent.open, .close, .undo] { #expect(Motion.value(event, reduced: true) == .linear(0.105)) }
+		#expect(Motion.value(.reflow, reduced: true) == .linear(0.08))
+		for event in [MotionEvent.delete, .insert, .loading] { #expect(Motion.value(event, reduced: true) == .linear(0.15)) }
+	}
+
+	@Test func livePlaybackHasHeadroomInsideThePublishedMotionBudget() {
+		for event in [MotionEvent.open, .close, .lens, .undo, .reflow] {
+			let live = Motion.value(event, reduced: false), ceiling = Motion.settleCeiling(event, reduced: false)
+			switch (live, ceiling) {
+			case let (.spring(t, damping), .spring(limit, originalDamping)):
+				#expect(t < limit && damping == originalDamping)
+			case let (.easeIn(t), .easeIn(limit)), let (.easeInOut(t), .easeInOut(limit)):
+				#expect(t < limit)
+			default: Issue.record("Changed the shape of \(event) instead of shortening its duration")
+			}
 		}
+		#expect(Motion.value(.lens, reduced: true) == .none)
+		#expect(Motion.settleCeiling(.open, reduced: false) == .spring(response: 0.32, damping: 0.86))
+		#expect(Motion.settleCeiling(.close, reduced: true) == .linear(0.15))
+		#expect(Motion.settleCeiling(.reflow, reduced: false) == .spring(response: 0.3, damping: 0.9))
+		#expect(Motion.settleCeiling(.reflow, reduced: true) == .linear(0.15))
 	}
 
 	@Test func everyEventHasAnEntry() {
@@ -33,8 +51,8 @@ import Foundation
 		#expect(StripMotion.openOffset(appeared: false, reduced: true) == 0)
 		#expect(StripMotion.openOpacity(appeared: false, reduced: true) == 0)
 		#expect(StripMotion.openOpacity(appeared: true, reduced: true) == 1)
-		#expect(Motion.value(.open, reduced: true) == .linear(0.15))
-		#expect(Motion.value(.close, reduced: true) == .linear(0.15))
+		#expect(Motion.value(.open, reduced: true) == .linear(0.105))
+		#expect(Motion.value(.close, reduced: true) == .linear(0.105))
 	}
 
 	@Test func reduceMotionDeletesAndInsertsOnlyCrossfade() {

@@ -129,7 +129,7 @@ struct ClipCard: View {
 	let hovered: Bool
 	let selected: Bool
 	let removing: Bool
-	let now: Date
+	let age: String
 	let highlight: String
 	let thumbnails: ThumbnailCache
 	/// Runs the preview fade-in, so it comes from the Motion table and tests see it.
@@ -159,8 +159,12 @@ struct ClipCard: View {
 			RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
 				.strokeBorder(Theme.stroke(hovered: hovered, highContrast: highContrast), lineWidth: 1)
 		}
-		.shadow(color: .black.opacity(selected ? 0.18 : (scheme == .dark ? 0.30 : 0.10)),
-			radius: selected ? 9 : 4, y: selected ? 6 : 2)
+		.background {
+			RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+				.fill(Theme.card)
+				.shadow(color: .black.opacity(selected ? 0.18 : (scheme == .dark ? 0.30 : 0.10)),
+					radius: selected ? 9 : 4, y: selected ? 6 : 2)
+		}
 		.scaleEffect(StripMotion.removingScale(removing: removing, reduced: reduceMotion))
 		.opacity(removing ? 0 : 1)
 	}
@@ -181,7 +185,7 @@ struct ClipCard: View {
 				.lineLimit(1)
 				.truncationMode(.tail)
 			Spacer(minLength: 4)
-			Text(Self.grown(Self.relative(clip.timestamp, now: now), by: overrides.labelGrowth))
+			Text(Self.grown(age, by: overrides.labelGrowth))
 				.font(.system(size: 11, weight: .medium).monospacedDigit())
 				.foregroundStyle(Theme.ink)
 				.lineLimit(1)
@@ -200,6 +204,7 @@ struct ClipCard: View {
 				.lineLimit(1)
 				.truncationMode(.tail)
 			Spacer(minLength: 4)
+			if clip.isPinned { Image(systemName: "pin.fill").foregroundStyle(Theme.ink) }
 			if let badge {
 				Text("⌘\(badge)")
 					.font(.system(size: 10, weight: .semibold).monospacedDigit())
@@ -509,7 +514,7 @@ public struct CardSheet: View {
 					ForEach(row) { clip in
 						ClipCard(clip: clip, tint: clip.sourceBundleID == nil ? Theme.neutralTint : sources.tint(for: clip.sourceBundleID),
 							icon: sources.icon(for: clip.sourceBundleID), badge: nil, hovered: false, selected: false, removing: false,
-							now: now, highlight: "", thumbnails: thumbnails, animator: .immediate)
+							age: ClipCard.relative(clip.timestamp, now: now), highlight: "", thumbnails: thumbnails, animator: .immediate)
 							.accessibilityElement(children: .ignore)
 							.accessibilityLabel(CardAccessibility(clip: clip, now: now).label)
 					}

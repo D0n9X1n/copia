@@ -39,7 +39,7 @@ import CopiaUI
 	}
 
 	@Test func eventBudgetsComeFromTheMotionTable() {
-		#expect(SettleBudget.analytic(.open, reduced: false) == SettleBudget.settle(Motion.value(.open, reduced: false)))
+		#expect(SettleBudget.analytic(.open, reduced: false) == SettleBudget.settle(Motion.settleCeiling(.open, reduced: false)))
 		#expect(SettleBudget.analytic(.close, reduced: false) == SettleBudget.settle(.easeIn(0.18)))
 		#expect(SettleBudget.analytic(.lens, reduced: true) == 0)
 		#expect(abs(SettleBudget.analytic(.undo, reduced: true) - 0.1485) < 1e-9)
@@ -47,11 +47,17 @@ import CopiaUI
 
 	/// Reflow is requested from the delete completion, so its time starts after the full fade duration.
 	@Test func aDeleteBudgetIncludesTheFadeThenTheReflow() {
-		let reflow = SettleBudget.settle(Motion.value(.reflow, reduced: false))
+		let reflow = SettleBudget.settle(Motion.settleCeiling(.reflow, reduced: false))
 		#expect(Motion.value(.delete, reduced: false) == .easeInOut(0.2))
 		#expect(abs(SettleBudget.analytic(.delete, reduced: false) - (0.2 + reflow)) < 1e-9)
 		#expect(Motion.value(.delete, reduced: true) == .linear(0.15))
 		#expect(abs(SettleBudget.analytic(.delete, reduced: true) - (0.15 + 0.1485)) < 1e-9)
+	}
+
+	@Test func publishedCeilingsDoNotIncreaseWhenTheAppChangesAnimationSpeed() {
+		#expect(abs(SettleBudget.limit(.open, reduced: false) - 0.2536) < 0.0002)
+		#expect(abs(SettleBudget.limit(.lens, reduced: false) - 0.1996) < 0.0002)
+		#expect(abs(SettleBudget.limit(.close, reduced: true) - 0.1685) < 1e-9)
 	}
 
 	@Test func theLimitAddsTwentyMilliseconds() {

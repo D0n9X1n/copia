@@ -1,13 +1,19 @@
 import Testing
+import Observation
 import AppKit
 import SwiftUI
 import CopiaCore
 import CopiaFixtures
 @testable import CopiaUI
 
-/// StripView hosted in a real (off-screen, transparent) window, observed through its accessibility tree.
-@MainActor
-@Suite(.serialized) struct StripViewTests {
+@MainActor @Observable private final class AgeClock { var date = Fixtures.now }
+
+extension WindowTests {
+	/// StripView hosted in a real (off-screen, transparent) window, observed through its accessibility tree.
+	@MainActor @Suite struct StripViewTests {}
+}
+
+extension WindowTests.StripViewTests {
 	@Test func openSlidesTheStripUpFromBelowItsFullHeight() async throws {
 		let height = Theme.panelHeight, margin: CGFloat = 16, width: CGFloat = 1440
 		let normal = CopiaOverrides(reduceMotion: false)
@@ -120,6 +126,115 @@ import CopiaFixtures
 		#expect(host.isOnScreen(card))
 	}
 
+	@Test func liveDeleteKeepsItsSlotUntilTheOutgoingFadeFinishes() async throws {
+		for reduced in [false, true] {
+			let host = StripHost(overrides: .init(reduceMotion: reduced))
+			defer { host.close() }
+			await host.settle()
+			let id = try #require(host.model.selectedID)
+			let live = Animator.live { reduced }
+			var start: ContinuousClock.Instant?, reflow: Duration?
+			host.model.animator = Animator { event, change, completion in
+				if event == .delete { start = .now }
+				if event == .reflow, let start { reflow = .now - start }
+				live.run(event, change, completion)
+			}
+			await host.model.deleteSelected()
+			await host.settle(600)
+			let elapsed = try #require(reflow)
+			#expect(elapsed >= (reduced ? .milliseconds(145) : .milliseconds(195)), "reduced=\(reduced), reflow at \(elapsed)")
+			#expect(!host.model.clips.contains { $0.id == id })
+		}
+	}
+
+	@Test func clockUpdatesInvalidateACardOnlyWhenItsDisplayedAgeChanges() async throws {
+		let clock = AgeClock()
+		var clip = Fixtures.mixed[0]; clip.timestamp = Fixtures.now.addingTimeInterval(-58)
+		let host = StripHost(clips: [clip], now: { clock.date })
+		defer { host.close() }; await host.settle()
+		#expect(try #require(host.cards.first).label.contains(", just now: "))
+		let initialBodies = Diagnostics.bodyEvaluations
+		clock.date = Fixtures.now.addingTimeInterval(1); await host.settle()
+		#expect(Diagnostics.bodyEvaluations == initialBodies)
+		#expect(try #require(host.cards.first).label.contains(", just now: "))
+		clock.date = Fixtures.now.addingTimeInterval(2); await host.settle()
+		#expect(Diagnostics.bodyEvaluations > initialBodies)
+		#expect(try #require(host.cards.first).label.contains(", 1m ago: "))
+	}
+
+	@Test func firstOpenDefersOffscreenThumbnailsUntilTheRowMoves() async throws {
+		actor Decodes {
+			var urls: Set<URL> = []
+			func record(_ url: URL) { urls.insert(url) }
+		}
+		let decodes = Decodes()
+		let cache = ThumbnailCache { url in await decodes.record(url); return nil }
+		var clips = Array(Fixtures.tenThousand.prefix(20))
+		let visible = URL(fileURLWithPath: "/fixture/visible-preview"), later = URL(fileURLWithPath: "/fixture/offscreen-preview")
+		clips[0].preview = .ready(visible); clips[6].preview = .ready(later)
+		let host = StripHost(clips: clips, width: 900, thumbnails: cache, overrides: .init(reduceMotion: true))
+		defer { host.close() }
+		await host.settle()
+		let initial = await decodes.urls
+		#expect(initial == [visible])
+		host.model.select(clips[6].id); await host.settle()
+		#expect(await decodes.urls.contains(later))
+		let selected = try #require(host.card(containing: "History item 7"))
+		#expect(host.isOnScreen(selected))
+	}
+
+	@Test func frontDeleteKeepsTheTrailingCardMountedAcrossReflowWithoutScrolling() async throws {
+		actor Decodes {
+			var calls: [URL: Int] = [:]
+			func record(_ url: URL) { calls[url, default: 0] += 1 }
+		}
+		let decodes = Decodes()
+		let cache = ThumbnailCache { url in await decodes.record(url); return nil }
+		var clips = Array(Fixtures.tenThousand.prefix(20))
+		let entering = URL(fileURLWithPath: "/fixture/trailing-moving-card")
+		let stayingOutside = URL(fileURLWithPath: "/fixture/trailing-offscreen-card")
+		let distant = URL(fileURLWithPath: "/fixture/distant-card")
+		clips[4].preview = .ready(entering); clips[5].preview = .ready(stayingOutside); clips[7].preview = .ready(distant)
+		let host = StripHost(clips: clips, width: 900, thumbnails: cache, overrides: .init(reduceMotion: false))
+		defer { host.close() }; await host.settle()
+		host.model.animator = .live { false }
+		let before = await decodes.calls
+		#expect(before == [entering: 1, stayingOutside: 1])
+		await host.model.deleteSelected(); await host.settle(650)
+		#expect(host.model.visibleClips[3].id == clips[4].id)
+		#expect(host.card(containing: "History item 5") != nil)
+		#expect(await decodes.calls == before)
+	}
+
+	@Test func fourthCardKeepsItsInFlightPreviewAcrossInsertionAndRemoval() async throws {
+		actor DecodeProbe {
+			var calls = 0
+			var waiting: [CheckedContinuation<CGImage?, Never>] = []
+			func load() async -> CGImage? {
+				calls += 1
+				return await withCheckedContinuation { waiting.append($0) }
+			}
+			func finish() { waiting.forEach { $0.resume(returning: nil) }; waiting.removeAll() }
+		}
+		let probe = DecodeProbe()
+		let cache = ThumbnailCache { _ in await probe.load() }
+		var clips = Array(Fixtures.mixed.prefix(6))
+		clips[3].preview = .ready(URL(fileURLWithPath: "/fixture/owned-by-decoder"))
+		let host = StripHost(clips: clips, width: 1496, thumbnails: cache, overrides: .init(reduceMotion: false))
+		defer { host.close() }
+		await host.settle()
+		let before = await probe.calls
+		host.model.applySnapshot([Fixtures.extremes[0]] + clips)
+		await host.settle()
+		let afterInsert = await probe.calls
+		host.model.applySnapshot(clips)
+		await host.settle()
+		let afterDelete = await probe.calls
+		await probe.finish()
+		#expect(before == 1)
+		#expect(afterInsert == before && afterDelete == before)
+	}
+
 	@Test func previewLoadingRunsThroughTheMotionTable() async throws {
 		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-loading-\(UUID().uuidString)")
 		defer { try? FileManager.default.removeItem(at: dir) }
@@ -203,7 +318,7 @@ import CopiaFixtures
 
 		before = Diagnostics.bodyEvaluations
 		window.contentView = NSHostingView(rootView: ClipCard(clip: Fixtures.mixed[0], tint: Theme.neutralTint, icon: nil,
-			badge: nil, hovered: false, selected: false, removing: false, now: Fixtures.now, highlight: "",
+			badge: nil, hovered: false, selected: false, removing: false, age: ClipCard.relative(Fixtures.mixed[0].timestamp, now: Fixtures.now), highlight: "",
 			thumbnails: ThumbnailCache(), animator: .immediate))
 		window.contentView?.layoutSubtreeIfNeeded()
 		#expect(Diagnostics.bodyEvaluations > before)

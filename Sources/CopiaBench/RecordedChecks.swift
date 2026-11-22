@@ -4,7 +4,7 @@ import CopiaApp
 import CopiaUI
 
 /// The ScreenCaptureKit checks: ⌘Y to first presented frame, scroll smoothness and motion settle.
-/// Only the bench's own panel and wallpaper are recorded; capture stays paused, so no clipboard is read.
+/// Only the fixture panel and generated wallpaper are recorded; the watcher polls a private pasteboard.
 @MainActor
 final class RecordedRun {
 	// Crop geometry in points, top-left origin, from StripView's layout.
@@ -29,8 +29,10 @@ final class RecordedRun {
 	private let originalAnimator: Animator
 	private var starts: [(event: MotionEvent, time: Double)] = []
 	private var reduced = false
+	private(set) var motionInterruptions: [String: [Int]] = [:]
+	private var motionRound = 1
 
-	private init(controller: AppController, recorder: Recorder, wallpaper: Wallpaper, refresh: Double) {
+	init(controller: AppController, recorder: Recorder, wallpaper: Wallpaper, refresh: Double) {
 		self.controller = controller
 		self.recorder = recorder
 		self.wallpaper = wallpaper
@@ -58,7 +60,7 @@ final class RecordedRun {
 			live.run(event, change, completion)
 		}
 		do {
-			try await recorder.start(panel: panel, wallpaper: wallpaper.window, framesPerSecond: fps)
+			try await recorder.start(panel: panel, wallpaper: wallpaper.window)
 		} catch {
 			await run.finish()
 			throw error
@@ -104,24 +106,92 @@ final class RecordedRun {
 		}?.time
 	}
 
-	// MARK: Scroll
+	struct PointerSample {
+		let dispatch: Double?
+		let commit: Double
+		let presented: Double?
+	}
 
-	/// A constant-velocity scroll driven by a bench-owned display link; nil when the row's scroll view is missing.
-	func scroll(velocity: Double, seconds: Double) async -> Smoothness.Result? {
+	nonisolated static let pointerSlots = [1, 0, 2, 1, 0]
+
+	nonisolated static func pointerSnapPasses(_ samples: [PointerSample]) -> Bool {
+		guard samples.count == pointerSlots.count, samples.allSatisfy({ $0.dispatch != nil }) else { return false }
+		let presented = samples.compactMap(\.presented).sorted()
+		return presented.count == samples.count && presented[presented.count / 2] <= 0.1
+	}
+
+	func pointerSelections() async -> [PointerSample] {
 		await prepare(reduced: false)
+		let panel = controller.panel, model = controller.model
 		controller.toggleHistory()
 		try? await Task.sleep(for: .milliseconds(700))
-		defer { Task { await self.hide() } }
-		guard let scrollView = Bench.scrollView(in: controller.panel.host), let view = controller.panel.contentView else { return nil }
+		var samples: [PointerSample] = []
+		for slot in Self.pointerSlots {
+			let left = Self.slotX(slot)
+			guard left + Int(Theme.cardSize.width) <= recorder.width, model.visibleClips.indices.contains(slot) else { continue }
+			let expected = model.visibleClips[slot].id
+			let point = CGPoint(x: CGFloat(left) + Theme.cardSize.width / 2,
+				y: Theme.panelHeight - CGFloat(Self.cardTop) - Theme.cardSize.height / 2)
+			func event(_ type: NSEvent.EventType) -> NSEvent? {
+				NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+					windowNumber: panel.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
+			}
+			guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { continue }
+			recorder.begin(.planes)
+			try? await Task.sleep(for: .milliseconds(180))
+			let start = HostClock.now
+			panel.sendEvent(down)
+			let dispatch = model.selectedID == expected ? HostClock.now - start : nil
+			panel.host.layoutSubtreeIfNeeded()
+			CATransaction.flush()
+			let commit = HostClock.now - start
+			panel.sendEvent(up)
+			try? await Task.sleep(for: .milliseconds(650))
+			let columns = (left + 42)..<(left + Int(Theme.cardSize.width) - 42)
+			let shown = Self.firstRingFrame(recorder.endPlanes(), after: start, rows: Self.ringRows, columns: columns)
+			samples.append(PointerSample(dispatch: dispatch, commit: commit, presented: shown.map { $0 - start }))
+		}
+		await hide()
+		return samples
+	}
+
+	static func firstRingFrame(_ frames: [Recorder.Frame], after start: Double, rows: Range<Int>, columns: Range<Int>) -> Double? {
+		guard let before = frames.last(where: { $0.time <= start })?.luma, let final = frames.last?.luma else { return nil }
+		let contrast = before.meanDifference(final, rows: rows, columns: columns)
+		guard contrast > 4 else { return nil }
+		return frames.first { $0.time > start && $0.luma.meanDifference(final, rows: rows, columns: columns) < contrast / 2 }?.time
+	}
+
+	// MARK: Scroll
+
+	/// Keeps the recorded distance and frame count even when the fixture was interrupted.
+	func scroll(velocity: Double, seconds: Double) async -> Smoothness.Trial {
+		await prepare(reduced: false)
+		let panel = controller.panel, model = controller.model
+		let closeCount = model.closeCount
+		controller.toggleHistory()
+		try? await Task.sleep(for: .milliseconds(700))
+		func active() -> Bool { panel.isVisible && panel.isKeyWindow && model.cardsMounted && !model.isClosing && model.closeCount == closeCount }
+		guard let scrollView = Bench.scrollView(in: panel.host), let view = panel.contentView, active() else {
+			let reason: Smoothness.InvalidTrial = active() ? .missingRow : .panelChanged
+			await hide()
+			return .init(result: nil, reason: reason, distance: nil, elapsed: nil, captured: 0)
+		}
 		recorder.begin(.hashes(rows: Self.cardTop..<Self.cardBottom))
 		let driver = ScrollDriver(scrollView: scrollView, velocity: velocity, seconds: seconds)
 		driver.start(on: view)
-		for _ in 0..<Int((seconds + 2) * 50) where !driver.finished { try? await Task.sleep(for: .milliseconds(20)) }
+		for _ in 0..<Int((seconds + 2) * 50) {
+			if driver.finished || !active() { break }
+			try? await Task.sleep(for: .milliseconds(20))
+		}
 		driver.stop()
 		try? await Task.sleep(for: .milliseconds(150))
 		let hashes = recorder.endHashes()
-		guard let first = driver.firstTick, let last = driver.lastTick else { return nil }
-		return Smoothness.evaluate(hashes, window: (first + 3 * refresh)...last, refresh: refresh)
+		let distance = abs(scrollView.contentView.bounds.minX - driver.initialOffset)
+		let samePresentation = active() && scrollView === Bench.scrollView(in: panel.host)
+		await hide()
+		return Smoothness.trial(frames: hashes, first: driver.firstTick, last: driver.lastTick, finished: driver.finished,
+			samePresentation: samePresentation, distance: distance, velocity: velocity, seconds: seconds, refresh: refresh)
 	}
 
 	// MARK: Motion settle
@@ -133,7 +203,8 @@ final class RecordedRun {
 		let w = recorder.width
 		for reduced in [false, true] {
 			let suffix = reduced ? ".reduced" : ""
-			for _ in 0..<rounds {
+			for round in 0..<rounds {
+				motionRound = round + 1
 				await prepare(reduced: reduced)
 				let open = await trial(.open, seconds: 0.9) { self.controller.toggleHistory() }
 				samples["open" + suffix, default: []].append(settle(open) { frames, final in
@@ -146,13 +217,20 @@ final class RecordedRun {
 					Self.lensErrors(frames, final: final, width: w)
 				})
 				let delete = await trial(.delete, seconds: 1.0) { await model.deleteSelected() }
-				samples["delete" + suffix, default: []].append(settle(delete) { frames, final in
+				let deleted = settle(delete, requireProgress: true) { frames, final in
 					reduced ? Self.distanceErrors(frames, final: final, rows: Self.bodyRows, columns: Self.slotX(1)..<w)
 						: Self.shiftErrors(frames, final: final, rows: Self.bodyRows, columns: Self.slotX(1)..<w,
 							axis: .horizontal, shifts: -8...240, minOverlap: 300, step: 6, travel: Double(Self.slot))
-				})
+				}
+				let fade = delete.trigger.flatMap { trigger in
+					starts.first { $0.event == .reflow && $0.time >= trigger }.map { reflow in
+						Self.outgoingFadePresented(delete.frames, after: trigger, beforeReflow: reflow.time,
+							rows: Self.bodyRows, columns: (Self.slotX(1) + 12)..<(Self.slotX(1) + Int(Theme.cardSize.width) - 12))
+					}
+				} ?? false
+				samples["delete" + suffix, default: []].append(fade ? deleted : nil)
 				let undo = await trial(.undo, seconds: 0.8) { await model.undo() }
-				samples["undo" + suffix, default: []].append(settle(undo) { frames, final in
+				samples["undo" + suffix, default: []].append(settle(undo, requireProgress: true) { frames, final in
 					let fade = Self.distanceErrors(frames, final: final, rows: Self.bodyRows,
 						columns: Self.slotX(1)..<(reduced ? w : Self.slotX(1) + Int(Theme.cardSize.width)))
 					guard !reduced else { return fade }
@@ -168,6 +246,22 @@ final class RecordedRun {
 		}
 		await hide()
 		return samples
+	}
+
+	static func outgoingFadePresented(_ frames: [Recorder.Frame], after trigger: Double, beforeReflow: Double,
+		rows: Range<Int>, columns: Range<Int>) -> Bool {
+		guard let initial = frames.last(where: { $0.time < trigger })?.luma else { return false }
+		let changes = frames.filter { $0.time >= trigger && $0.time < beforeReflow }.map {
+			$0.luma.meanDifference(initial, rows: rows, columns: columns)
+		}
+		guard let peak = changes.max(), peak > 4 else { return false }
+		// A held start, a snap to an empty slot, and later moving neighbours are not an outgoing fade.
+		var previous: Double?
+		for change in changes where change > peak * 0.05 && change < peak * 0.95 {
+			if let previous, change > previous + peak * 0.05 { return true }
+			previous = min(previous ?? change, change)
+		}
+		return false
 	}
 
 	/// Error = how far the content still is from its final position, as a fraction of `travel`; 1 when it is not found.
@@ -223,17 +317,31 @@ final class RecordedRun {
 	}
 
 	/// Records frames around `action`; the trigger is when the Animator started `event`.
-	private func trial(_ event: MotionEvent, seconds: Double, _ action: () async -> Void) async -> (frames: [Recorder.Frame], trigger: Double?) {
+	func trial(_ event: MotionEvent, seconds: Double, _ action: () async -> Void) async -> (frames: [Recorder.Frame], trigger: Double?) {
+		let model = controller.model, panel = controller.panel
+		let key = "\(event)" + (reduced ? ".reduced" : "")
+		func ready(open: Bool) -> Bool {
+			panel.isVisible == open && model.cardsMounted == open && !model.isClosing && (!open || panel.isKeyWindow)
+		}
+		let closeCount = model.closeCount
+		guard ready(open: event != .open) else {
+			motionInterruptions[key, default: []].append(motionRound)
+			return ([], nil)
+		}
 		recorder.begin(.planes)
 		let from = HostClock.now
 		await action()
 		try? await Task.sleep(for: .seconds(seconds))
 		let frames = recorder.endPlanes()
+		guard ready(open: event != .close), model.closeCount == closeCount + (event == .close ? 1 : 0) else {
+			motionInterruptions[key, default: []].append(motionRound)
+			return (frames, nil)
+		}
 		return (frames, starts.first { $0.event == event && $0.time >= from }?.time)
 	}
 
 	/// Settle time from the motion's first visible change (see `FrameAnalysis.motionStart`), and from the trigger.
-	private func settle(_ trial: (frames: [Recorder.Frame], trigger: Double?), errors: ([Luma], Luma) -> [Double]) -> Settle? {
+	private func settle(_ trial: (frames: [Recorder.Frame], trigger: Double?), requireProgress: Bool = false, errors: ([Luma], Luma) -> [Double]) -> Settle? {
 		guard let trigger = trial.trigger, let final = trial.frames.last?.luma else { return nil }
 		let times = trial.frames.map(\.time)
 		let lumas = trial.frames.map(\.luma)
@@ -242,6 +350,7 @@ final class RecordedRun {
 		let changed = lumas.map { $0.changedPixels(before, rows: Self.rowTop..<Self.panelHeight, columns: 0..<$0.width, threshold: 8) >= 8 }
 		let start = FrameAnalysis.motionStart(times: times, changed: changed, trigger: trigger, refresh: refresh)
 		let errors = errors(lumas, final)
+		guard !requireProgress || FrameAnalysis.showsProgress(times: times, changed: changed, errors: errors, after: trigger) else { return nil }
 		guard let fromStart = FrameAnalysis.settleTime(times: times, errors: errors, trigger: start, tolerance: SettleBudget.tolerance)
 		else { return nil }
 		return Settle(seconds: max(0, fromStart), fromTrigger: fromStart + start - trigger)
@@ -261,6 +370,8 @@ final class ScrollDriver: NSObject {
 	let scrollView: NSScrollView
 	let velocity: Double
 	let seconds: Double
+	private(set) var initialOffset: CGFloat = 0
+	private var requestedDistance = 0
 	private(set) var firstTick: Double?
 	private(set) var lastTick: Double?
 	private(set) var finished = false
@@ -273,7 +384,12 @@ final class ScrollDriver: NSObject {
 	}
 
 	func start(on view: NSView) {
+		initialOffset = scrollView.contentView.bounds.minX
 		let link = view.displayLink(target: self, selector: #selector(tick(_:)))
+		if let screen = view.window?.screen {
+			let hz = Float(screen.maximumFramesPerSecond)
+			if hz > 0 { link.preferredFrameRateRange = CAFrameRateRange(minimum: hz, maximum: hz, preferred: hz) }
+		}
 		link.add(to: .main, forMode: .common)
 		self.link = link
 	}
@@ -288,9 +404,14 @@ final class ScrollDriver: NSObject {
 		let start = firstTick ?? time
 		firstTick = start
 		lastTick = time
-		let clip = scrollView.contentView
-		clip.scroll(to: CGPoint(x: velocity * (time - start), y: clip.bounds.origin.y))
-		scrollView.reflectScrolledClipView(clip)
+		let distance = Int((velocity * min(seconds, time - start)).rounded())
+		let delta = distance - requestedDistance
+		requestedDistance = distance
+		if delta != 0, let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+			wheelCount: 2, wheel1: 0, wheel2: Int32(clamping: -delta), wheel3: 0), let event = NSEvent(cgEvent: cg) {
+			// Deliver only to the fixture scroll view, never to the desktop event stream.
+			scrollView.scrollWheel(with: event)
+		}
 		if time - start >= seconds {
 			link.invalidate()
 			self.link = nil

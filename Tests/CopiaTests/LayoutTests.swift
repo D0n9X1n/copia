@@ -28,6 +28,24 @@ import CopiaFixtures
 		}
 	}
 
+	@Test func visibleSlotsRespectBothViewportEdgesAndTheLastItem() {
+		let stride = Theme.cardSize.width + Theme.cardGap
+		#expect(PanelLayout.visibleSlots(offset: 0, viewport: 900, count: 1000) == 0..<4)
+		#expect(PanelLayout.visibleSlots(offset: 4 * stride + Theme.rowPadding, viewport: 900, count: 1000) == 4..<8)
+		#expect(PanelLayout.visibleSlots(offset: 0, viewport: 3100, count: 15).contains(13))
+		#expect(PanelLayout.visibleSlots(offset: -200, viewport: 1000, count: 2) == 0..<2)
+		#expect(PanelLayout.visibleSlots(offset: 10000, viewport: 900, count: 2).isEmpty)
+	}
+
+	@Test func prefetchKeepsTheVisibleSlotsAndBoundsWorkAtEachEdge() {
+		for start in stride(from: 0, to: 100, by: 1) {
+			let visible = start..<min(start + 8, 100)
+			let mounted = PanelLayout.mountedSlots(around: visible, count: 100)
+			#expect(mounted.lowerBound <= visible.lowerBound && mounted.upperBound >= visible.upperBound)
+			#expect(mounted.count <= visible.count + 14 && mounted.lowerBound >= 0 && mounted.upperBound <= 100)
+		}
+	}
+
 	@Test func offsetDoesNotMoveWhenTheCardIsAlreadyVisible() {
 		let content = PanelLayout.contentWidth(count: 20)
 		#expect(PanelLayout.offset(selectedMinX: PanelLayout.cardMinX(index: 2), viewport: 1200, current: 0, contentWidth: content) == 0)
@@ -58,10 +76,10 @@ import CopiaFixtures
 		#expect(CardPresentation(clip: Fixtures.failed).fallback == "https://offline.example.org/article")
 	}
 
-	@Test func voiceOverReadsOneLabelWithFourActions() {
+	@Test func voiceOverReadsOneLabelWithCardActions() {
 		let clip = Fixtures.extremes[1]
 		let a = CardAccessibility(clip: clip, now: Fixtures.now)
-		#expect(a.actions == ["Paste", "Paste as Plain Text", "Copy", "Delete"])
+		#expect(a.actions == ["Copy and Close", "Copy as Plain Text and Close", "Copy", "Pin", "Delete"])
 		#expect(a.preview.count == 120)
 		#expect(a.label.hasPrefix("Text from TextEdit, just now: Lorem"))
 		#expect(CardAccessibility(clip: Fixtures.extremes[11], now: Fixtures.now).label.contains("Unknown app"))

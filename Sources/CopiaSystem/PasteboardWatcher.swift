@@ -13,7 +13,7 @@ public protocol PasteboardSource: AnyObject {
 @MainActor
 public final class GeneralPasteboard: PasteboardSource {
 	let pasteboard: NSPasteboard
-	public init(_ pasteboard: NSPasteboard = .general) { self.pasteboard = pasteboard }
+	public init(_ pasteboard: NSPasteboard) { self.pasteboard = pasteboard }
 
 	public var changeCount: Int { pasteboard.changeCount }
 	public var typeIdentifiers: Set<String> { Set((pasteboard.types ?? []).map(\.rawValue)) }
@@ -36,6 +36,7 @@ public final class PasteboardWatcher {
 	public var onDraft: (ClipDraft) -> Void = { _ in }
 	public var ignoredApps: Set<String>
 	public private(set) var paused = false
+	public private(set) var pollCount = 0
 	public private(set) var lastDecision: Capture.Decision?
 
 	let source: PasteboardSource
@@ -51,7 +52,7 @@ public final class PasteboardWatcher {
 	private lazy var timerTarget = PollTarget(self)
 	private var observer: NSObjectProtocol?
 
-	public init(source: PasteboardSource = GeneralPasteboard(), ignoredApps: Set<String> = [],
+	public init(source: PasteboardSource, ignoredApps: Set<String> = [],
 		now: @escaping () -> Date = Date.init,
 		uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
 		frontmost: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
@@ -69,11 +70,13 @@ public final class PasteboardWatcher {
 		log = ActivationLog(frontmost: frontmost(), at: uptime())
 	}
 
-	public func start() {
-		observer = NSWorkspace.shared.notificationCenter.addObserver(
-			forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
-			let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
-			MainActor.assumeIsolated { if let id { self?.appActivated(id) } }
+	public func start(observingWorkspace: Bool = true) {
+		if observingWorkspace {
+			observer = NSWorkspace.shared.notificationCenter.addObserver(
+				forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+					let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+					MainActor.assumeIsolated { if let id { self?.appActivated(id) } }
+				}
 		}
 		let timer = makeTimer()
 		RunLoop.main.add(timer, forMode: .common)
@@ -116,6 +119,7 @@ public final class PasteboardWatcher {
 
 	/// One poll. Called by the timer; tests call it directly.
 	public func tick() {
+		pollCount += 1
 		let change = source.changeCount
 		let pollTime = uptime()
 		// Every poll closes the window, so only apps in front since the previous poll can count as the source.

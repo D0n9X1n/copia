@@ -12,9 +12,8 @@ public enum SelfTest {
 		var panelVisible: Bool
 		var panelIsKey: Bool
 		var copiaIsFrontmost: Bool
-		var frontmostBundleID: String?
 		var panelScreen: String?
-		var mouseScreen: String?
+		var requestedScreen: String?
 		var panelFrame: String
 		var visibleFrame: String?
 		var frameProblems: [String]
@@ -40,24 +39,14 @@ public enum SelfTest {
 	}
 
 	public static func run(controller: AppController, output: URL, hold: Double) async -> Int32 {
-		let savedMouse = CGEvent(source: nil)?.location
 		var samples: [Sample] = []
 		var violations: [String] = []
 		let identity = ObjectIdentifier(controller.panel).debugDescription
-		let ownPID = ProcessInfo.processInfo.processIdentifier
 
 		for (index, screen) in NSScreen.screens.enumerated() {
-			// Move the pointer to this display; the strip opens on the screen under the mouse.
-			let mainHeight = NSScreen.screens[0].frame.maxY
-			let target = CGPoint(x: screen.frame.midX, y: mainHeight - screen.frame.midY)
-			CGWarpMouseCursorPosition(target)
-			try? await Task.sleep(for: .milliseconds(150))
-
 			for cycle in 0..<10 {
-				controller.toggleHistory()
+				controller.toggleHistory(on: screen)
 				try? await Task.sleep(for: .milliseconds(cycle == 0 && index == 0 ? Int(hold * 1000) : 250))
-				let mouse = NSEvent.mouseLocation
-				let mouseScreen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
 				// The frame the strip should fill: the screen it opened on, or the benchmark's override.
 				let visible = controller.visibleFrameOverride ?? controller.panel.screen?.visibleFrame
 				let frameProblems = visible.map { Self.frameViolations(panel: controller.panel.frame, visible: $0) }
@@ -67,16 +56,15 @@ public enum SelfTest {
 				try? await Task.sleep(for: .milliseconds(60))
 				let query = controller.model.query
 				controller.model.query = ""
-				let front = NSWorkspace.shared.frontmostApplication
 				var sample = Sample(display: index, cycle: cycle, panelIdentity: ObjectIdentifier(controller.panel).debugDescription,
 					panelVisible: controller.panel.isVisible, panelIsKey: controller.panel.isKeyWindow,
-					copiaIsFrontmost: front?.processIdentifier == ownPID, frontmostBundleID: front?.bundleIdentifier,
-					panelScreen: controller.panel.screen?.localizedName, mouseScreen: mouseScreen?.localizedName,
+					copiaIsFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+					panelScreen: controller.panel.screen?.localizedName, requestedScreen: screen.localizedName,
 					panelFrame: NSStringFromRect(controller.panel.frame), visibleFrame: visible.map(NSStringFromRect),
 					frameProblems: frameProblems,
 					typedQuery: typed ? query : "<not sent>",
 					cardsMountedAfterClose: false)
-				controller.toggleHistory()
+				controller.toggleHistory(on: screen)
 				try? await Task.sleep(for: .milliseconds(400))
 				sample.cardsMountedAfterClose = controller.model.cardsMounted || controller.panel.isVisible
 				samples.append(sample)
@@ -86,16 +74,27 @@ public enum SelfTest {
 				if !sample.panelVisible { violations.append("\(tag): panel not visible") }
 				if !sample.panelIsKey { violations.append("\(tag): panel not key, typing would not reach search") }
 				if sample.copiaIsFrontmost { violations.append("\(tag): Copia became the active app") }
-				if sample.panelScreen != sample.mouseScreen { violations.append("\(tag): opened on \(sample.panelScreen ?? "nil"), mouse on \(sample.mouseScreen ?? "nil")") }
+				if sample.panelScreen != sample.requestedScreen { violations.append("\(tag): opened on \(sample.panelScreen ?? "nil"), requested \(sample.requestedScreen ?? "nil")") }
 				for problem in sample.frameProblems { violations.append("\(tag): \(problem)") }
 				if sample.typedQuery != "q" { violations.append("\(tag): typing reached \"\(sample.typedQuery)\", not the search") }
 				if sample.cardsMountedAfterClose { violations.append("\(tag): still visible after close") }
 			}
 		}
-		if let savedMouse { CGWarpMouseCursorPosition(savedMouse) }
+
+		let pid = ProcessInfo.processInfo.processIdentifier
+		let initiallyInactive = NSWorkspace.shared.frontmostApplication?.processIdentifier != pid
+		controller.model.actions.openSettings()
+		let settings = controller.settings()
+		for _ in 0..<100 where !settings.isKeyWindow || !settings.isMainWindow || NSWorkspace.shared.frontmostApplication?.processIdentifier != pid { try? await Task.sleep(for: .milliseconds(10)) }
+		let settingsFirstAction = initiallyInactive && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && settings.isVisible && settings.isKeyWindow && settings.isMainWindow
+		if !settingsFirstAction { violations.append("one Settings action did not activate the inactive app and its window") }
+		controller.openSettings()
+		if settings !== controller.settings() { violations.append("a repeated Settings action created another window") }
+		settings.orderOut(nil)
 
 		let report: [String: Any] = [
-			"schema": 3,
+			"schema": 4,
+			"settingsFirstAction": settingsFirstAction,
 			// A full-screen Space cannot be entered from a script reliably; run the same check by hand over one.
 			"fullScreenSpace": "manual",
 			"displays": NSScreen.screens.count,
@@ -103,9 +102,10 @@ public enum SelfTest {
 			"violations": violations,
 			"samples": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(samples))) ?? [],
 		]
-		if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
-			try? data.write(to: output)
-		}
+		do {
+			let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+			try data.write(to: output)
+		} catch { return 1 }
 		return violations.isEmpty ? 0 : 1
 	}
 }
@@ -120,22 +120,8 @@ extension SelfTest {
 			windowNumber: panel.windowNumber, context: nil, characters: character, charactersIgnoringModifiers: character,
 			isARepeat: false, keyCode: 12)
 		else { return false }
-		NSApp.postEvent(down, atStart: false)
-		NSApp.postEvent(up, atStart: false)
+		panel.sendEvent(down)
+		panel.sendEvent(up)
 		return true
-	}
-}
-
-/// Opt-in diagnostics: set COPIA_DEBUG=1 to append panel events to /tmp/copia-debug.log.
-enum CopiaDebug {
-	static func log(_ line: String) {
-		guard ProcessInfo.processInfo.environment["COPIA_DEBUG"] != nil else { return }
-		let url = URL(fileURLWithPath: "/tmp/copia-debug.log")
-		let text = "\(Date().timeIntervalSince1970) \(line)\n"
-		if let handle = try? FileHandle(forWritingTo: url) {
-			handle.seekToEndOfFile(); handle.write(Data(text.utf8)); try? handle.close()
-		} else {
-			try? Data(text.utf8).write(to: url)
-		}
 	}
 }

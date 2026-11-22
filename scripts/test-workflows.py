@@ -1,0 +1,93 @@
+"""Source policy across job boundaries; actionlint separately validates Actions syntax."""
+from pathlib import Path
+import re
+import unittest
+
+WORKFLOWS = Path(__file__).resolve().parents[1]/'.github/workflows'
+
+
+def jobs(text):
+    names = re.split(r'^  ([\w-]+):\s*$', text.split('\njobs:\n')[1], flags=re.M)
+    return dict(zip(names[1::2], names[2::2]))
+
+
+class Workflows(unittest.TestCase):
+    def test_only_pr_runs_share_a_cancellable_ref_group(self):
+        ci = (WORKFLOWS/'ci.yml').read_text()
+        group = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}"
+        self.assertIn('  group: ' + group + '\n', ci)
+        self.assertIn("  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n", ci)
+
+    def test_ci_no_tag_and_one_unprofiled_gate(self):
+        text=(WORKFLOWS/'ci.yml').read_text(); events=text.split('permissions:')[0]
+        self.assertRegex(events,r'push:\s*branches: \[main\]'); self.assertIn('pull_request:',events)
+        self.assertNotIn('tags:',events); steps=text.split('      - name: ')
+        if_clause=r"if:.*steps\.benchmark\.outcome\s*!=\s*'skipped'"
+        self.assertRegex(next(s for s in steps if s.startswith('Upload benchmark')),if_clause)
+        self.assertRegex(next(s for s in steps if s.startswith('Benchmark (')),r'mktemp -d')
+        # macOS's stock bash 3.2 does not enable -e in command substitutions by default.
+        # A nested build failure must not silently select an older binary.
+        self.assertNotIn('$(swift build -c release --show-bin-path)/copia-bench',text)
+        bench=[s for s in steps if '--json' in s and 'xctrace' not in s]; self.assertEqual(len(bench),1)
+        self.assertNotRegex(bench[0],r'continue-on-error|\|\||until |for |while ')
+        self.assertIn('prove-package.sh unsigned',text); self.assertRegex(text,r'(?s)name: bench-.*?if-no-files-found: error')
+
+    def test_every_main_wiki_push_checks_its_own_sha_before_mirroring(self):
+        wiki = (WORKFLOWS/'publish-wiki.yml').read_text()
+        self.assertNotIn('concurrency:',wiki)  # A pending run in a shared group can be dropped.
+        publish = jobs(wiki)['publish']
+        self.assertIn('fetch-depth: 0',publish)
+        self.assertIn('ref: ${{ github.sha }}',publish)
+        validation = publish.split('      - name: Check wiki',1)[1].split('      - name:',1)[0]
+        self.assertIn('scripts/check-wiki.py',validation); self.assertNotIn('if:',validation)
+        self.assertLess(publish.index('scripts/check-wiki.py'),publish.index('scripts/publish-wiki.sh'))
+        self.assertNotIn('continue-on-error',publish)
+        self.assertNotIn(' push ',publish)  # Only the fast-forward mirror script may push.
+
+    def test_publication_uses_the_same_complete_notes_it_rechecks(self):
+        release=jobs((WORKFLOWS/'release.yml').read_text())['publish']
+        draft,final=release.split('gh release create',1)
+        for phase in (draft,final):
+            self.assertIn('needs.package.outputs.coverage',phase)
+            self.assertIn('needs.package.outputs.zip-sha',phase)
+        self.assertIn('--publishing > "$WORK/notes"',draft)
+        self.assertIn('cmp "$WORK/notes" "$WORK/current"',final)
+        self.assertEqual(final.count('--notes-file "$WORK/notes"'),2)
+
+    def test_validate_ancestry_before_running_tag_source_and_pin_downstream_checkout(self):
+        release=(WORKFLOWS/'release.yml').read_text(); stages=jobs(release)
+        validation=next(body for body in stages.values() if 'release-gate.py' in body and 'contents: write' not in body)
+        ancestry=validation.find('git merge-base --is-ancestor')
+        self.assertGreaterEqual(ancestry,0);self.assertLess(ancestry,validation.index('python3 -I scripts/release-gate.py'))
+        for body in stages.values():
+            if body != validation: self.assertRegex(body,r'ref: \$\{\{ needs\.\w+\.outputs\.sha \}\}')
+
+    def test_publisher_independently_verifies_the_received_signed_archive_before_drafting(self):
+        stages = jobs((WORKFLOWS/'release.yml').read_text())
+        [publisher] = [body for body in stages.values() if 'contents: write' in body]
+        self.assertIn('    runs-on: macos-latest\n', publisher)
+        self.assertNotIn('environment:', publisher)
+        self.assertNotIn('continue-on-error:', publisher)
+        steps = publisher.split('      - name: ')
+        receive = next(i for i, step in enumerate(steps) if 'release-assets.py receive ' in step)
+        verify = next(i for i, step in enumerate(steps) if 'release-assets.py verify ' in step)
+        draft = next(i for i, step in enumerate(steps) if 'gh release create ' in step)
+        self.assertLess(receive, verify)
+        self.assertLess(verify, draft)
+        self.assertNotIn('if:', steps[verify])
+        self.assertRegex(steps[verify], r'(?m)^        run: python3 -I scripts/release-assets\.py verify "\$WORK/assets" "\$VERSION" "\$WORK/unpacked" signed$')
+
+    def test_release_privileges_and_immutable_handoff(self):
+        text=(WORKFLOWS/'release.yml').read_text(); j=jobs(text)
+        self.assertNotIn('contents: write',text.split('jobs:')[0]); self.assertEqual(text.count('contents: write'),1)
+        [(signer,sign)]=[(n,v) for n,v in j.items() if 'environment: release' in v]
+        [(publisher,publish)]=[(n,v) for n,v in j.items() if 'contents: write' in v]; self.assertNotEqual(signer,publisher)
+        gate=re.search(r'needs: (\w+)',sign)[1]; self.assertIn('release-gate.py',j[gate]);self.assertIn('fetch-depth: 0',j[gate])
+        self.assertIn('prove-package.sh signed',sign);self.assertIn('security delete-keychain',sign)
+        self.assertNotRegex(publish,r'secrets\.|swift build|--selftest|build-app\.sh'); self.assertRegex(publish,'needs: .*'+signer)
+        self.assertRegex(publish,r'(?s)release-assets\.py receive.*?gh release create.*?--draft.*?release-gate\.py.*?--draft=false')
+        self.assertEqual([n for n,v in j.items() if 'secrets.SIGNING_' in v],[signer]); self.assertIn('artifact-digest',sign)
+        for action in re.findall(r'uses: (\S+)',text+(WORKFLOWS/'ci.yml').read_text()): self.assertRegex(action,r'@[0-9a-f]{40}$')
+
+
+if __name__ == '__main__': unittest.main()

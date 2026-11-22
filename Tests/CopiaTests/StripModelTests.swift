@@ -38,7 +38,7 @@ final class StripRig {
 	var requests: [MotionEvent] = []
 	var log: [String] = []
 	var announcements: [String] = []
-	var pasteResult: PasteResult = .pasted
+	var tokens: [UUID] = []
 	var failDelete = false
 	var failRestore = false
 	var closeStarts = 0
@@ -56,54 +56,46 @@ final class StripRig {
 		model.announce = { [unowned self] in announcements.append($0) }
 		model.onCloseStart = { [unowned self] in closeStarts += 1; log.append("closeStart") }
 		model.onCloseFinish = { [unowned self] in closeFinishes += 1 }
-		model.actions = StripActions(
-			paste: { [unowned self] id, plain, beginClose in
-				log.append("paste \(id) plain=\(plain)")
-				if pasteResult == .accessibilityRequired { return .accessibilityRequired }
-				beginClose()
-				log.append("sendPaste")
-				return pasteResult
-			},
-			copy: { [unowned self] id in log.append("copy \(id)") },
-			delete: { [unowned self] id in
-				if failDelete { throw RigError.boom }
-				log.append("delete \(id)")
-			},
-			restore: { [unowned self] clip, index in
-				if failRestore { throw RigError.boom }
-				log.append("restore \(clip.id) at \(index)")
-			},
-			openAccessibilitySettings: { [unowned self] in log.append("openAX") }
-		)
+		model.actions.write = { [unowned self] id, plain in log.append("write \(id) plain=\(plain)") }
+		var groups: [UUID: [Clip]] = [:]
+		model.actions.delete = { [unowned self] ids in
+			if failDelete { throw RigError.boom }
+			let token = UUID(); tokens.append(token)
+			groups[token] = model.clips.filter { ids.contains($0.id) }
+			log.append(contentsOf: ids.map { "delete \($0)" })
+			return token
+		}
+		model.actions.restore = { [unowned self] token in
+			if failRestore { throw RigError.boom }
+			guard let clips = groups.removeValue(forKey: token) else { throw StripActionError.undoExpired }
+			return clips
+		}
 		model.open()
 	}
 }
 
-/// Holds a paste mid-flight so a second request can arrive while the first waits for the target app.
+/// Holds a clipboard write mid-flight.
 @MainActor
-final class PasteGate {
+final class WriteGate {
 	var waiting: [CheckedContinuation<Void, Never>] = []
 	var started: [UUID] = []
 	func release() { waiting.forEach { $0.resume() }; waiting = [] }
 }
 
 @MainActor
-@Suite struct PasteOverlapTests {
-	/// Two quick pastes (⌘1 then ⌘2) must not both write: the second would replace the first's payload before its ⌘V.
-	@Test func aSecondPasteWhileOneIsInFlightIsIgnored() async {
+@Suite struct WriteOverlapTests {
+	/// Two quick activations must not overwrite the first payload.
+	@Test func aSecondWriteWhileOneIsInFlightIsIgnored() async {
 		let model = StripModel(clips: Fixtures.mixed, animator: .immediate)
-		let gate = PasteGate()
-		model.actions = StripActions(
-			paste: { id, _, _ in
-				gate.started.append(id)
-				await withCheckedContinuation { gate.waiting.append($0) }
-				return .pasted
-			},
-			copy: { _ in }, delete: { _ in }, restore: { _, _ in }, openAccessibilitySettings: {})
+		let gate = WriteGate()
+		model.actions.write = { id, _ in
+			gate.started.append(id)
+			await withCheckedContinuation { gate.waiting.append($0) }
+		}
 		model.open()
-		let first = Task { await model.paste(position: 1, plain: false) }
+		let first = Task { await model.copy(id: Fixtures.mixed[0].id, plain: false, dismiss: true) }
 		while gate.waiting.isEmpty { await Task.yield() }
-		let second = Task { await model.paste(position: 2, plain: false) }
+		let second = Task { await model.copy(id: Fixtures.mixed[1].id, plain: false, dismiss: true) }
 		for _ in 0..<50 { await Task.yield() }
 		gate.release()
 		await first.value
@@ -201,7 +193,7 @@ final class PasteGate {
 	@Test func deleteInFlightDuringCloseDoesNotOfferUndoAfterReopen() async {
 		let r = StripRig()
 		var release: CheckedContinuation<Void, Never>?
-		r.model.actions.delete = { _ in await withCheckedContinuation { release = $0 } }
+		r.model.actions.delete = { _ in await withCheckedContinuation { release = $0 }; return UUID() }
 		let id = r.model.selectedID
 		let deleting = Task { await r.model.deleteSelected() }
 		while release == nil { await Task.yield() }
@@ -218,7 +210,7 @@ final class PasteGate {
 		let r = StripRig()
 		r.model.storageStatus = .recoveryRequired
 		let selected = r.model.selectedID!
-		await r.model.paste(plain: false)
+		await r.model.copy(id: selected, plain: false, dismiss: true)
 		await r.model.perform(.copy, id: selected)
 		await r.model.deleteSelected()
 		await r.model.undo()
@@ -243,8 +235,8 @@ final class PasteGate {
 		let r = StripRig()
 		var ended: [UUID] = []
 		r.model.onUndoExpired = { ended.append($0) }
-		let first = r.model.selectedID!
 		await r.model.deleteSelected()
+		let first = r.tokens[0]
 		await r.model.deleteSelected()
 		#expect(ended == [first])
 		#expect(r.model.canUndo)
@@ -254,7 +246,7 @@ final class PasteGate {
 		let r = StripRig()
 		await r.model.deleteSelected()
 		let count = r.model.clips.count
-		r.model.actions.restore = { _, _ in throw StripActionError.undoExpired }
+		r.model.actions.restore = { _ in throw StripActionError.undoExpired }
 		await r.model.undo()
 		#expect(!r.model.canUndo)
 		#expect(r.model.clips.count == count)
@@ -266,9 +258,9 @@ final class PasteGate {
 			let r = StripRig()
 			await r.model.deleteSelected()
 			var release: CheckedContinuation<Void, Never>?
-			r.model.actions.restore = { _, _ in
+			r.model.actions.restore = { _ in
 				await withCheckedContinuation { release = $0 }
-				if expired { throw StripActionError.undoExpired }
+				if expired { throw StripActionError.undoExpired }; return [Fixtures.mixed[0]]
 			}
 			let restoring = Task { await r.model.undo() }
 			while release == nil { await Task.yield() }
@@ -295,8 +287,8 @@ final class PasteGate {
 		let r = StripRig()
 		var ended: [UUID] = []
 		r.model.onUndoExpired = { ended.append($0) }
-		let selected = r.model.selectedID!
 		await r.model.deleteSelected()
+		let selected = r.tokens[0]
 		r.probe.advance(by: .seconds(3))
 		#expect(ended == [selected])
 		r.model.beginClose()
@@ -424,48 +416,20 @@ final class PasteGate {
 		#expect(!r.model.cardsMounted)
 	}
 
-	@Test func backspaceIsIgnoredWhileAQueryIsTyped() async {
-		let r = StripRig()
-		r.model.query = "release"
-		await r.model.backspace()
-		#expect(r.model.clips.count == 9)
-		r.model.query = ""
-		await r.model.backspace()
-		#expect(r.model.clips.count == 8)
-	}
-
-	@Test func pasteBeginsClosingBeforeSendingThePaste() async {
-		let r = StripRig()
-		await r.model.paste(plain: false)
-		#expect(r.log == ["paste \(Fixtures.mixed[0].id) plain=false", "closeStart", "sendPaste"])
-		#expect(!r.model.cardsMounted)
-	}
-
-	@Test func pasteWithoutAccessibilityKeepsTheStripOpenWithAToast() async {
-		let r = StripRig()
-		r.pasteResult = .accessibilityRequired
-		await r.model.paste(plain: true)
-		#expect(r.closeStarts == 0)
-		#expect(r.model.toast == .accessibilityRequired)
-		r.model.openAccessibilitySettings()
-		#expect(r.log.last == "openAX")
-	}
-
-	@Test func commandNumberPastesByPosition() async {
-		let r = StripRig()
-		await r.model.paste(position: 3, plain: true)
-		#expect(r.log.first == "paste \(Fixtures.mixed[2].id) plain=true")
-		let none = StripRig()
-		await none.model.paste(position: 10, plain: false)
-		#expect(none.log.isEmpty)
+	@Test func resultsDeletionWithAQueryDoesNotDeleteHiddenClips() async {
+		let r = StripRig(); r.model.query = "release"
+		await r.model.deleteSelected()
+		#expect(r.model.clips == Array(Fixtures.mixed.dropFirst()))
+		await r.model.deleteSelected()
+		#expect(r.tokens.count == 1)
 	}
 
 	@Test func holdingCommandShowsBadgesOneThroughNine() {
 		let r = StripRig()
-		#expect(r.model.badge(for: Fixtures.mixed[0].id) == nil)
+		#expect(r.model.badge(at: 0) == nil)
 		r.model.commandHeld = true
-		#expect(r.model.badge(for: Fixtures.mixed[0].id) == 1)
-		#expect(r.model.badge(for: Fixtures.mixed[8].id) == 9)
+		#expect(r.model.badge(at: 0) == 1)
+		#expect(r.model.badge(at: 8) == 9)
 	}
 
 	@Test func clickSelectsAndMenuActionsDispatch() async {
@@ -473,10 +437,10 @@ final class PasteGate {
 		r.model.select(Fixtures.mixed[3].id)
 		#expect(r.model.selectedID == Fixtures.mixed[3].id)
 		await r.model.perform(.copy, id: Fixtures.mixed[5].id)
-		#expect(r.log == ["copy \(Fixtures.mixed[5].id)"])
+		#expect(r.log == ["write \(Fixtures.mixed[5].id) plain=false"])
 		#expect(r.model.cardsMounted)
-		await r.model.perform(.pastePlain, id: Fixtures.mixed[6].id)
-		#expect(r.log.contains("paste \(Fixtures.mixed[6].id) plain=true"))
+		await r.model.perform(.copyPlain, id: Fixtures.mixed[6].id)
+		#expect(r.log.contains("write \(Fixtures.mixed[6].id) plain=true"))
 	}
 
 	@Test func aStaleCloseCompletionDoesNotHideAReopenedStrip() {
@@ -503,5 +467,133 @@ final class PasteGate {
 		model.open()
 		model.move(1)
 		#expect(curves == [.none])
+	}
+}
+
+extension StripModelTests {
+	@Test func frozenFilteredGroupDoesNotGrowFromAnInsertOrLateStoreMatches() async {
+		let clips = Array(Fixtures.tenThousand.prefix(180))
+		let model = StripModel(clips: clips)
+		model.query = "History item 1"
+		let expected = Set(model.visibleClips.map(\.id))
+		model.selectAllResults()
+		#expect(expected.count > 9 && model.selectedIDs == expected)
+		var new = clips[0]; new.id = UUID()
+		model.applySnapshot([new] + clips.dropFirst())
+		model.actions.search = { _ in [clips[1].id] }
+		await model.searchStore()
+		#expect(model.selectedIDs == expected.subtracting([clips[0].id]))
+		model.selectOnPress(model.selectedID!)
+		#expect(model.selectedIDs.count == 1)
+	}
+
+	@Test func aLateFirstAResponseCannotOverwriteTheSecondA() async {
+		let r = StripRig(), id = Fixtures.mixed[5].id
+		r.model.query = "unseen"
+		r.model.actions.search = { _ in
+			r.model.query = "different"; r.model.query = "unseen"
+			return [id]
+		}
+		await r.model.searchStore()
+		#expect(r.model.visibleClips.isEmpty)
+	}
+
+	@Test func previewChangesAreComparedByIDNotByRow() {
+		let r = StripRig()
+		var reordered = Array(Fixtures.mixed.reversed())
+		reordered[0].preview = .failed
+		r.model.applySnapshot(reordered)
+		#expect(r.requests == [.loading])
+		r.model.applySnapshot(Fixtures.mixed)
+		#expect(r.requests == [.loading, .loading])
+		r.model.applySnapshot(Array(Fixtures.mixed.reversed()))
+		#expect(r.requests == [.loading, .loading])
+	}
+}
+
+extension StripModelTests {
+	@Test func deletingAFrozenGroupIncludesPinsAndRestoresMembersInCurrentOrder() async {
+		var clips = Array(Fixtures.tenThousand.prefix(12)); clips[10].isPinned = true
+		let model = StripModel(clips: clips)
+		let group = UUID(); var deleted: [UUID] = []
+		model.actions.delete = { ids in deleted = ids; return group }
+		model.actions.restore = { token in #expect(token == group); return clips }
+		model.open(); model.selectAllResults()
+		var new = Fixtures.extremes[0]; new.timestamp = Fixtures.now.addingTimeInterval(1)
+		model.applySnapshot([new] + clips)
+		await model.deleteSelected()
+		#expect(deleted == clips.map(\.id))
+		#expect(model.clips == [new])
+		await model.undo()
+		#expect(model.clips == [clips[10], new] + clips.filter { !$0.isPinned })
+		#expect(model.selectedIDs == Set(deleted))
+	}
+
+	@Test func recopyOfNonprimaryMemberCancelsTheWholeToken() async {
+		let r = StripRig()
+		r.model.selectAllResults()
+		await r.model.deleteSelected()
+		r.model.cancelUndo(for: [Fixtures.mixed.last!.id])
+		await r.model.undo()
+		#expect(!r.model.canUndo && r.model.clips.isEmpty)
+	}
+}
+
+extension StripModelTests {
+	@Test func onlySuccessfulActivationClosesAndMarksItsCloseStart() async {
+		let r = StripRig(), id = Fixtures.mixed[0].id
+		var copyCloses: [Bool] = []
+		r.model.onCloseStart = { copyCloses.append(r.model.isClosingAfterCopy) }
+		r.model.actions.write = { _, _ in throw RigError.boom }
+		await r.model.copy(id: id, plain: true, dismiss: true)
+		#expect(r.model.cardsMounted && copyCloses.isEmpty)
+		r.model.actions.write = { _, _ in }
+		await r.model.copy(id: id, plain: false, dismiss: false)
+		#expect(r.model.cardsMounted && copyCloses.isEmpty)
+		await r.model.copy(id: id, plain: true, dismiss: true)
+		#expect(copyCloses == [true] && !r.model.cardsMounted)
+		r.model.open(); r.model.beginClose()
+		#expect(copyCloses == [true, false])
+	}
+
+	@Test func lateCopySuccessOrFailureCannotCloseOrWarnInAReopenedStrip() async {
+		for fail in [true, false] {
+			let r = StripRig(), gate = WriteGate()
+			r.model.actions.write = { _, _ in
+				await withCheckedContinuation { gate.waiting.append($0) }
+				if fail { throw RigError.boom }
+			}
+			let copying = Task { await r.model.copy(id: Fixtures.mixed[1].id, plain: false, dismiss: true) }
+			while gate.waiting.isEmpty { await Task.yield() }
+			r.model.beginClose(); r.model.open(); gate.release()
+			await copying.value
+			#expect(r.model.cardsMounted && r.model.toast == nil && r.closeStarts == 1)
+		}
+	}
+}
+
+extension StripModelTests {
+	@Test func unchangedAndReorderedSnapshotsDoAtMostOneIndexedPreviewLookupPerRow() {
+		let rows = Array(Fixtures.tenThousand.prefix(2_000)), model = StripModel(clips: rows)
+		model.open()
+		for next in [rows, Array(rows.reversed())] {
+			let before = Diagnostics.previewComparisons
+			model.applySnapshot(next)
+			#expect(Diagnostics.previewComparisons - before == rows.count)
+		}
+	}
+}
+
+extension StripModelTests {
+	@Test func recopyDeliveredBeforeDeleteReturnsDoesNotEraseTheNewCopyOrOfferUndo() async {
+		let r = StripRig(), id = Fixtures.mixed[1].id
+		r.model.selectAllResults()
+		var recopy = Fixtures.mixed[1]; recopy.timestamp = .distantFuture
+		r.model.actions.delete = { _ in
+			r.model.cancelUndo(for: [id]); r.model.applySnapshot([recopy])
+			return UUID()
+		}
+		await r.model.deleteSelected()
+		#expect(r.model.clips == [recopy] && !r.model.canUndo && r.model.toast == nil)
 	}
 }

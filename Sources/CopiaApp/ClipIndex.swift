@@ -1,49 +1,45 @@
 import Foundation
 
-/// Which stored key backs each card, and which deletions can still be undone.
-/// `mutations` counts deletes and restores, so a reload fetched before one of them is not applied.
-struct ClipIndex<Deletion> {
+struct ClipIndex {
 	private(set) var keys: [UUID: String] = [:]
-	private var deleted: [UUID: Deletion] = [:]
 	private(set) var mutations = 0
-	/// Deletions whose undo ended without a restore, for the strip to forget.
+	private var groups: [UUID: Set<UUID>] = [:]
 	private var ended: Set<UUID> = []
 
-	/// Applies a snapshot fetched when `mutations` was `fetchedAt`. Returns false, changing nothing, if it is stale.
 	@discardableResult
 	mutating func apply(_ snapshot: [UUID: String], fetchedAt: Int) -> Bool {
 		guard fetchedAt == mutations else { return false }
 		keys = snapshot
-		// A recopy of a deleted item ends its undo.
-		for id in deleted.keys where snapshot[id] != nil { deleted[id] = nil; ended.insert(id) }
+		for (token, ids) in groups where ids.contains(where: { snapshot[$0] != nil }) {
+			ended.formUnion(ids)
+			groups[token] = nil
+		}
 		return true
 	}
 
-	mutating func noteDeleted(_ id: UUID, _ deletion: Deletion) {
-		mutations += 1
-		keys[id] = nil
-		deleted[id] = deletion
+	mutating func noteChanged() { mutations += 1 }
+
+	mutating func noteDeleted(_ ids: [UUID], token: UUID) {
+		noteChanged()
+		for id in ids { keys[id] = nil }
+		groups[token] = Set(ids)
 	}
 
-	func deletion(for id: UUID) -> Deletion? { deleted[id] }
+	func canRestore(_ token: UUID) -> Bool { groups[token] != nil }
+	mutating func forget(_ token: UUID) { groups[token] = nil }
+	mutating func clearDeletions() { groups.removeAll() }
 
-	mutating func takeDeletion(for id: UUID) -> Deletion? { deleted.removeValue(forKey: id) }
-
-	mutating func noteRestored(_ id: UUID, key: String) {
-		mutations += 1
-		keys[id] = key
-		deleted[id] = nil
+	mutating func noteRestored(_ token: UUID, keys restored: [UUID: String]) {
+		noteChanged()
+		forget(token)
+		keys.merge(restored) { _, new in new }
 	}
 
-	/// Closing the strip empties the trash, so nothing is left to undo.
-	mutating func clearDeletions() { deleted.removeAll() }
-
-	/// Erasing history removes every row and the trash; a reload fetched before it is stale.
 	mutating func noteErased() {
-		mutations += 1
+		noteChanged()
 		keys.removeAll()
-		ended.formUnion(deleted.keys)
-		deleted.removeAll()
+		for ids in groups.values { ended.formUnion(ids) }
+		clearDeletions()
 	}
 
 	mutating func takeEndedUndos() -> Set<UUID> {

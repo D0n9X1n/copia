@@ -1,3 +1,5 @@
+import Foundation
+
 /// One 8-bit luma plane, one byte per point. Frames are kept in memory only in this form.
 struct Luma: Equatable, Sendable {
 	let width: Int
@@ -28,6 +30,19 @@ struct Luma: Equatable, Sendable {
 			}
 		}
 		self.init(width: width, height: height, pixels: pixels)
+	}
+
+	static func hash(bgra base: UnsafeRawPointer, bytesPerRow: Int, x: Int, y: Int, width: Int, height: Int) -> UInt64 {
+		var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+		for row in 0..<height {
+			let line = base.advanced(by: (y + row) * bytesPerRow + x * 4).assumingMemoryBound(to: UInt8.self)
+			for col in 0..<width {
+				let pixel = line.advanced(by: col * 4)
+				let luma = (54 * UInt32(pixel[2]) + 183 * UInt32(pixel[1]) + 19 * UInt32(pixel[0])) >> 8
+				hash = (hash ^ UInt64(luma)) &* 0x100_0000_01b3
+			}
+		}
+		return hash
 	}
 
 	subscript(x: Int, y: Int) -> UInt8 {
@@ -116,6 +131,10 @@ enum FrameAnalysis {
 		return best
 	}
 
+	static func showsProgress(times: [Double], changed: [Bool], errors: [Double], after trigger: Double) -> Bool {
+		times.indices.contains { i in times[i] >= trigger && changed[i] && errors[i] > 0.05 && errors[i] < 0.95 }
+	}
+
 	/// Seconds from `trigger` to the first frame after which every error stays within `tolerance`.
 	/// Nil when the last frame is still unsettled, or when no frame was ever out of tolerance (nothing visibly moved).
 	static func settleTime(times: [Double], errors: [Double], trigger: Double, tolerance: Double) -> Double? {
@@ -165,8 +184,50 @@ enum Smoothness {
 		var passes: Bool { freshFraction >= Smoothness.required && onTimeFraction >= Smoothness.required }
 	}
 
+	enum InvalidTrial: String { case missingRow, panelChanged, driverIncomplete, incompleteWindow, incompleteTravel, noFrames }
+
+	struct Trial {
+		let result: Result?
+		let reason: InvalidTrial?
+		let distance: Double?
+		let elapsed: Double?
+		let captured: Int
+
+		var evidence: [String: Any] {
+			["invalidReason": reason?.rawValue as Any? ?? NSNull(), "distancePoints": distance as Any? ?? NSNull(),
+				"elapsedSeconds": elapsed as Any? ?? NSNull(), "capturedFrames": captured]
+		}
+	}
+
+	static func trial(frames: [Frame], first: Double?, last: Double?, finished: Bool, samePresentation: Bool,
+		distance: Double, velocity: Double, seconds: Double, refresh: Double) -> Trial {
+		let elapsed = first.flatMap { start in last.map { $0 - start } }
+		func invalid(_ reason: InvalidTrial) -> Trial {
+			Trial(result: nil, reason: reason, distance: distance, elapsed: elapsed, captured: frames.count)
+		}
+		guard samePresentation else { return invalid(.panelChanged) }
+		guard finished else { return invalid(.driverIncomplete) }
+		guard let first, let last, let window = window(first: first, last: last, duration: seconds, refresh: refresh) else {
+			return invalid(.incompleteWindow)
+		}
+		guard travelIsComplete(distance, velocity: velocity, seconds: seconds, refresh: refresh) else { return invalid(.incompleteTravel) }
+		let result = evaluate(frames, window: window, refresh: refresh)
+		guard result.presented > 0 else { return invalid(.noFrames) }
+		return Trial(result: result, reason: nil, distance: distance, elapsed: elapsed, captured: frames.count)
+	}
+
 	static let required = 0.95
 	static let maxInterval = 1.5
+
+	static func travelIsComplete(_ distance: Double, velocity: Double, seconds: Double, refresh: Double) -> Bool {
+		abs(distance - abs(velocity) * seconds) <= max(1, abs(velocity) * refresh + 1)
+	}
+
+	static func window(first: Double, last: Double, duration: Double, refresh: Double) -> ClosedRange<Double>? {
+		let start = first + 3 * refresh
+		guard last - first >= duration, start < last else { return nil }
+		return start...last
+	}
 
 	static func evaluate(_ frames: [Frame], window: ClosedRange<Double>, refresh: Double) -> Result {
 		let sorted = frames.sorted { $0.time < $1.time }

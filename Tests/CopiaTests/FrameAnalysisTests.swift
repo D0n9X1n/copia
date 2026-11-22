@@ -28,6 +28,28 @@ import Testing
 	static let reference = pattern(width: 90, height: 70, seed: 1)
 	static let wallpaper = pattern(width: 90, height: 70, seed: 2)
 
+	@Test func pointerSnapNeedsEveryPressAndAtMost100msMedianToTheVisibleTarget() {
+		func sample(_ ms: Double?) -> RecordedRun.PointerSample {
+			.init(dispatch: 0.002, commit: 0.008, presented: ms.map { $0 / 1_000 })
+		}
+		#expect(RecordedRun.pointerSnapPasses([20, 25, 35, 90, 150].map(sample)))
+		#expect(!RecordedRun.pointerSnapPasses([20, 25, 101, 120, 150].map(sample)))
+		#expect(!RecordedRun.pointerSnapPasses([20, 25, nil, 50, 80].map(sample)))
+		#expect(!RecordedRun.pointerSnapPasses([sample(20)]))
+		#expect(!RecordedRun.pointerSnapPasses([.init(dispatch: nil, commit: 0.008, presented: 0.03)] + [20, 25, 30, 35].map(sample)))
+	}
+
+	@Test @MainActor func pointerTimingRequiresChangedPixelsOnTheClickedRing() {
+		let before = Luma(width: 3, height: 2, fill: 30)
+		var other = before, half = before, final = before
+		other[0, 0] = 220; half[2, 0] = 150; final[2, 0] = 220
+		let frames = [Recorder.Frame(time: 1, luma: before), .init(time: 2, luma: other),
+			.init(time: 3, luma: half), .init(time: 4, luma: final)]
+		#expect(RecordedRun.firstRingFrame(frames, after: 1.5, rows: 0..<1, columns: 2..<3) == 3)
+		#expect(RecordedRun.firstRingFrame(frames, after: 1.5, rows: 1..<2, columns: 2..<3) == nil)
+		#expect(RecordedRun.firstRingFrame(frames, after: 0.5, rows: 0..<1, columns: 2..<3) == nil)
+	}
+
 	@Test func locatesAVerticalShift() {
 		let frame = Self.moved(Self.reference, by: 23, axis: .vertical, over: Self.wallpaper)
 		#expect(FrameAnalysis.locate(rows: 0..<70, columns: 0..<90, of: Self.reference, in: frame, axis: .vertical,
@@ -65,6 +87,33 @@ import Testing
 		#expect(abs((settle ?? -1) - 0.035) < 1e-12)
 	}
 
+	@Test func aMovingRowMustShowChangedIntermediatePixelsAfterTheTrigger() {
+		let times = [0.0, 0.1, 0.2, 0.3]
+		let changed = [false, false, true, true]
+		#expect(FrameAnalysis.showsProgress(times: times, changed: changed, errors: [1, 0.7, 0.3, 0], after: 0.05))
+		#expect(!FrameAnalysis.showsProgress(times: times, changed: changed, errors: [0.67, 0.67, 1, 0], after: 0.05))
+		#expect(!FrameAnalysis.showsProgress(times: times, changed: changed, errors: [1, 0.999, 0.001, 0], after: 0.05))
+		#expect(!FrameAnalysis.showsProgress(times: times, changed: changed, errors: [0.5, 1, 0, 0], after: 0.05))
+	}
+
+	@Test @MainActor func outgoingFadeNeedsDistinctPixelsInsideTheDeletedCardBeforeReflow() {
+		let original = Luma(width: 12, height: 5, fill: 200)
+		func frame(_ t: Double, _ left: UInt8, _ right: UInt8) -> Recorder.Frame {
+			var p = original
+			for y in 0..<5 { for x in 0..<12 { p[x,y] = x < 6 ? left : right } }
+			return .init(time: t, luma: p)
+		}
+		func fades(_ f: [Recorder.Frame]) -> Bool {
+			RecordedRun.outgoingFadePresented(f, after: 1.0, beforeReflow: 1.25, rows: 0..<5, columns: 0..<6)
+		}
+		let before = frame(0.95, 200, 200), stale = frame(1.01, 200, 200), empty = frame(1.20, 40, 200)
+		#expect(fades([before, stale, frame(1.08, 150, 200), frame(1.14, 80, 200), empty]))
+		#expect(!fades([before, stale, empty, frame(1.30, 130, 150)]))
+		#expect(!fades([before, frame(1.08, 200, 120), frame(1.14, 200, 60), empty]))
+		#expect(!fades([before, frame(1.06, 80, 200), frame(1.14, 80, 200), empty]))
+		#expect(!fades([stale, empty]))
+	}
+
 	@Test func aChangeThatNeverSettlesOrNeverShowsHasNoSettleTime() {
 		#expect(FrameAnalysis.settleTime(times: [0, 0.01], errors: [1, 0.2], trigger: 0, tolerance: 0.01) == nil)
 		#expect(FrameAnalysis.settleTime(times: [0, 0.01], errors: [0, 0], trigger: 0, tolerance: 0.01) == nil)
@@ -89,6 +138,16 @@ import Testing
 		b[2, 2] = 104 // below the threshold
 		b[9, 9] = 200 // outside the region
 		#expect(a.changedPixels(b, rows: 0..<5, columns: 0..<5, threshold: 8) == 1)
+	}
+
+	@Test func streamedCropHashMatchesEveryPixelOfTheLumaPlane() {
+		let raw = (0..<(12 * 9 * 4)).map { UInt8(truncatingIfNeeded: $0 &* 73) }
+		for x in [0, 1, 3] {
+			raw.withUnsafeBytes { bytes in
+				let plane = Luma(bgra: bytes.baseAddress!, bytesPerRow: 48, x: x, y: 2, width: 9, height: 5)
+				#expect(Luma.hash(bgra: bytes.baseAddress!, bytesPerRow: 48, x: x, y: 2, width: 9, height: 5) == plane.hash())
+			}
+		}
 	}
 
 	@Test func centroidFindsTheColumnsThatDifferFromTheBackground() {
@@ -145,6 +204,47 @@ import Testing
 
 	static func frames(_ count: Int, every interval: Double = refresh, hash: (Int) -> UInt64 = { UInt64($0) }) -> [Smoothness.Frame] {
 		(0..<count).map { Smoothness.Frame(time: Double($0) * interval, hash: hash($0)) }
+	}
+
+	@Test @MainActor func recorderTakesNativeDisplayFramesWithoutASecondRateLimiter() {
+		let config = Recorder(width: 800, height: 316).configuration(sourceRect: .init(x: 0, y: 0, width: 800, height: 316))
+		#expect(config.minimumFrameInterval.value == 0 && config.minimumFrameInterval.isValid)
+		#expect(!config.showsCursor && config.width == 800 && config.height == 316)
+	}
+
+	@Test func aFullClockWindowCannotPassWithShortOrMissingTravel() {
+		#expect(Smoothness.travelIsComplete(20_000, velocity: 4_000, seconds: 5, refresh: 1/120))
+		#expect(!Smoothness.travelIsComplete(19_900, velocity: 4_000, seconds: 5, refresh: 1/120))
+		#expect(!Smoothness.travelIsComplete(0, velocity: 4_000, seconds: 5, refresh: 1/120))
+		#expect(Smoothness.travelIsComplete(0, velocity: 0, seconds: 1.5, refresh: 1/120))
+		#expect(!Smoothness.travelIsComplete(10, velocity: 0, seconds: 1.5, refresh: 1/120))
+	}
+
+	@Test func aScrollReportsWhyItCouldNotBeScoredAndKeepsTheActualTravel() {
+		let frames = Self.frames(601)
+		func run(_ active: Bool = true, finished: Bool = true, last: Double = 5,
+			distance: Double = 20_000, observed: [Smoothness.Frame]? = nil, speed: Double = 4_000) -> Smoothness.Trial {
+			Smoothness.trial(frames: observed ?? frames, first: 0, last: last, finished: finished, samePresentation: active,
+				distance: distance, velocity: speed, seconds: 5, refresh: Self.refresh)
+		}
+		let interrupted = run(false, finished: false, last: 0.9, distance: 3600, observed: Self.frames(102))
+		#expect(interrupted.result == nil && interrupted.reason == .panelChanged)
+		#expect(interrupted.distance == 3600 && interrupted.elapsed == 0.9 && interrupted.captured == 102)
+		#expect(run(finished: false).reason == .driverIncomplete)
+		#expect(run(last: 3).reason == .incompleteWindow)
+		#expect(run(distance: 19_000).reason == .incompleteTravel)
+		#expect(run(observed: []).reason == .noFrames)
+		#expect(run(distance: 0, observed: Self.frames(2), speed: 0).reason == .noFrames)
+		let emptyControl = run(distance: 0, observed: [], speed: 0)
+		#expect(emptyControl.result == nil && emptyControl.reason == .noFrames)
+		#expect(run().result?.passes == true && run().reason == nil)
+		let frozen = run(distance: 0, observed: Self.frames(601, hash: { _ in 7 }), speed: 0)
+		#expect(frozen.reason == nil && frozen.result?.passes == false)
+	}
+
+	@Test func interruptedScrollCannotPassWithAnEarlyLastTick() {
+		#expect(Smoothness.window(first: 1, last: 3, duration: 5, refresh: Self.refresh) == nil)
+		#expect(Smoothness.window(first: 1, last: 6, duration: 5, refresh: Self.refresh) == (1 + 3 * Self.refresh)...6)
 	}
 
 	@Test func aRowThatMovesEveryRefreshPasses() {

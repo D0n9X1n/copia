@@ -2,7 +2,9 @@
 
 [简体中文](Home-zh-CN)
 
-Copia is a clipboard manager for macOS 27. Every ⌘C is kept, and ⌘Y opens a Liquid Glass strip of cards at the bottom of the screen. Pick a card and it pastes into the app you were using. **Start with [Usage](Usage).**
+Copia keeps clipboard history locally on your Mac. Press ⌘Y, choose a card, then press ⌘V in the destination app. Picking a card copies it; no Accessibility permission is needed. **Start with [Usage](Usage).**
+
+The universal build targets macOS 26 or later on both architectures. See **Verification** in the [release notes](https://github.com/D0n9X1n/copia/releases) for whether that version ran on native Intel hardware or macOS 26.
 
 ### Pages
 

@@ -2,8 +2,11 @@ import Testing
 import AppKit
 @testable import CopiaUI
 
-@MainActor
-@Suite struct StripPanelTests {
+extension WindowTests {
+	@MainActor @Suite struct StripPanelTests {}
+}
+
+extension WindowTests.StripPanelTests {
 	@Test func rootLayerCountsEveryDisplayAndDraw() throws {
 		_ = NSApplication.shared
 		let panel = StripPanel()

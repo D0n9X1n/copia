@@ -1,11 +1,15 @@
 import Testing
 import AppKit
 import SwiftUI
+import CopiaFixtures
 @testable import CopiaUI
 
-/// The lens drawn alone around a card-sized slot, read back as pixels.
-@MainActor
-@Suite struct LensTests {
+extension WindowTests {
+	/// The lens drawn alone around a card-sized slot, read back as pixels.
+	@MainActor @Suite struct LensTests {}
+}
+
+extension WindowTests.LensTests {
 	/// Room around the card for the lens to overhang into.
 	static let margin: CGFloat = 11
 
@@ -54,5 +58,36 @@ import SwiftUI
 	@Test func aDeletingCardsLensFadesWithItSoNoBlockShows() throws {
 		let alphas = try Self.alpha(at: Self.points, removing: true)
 		#expect(alphas.allSatisfy { $0 < 0.01 }, "\(alphas)")
+	}
+}
+
+extension WindowTests.LensTests {
+	@Test func pressMovesTheOnlyOuterRingToTheTargetInTheOwnedWindow() async throws {
+		for reduced in [false, true] {
+			let host = InputHost(reduced: reduced); defer { host.close() }
+			host.panel.setFrameOrigin(try #require(NSScreen.main).visibleFrame.origin); host.panel.alphaValue = 1
+			await host.settle()
+			func cards() throws -> [AXNode] {
+				try ["Notes", "Xcode", "Safari"].map { name in try #require(host.cards.first { $0.label.contains("from \(name),") }) }
+			}
+			func rings() throws -> [Double] {
+				let v = host.panel.host, rep = try #require(v.bitmapImageRepForCachingDisplay(in: v.bounds))
+				v.cacheDisplay(in: v.bounds, to: rep)
+				let image = try #require(rep.cgImage), bitmap = ContrastCheck.Bitmap(image)
+				return try cards().map { card in
+					let rect = CGRect(x: card.frame.midX - host.panel.frame.minX - Theme.cardSize.width / 2,
+						y: host.panel.frame.maxY - card.frame.midY - Theme.cardSize.height / 2,
+						width: Theme.cardSize.width, height: Theme.cardSize.height).insetBy(dx: -Theme.lensOutset, dy: -Theme.lensOutset)
+					return ContrastCheck.lens(in: bitmap, ring: rect, scale: CGFloat(image.width) / v.bounds.width)
+				}
+			}
+			host.model.selectAllResults(); await host.settle()
+			let first = try rings()
+			#expect(first[0] > 2 && first[1] < 1.5 && first[2] < 1.5, "\(first)")
+			host.mouse(.leftMouseDown, at: try cards()[2]); #expect(host.model.selectedID == Fixtures.mixed[2].id); await host.settle()
+			let next = try rings()
+			#expect(next[0] < 1.5 && next[1] < 1.5 && next[2] > 2, "reduced=\(reduced) \(next)")
+			host.mouse(.leftMouseUp, at: try cards()[2])
+		}
 	}
 }

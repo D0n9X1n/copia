@@ -2,6 +2,8 @@
 /// Incremented from view bodies, the panel's counting root layer and any display link.
 @MainActor
 public enum Diagnostics {
+	/// Indexed preview comparisons per snapshot, separate from hidden-render counters.
+	public internal(set) static var previewComparisons = 0
 	public private(set) static var bodyEvaluations = 0
 	public private(set) static var layerDisplays = 0
 	public private(set) static var displayLinkTicks = 0
@@ -13,6 +15,7 @@ public enum Diagnostics {
 	public static var total: Int { bodyEvaluations + layerDisplays + displayLinkTicks }
 
 	public static func reset() {
+		previewComparisons = 0
 		bodyEvaluations = 0
 		layerDisplays = 0
 		displayLinkTicks = 0

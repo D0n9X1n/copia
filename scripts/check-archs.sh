@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# Fails unless BINARY carries both the arm64 and the x86_64 slice.
-# Usage: scripts/check-archs.sh BINARY   (self-test: scripts/test-check-archs.sh)
+# Check the actual deployment target of each shipped slice, not the build SDK.
 set -euo pipefail
-
-BINARY="${1:?usage: scripts/check-archs.sh BINARY}"
-ARCHS="$(lipo -archs "$BINARY")" || { echo "cannot read the slices of $BINARY" >&2; exit 1; }
+binary=${1:?usage: check-archs.sh BINARY}
+archs=$(lipo -archs "$binary")
+read -r -a slices <<< "$archs"
+case "${slices[*]}" in
+    'arm64 x86_64'|'x86_64 arm64') ;;
+    *) echo "unexpected slices: $archs" >&2; exit 1 ;;
+esac
 for arch in arm64 x86_64; do
-	case " $ARCHS " in
-		*" $arch "*) ;;
-		*) echo "$BINARY is missing the $arch slice (has: $ARCHS)" >&2; exit 1 ;;
-	esac
+    xcrun vtool -arch "$arch" -show-build "$binary" | awk '
+        $1 == "platform" { platforms++; mac += ($2 == "MACOS") }
+        $1 == "minos" { floors++; correct += ($2 ~ /^26\.0$/) }
+        END { exit !(platforms == 1 && mac == 1 && floors == 1 && correct == 1) }
+    ' || { echo "expected $arch macOS 26.0 in $binary" >&2; exit 1; }
 done
-echo "$BINARY: $ARCHS"

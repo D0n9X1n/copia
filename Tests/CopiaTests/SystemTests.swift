@@ -4,7 +4,6 @@ import Synchronization
 import CopiaCore
 @testable import CopiaStore
 @testable import CopiaSystem
-import CopiaUI
 
 @MainActor
 final class FakePasteboard: PasteboardSource {
@@ -235,191 +234,113 @@ final class FakePasteboard: PasteboardSource {
 
 @MainActor
 @Suite struct PasterTests {
-	let items = [PasteboardItemData([(PasteboardTypes.string, Data("hi".utf8)), (PasteboardTypes.html, Data("<b>hi</b>".utf8))])]
+	func pasteboard() -> NSPasteboard { .withUniqueName() }
 
-	func pasteboard() -> NSPasteboard { NSPasteboard(name: .init("copia-test-\(UUID().uuidString)")) }
-
-	@Test func writesMarkerSoCaptureSkipsIt() {
-		let pb = pasteboard()
-		Paster(pasteboard: pb).write(items, plain: false)
-		let types = Set((pb.types ?? []).map(\.rawValue))
-		#expect(types.contains(PasteboardTypes.marker))
-		#expect(types.contains(PasteboardTypes.html))
-		#expect(!types.isDisjoint(with: PasteboardTypes.ignored))
+	/// Guard the writer's capability boundary without probing the live clipboard, Accessibility, or another app.
+	@Test func writerDoesNotAcquireExternalCapabilities() throws {
+		let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+		let source = try String(contentsOf: root.appendingPathComponent("Sources/CopiaSystem/Paster.swift"), encoding: .utf8)
+		for api in [".general", "CGEvent", "AXIsProcessTrusted", "NSWorkspace", "NSRunningApplication", "FileManager",
+			"URLSession", "NSFilePromiseProvider", "Data(contentsOf:", ".write(to:"] {
+			#expect(!source.contains(api), "The copy writer must not acquire \(api)")
+		}
 	}
 
-	@Test func plainTextKeepsOnlyTheString() {
-		let pb = pasteboard()
-		Paster(pasteboard: pb).write(items, plain: true)
-		let types = Set((pb.types ?? []).map(\.rawValue))
-		#expect(types.contains(PasteboardTypes.string))
-		#expect(!types.contains(PasteboardTypes.html))
-	}
-
-	@Test func plainTextOfFilesIsTheirPaths() {
-		let pb = pasteboard()
-		let files = [PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/Design%20Review.key".utf8))]),
-			PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/b.txt".utf8))])]
-		Paster(pasteboard: pb).write(files, plain: true)
-		let types = Set((pb.types ?? []).map(\.rawValue))
-		#expect(!types.contains(PasteboardTypes.fileURL))
-		#expect(pb.pasteboardItems?.compactMap { $0.string(forType: .string) } == ["/tmp/Design Review.key", "/tmp/b.txt"])
-	}
-
-	@Test func plainTextOfRichTextWithoutAStringIsItsText() {
-		let pb = pasteboard()
-		Paster(pasteboard: pb).write([PasteboardItemData([(PasteboardTypes.html, Data("<p>Ship <b>it</b></p>".utf8))])], plain: true)
-		#expect(pb.string(forType: .string) == "Ship it")
-		#expect(!Set((pb.types ?? []).map(\.rawValue)).contains(PasteboardTypes.html))
-	}
-
-	@Test func pasteClosesBeforeSendingAndReportsPasted() async {
-		var log: [String] = []
-		let paster = Paster(pasteboard: pasteboard(), isTrusted: { true }, postPaste: { log.append("cmdV") },
-			waitForFront: { _ in log.append("front"); return true })
-		let result = await paster.paste(items, plain: false, target: NSRunningApplication.current) { log.append("close") }
-		#expect(result == .pasted)
-		#expect(log == ["close", "front", "cmdV"])
-	}
-
-	@Test func withoutAccessibilityItOnlyCopies() async {
-		var sent = false
-		var closed = false
-		let pb = pasteboard()
-		let paster = Paster(pasteboard: pb, isTrusted: { false }, postPaste: { sent = true }, waitForFront: { _ in true })
-		let result = await paster.paste(items, plain: false, target: nil) { closed = true }
-		#expect(result == .accessibilityRequired)
-		#expect(!sent && !closed)
-		#expect(pb.string(forType: .string) == "hi")
-	}
-
-	@Test func accessibilityRevokedWhileWaitingOnlyCopiesAndDoesNotPostPaste() async {
+	@Test func unconvertiblePlainCopyLeavesThePasteboardUntouched() throws {
 		let pb = pasteboard()
 		defer { pb.releaseGlobally() }
-		var trusted = true
-		var events: [String] = []
-		var sent = false
-		let paster = Paster(pasteboard: pb, isTrusted: { events.append("trust"); return trusted },
-			postPaste: { sent = true }, waitForFront: { _ in
-				events.append("front")
-				await Task.yield()
-				trusted = false
-				return true
-			})
-		let result = await paster.paste(items, plain: false, target: NSRunningApplication.current) { events.append("close") }
-		#expect(result == .accessibilityRequired)
-		#expect(!sent)
-		#expect(events == ["trust", "close", "front", "trust"])
-		#expect(pb.string(forType: .string) == "hi")
-		#expect(pb.data(forType: .html) == Data("<b>hi</b>".utf8))
-		#expect(pb.types?.map(\.rawValue).contains(PasteboardTypes.marker) == true)
+		try #require(pb.setString("keep me", forType: .string))
+		let before = pb.changeCount
+		let image = PasteboardItemData([(PasteboardTypes.png, Data([0x89, 0x50]))])
+		#expect(throws: (any Error).self) { try Paster(pasteboard: pb).write([image], plain: true) }
+		#expect(pb.changeCount == before)
+		#expect(pb.string(forType: .string) == "keep me")
 	}
 
-	@Test func aTargetThatLosesFrontDuringTheSettleDelayIsNotPastedInto() async {
-		var front: pid_t = 1
-		let ok = await Paster.activateAndWait(pid: 1, frontmost: { front }, activate: {},
-			sleep: { ms in if ms == Paster.settleMilliseconds { front = 2 } })
-		#expect(!ok)
-	}
-
-	@Test func aTargetThatStaysFrontIsPastedInto() async {
-		var slept: [Int] = []
-		let ok = await Paster.activateAndWait(pid: 1, frontmost: { 1 }, activate: {}, sleep: { slept.append($0) })
-		#expect(ok)
-		#expect(slept == [Paster.settleMilliseconds])
-	}
-
-	/// The whole wait, settle included, stays within 300 ms: a target first seen at 290 ms has no room left to settle.
-	@Test func theWaitIncludingTheSettleNeverPasses300Milliseconds() async {
-		var slept: [Int] = []
-		var polls = 0
-		var clock = ContinuousClock.now
-		let late = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 29 ? 1 : 2 }, activate: {},
-			sleep: { ms in slept.append(ms); clock = clock.advanced(by: .milliseconds(ms)); if ms == 10 { polls += 1 } },
-			now: { clock })
-		#expect(slept.reduce(0, +) <= 300)
-		#expect(!late)
-
-		slept = []; polls = 0
-		let justInTime = await Paster.activateAndWait(pid: 1, frontmost: { polls >= 27 ? 1 : 2 }, activate: {},
-			sleep: { ms in slept.append(ms); clock = clock.advanced(by: .milliseconds(ms)); if ms == 10 { polls += 1 } },
-			now: { clock })
-		#expect(justInTime)
-		#expect(slept.reduce(0, +) == 300)
-		#expect(slept.last == Paster.settleMilliseconds)
-	}
-
-	/// The budget is elapsed time on a monotonic clock, not the sum of requested sleeps: here every sleep takes three
-	/// times what it asked for, as under scheduling delay (B2:14).
-	@Test func theBudgetIsElapsedTimeNotRequestedSleeps() async {
-		let start = ContinuousClock.now
-		var clock = start
-		var polls = 0
-		func wait(frontAfter: Int) async -> Bool {
-			clock = start; polls = 0
-			return await Paster.activateAndWait(pid: 1, frontmost: { polls >= frontAfter ? 1 : 2 }, activate: {},
-				sleep: { ms in clock = clock.advanced(by: .milliseconds(3 * ms)); if ms == 10 { polls += 1 } },
-				now: { clock })
-		}
-		// Never comes forward: polling stops within the budget, not after 280 ms of requested sleeps (840 ms elapsed).
-		#expect(await wait(frontAfter: .max) == false)
-		#expect(clock - start <= .milliseconds(300))
-		// Seen at 240 ms elapsed: the settle ends at 330 ms, past the budget, so it is not pasted into.
-		#expect(await wait(frontAfter: 8) == false)
-		// Seen early: pasted into, with the settle inside the budget.
-		#expect(await wait(frontAfter: 2) == true)
-		#expect(clock - start <= .milliseconds(300))
-	}
-
-	/// Every stored item and representation reaches the pasteboard in order, read back through spy events.
-	@Test func pasteWritesEveryItemAndRepresentationInOrder() async throws {
+	@Test func emptyCopiesLeaveThePasteboardUntouched() throws {
 		let pb = pasteboard()
 		defer { pb.releaseGlobally() }
-		var events: [String] = []
-		let paster = Paster(pasteboard: pb, isTrusted: { true }, postPaste: { events.append("cmdV") },
-			waitForFront: { _ in events.append("front"); return true })
-		let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
-		let mixed = PasteboardItemData([(PasteboardTypes.string, Data("hi".utf8)), (PasteboardTypes.rtf, Data("{\\rtf1 hi}".utf8)),
-			(PasteboardTypes.html, Data("<b>hi</b>".utf8)), (PasteboardTypes.png, png)])
-		let files = ["c.txt", "a.txt", "b.txt"].map { PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/\($0)".utf8))]) }
-		let items = [mixed] + files
-
-		func readBack() -> [PasteboardItemData] {
-			(pb.pasteboardItems ?? []).map { item in
-				// As Copia reads a pasteboard: stored types only. The server adds translations such as UTF-16 text on read.
-				PasteboardItemData(item.types.map(\.rawValue)
-					.filter { PasteboardTypes.stored.contains($0) }
-					.map { (type: $0, data: item.data(forType: NSPasteboard.PasteboardType($0)) ?? Data()) })
-			}
+		try #require(pb.setString("keep me", forType: .string))
+		let before = pb.changeCount
+		for items in [[], [PasteboardItemData([])]] {
+			#expect(throws: (any Error).self) { try Paster(pasteboard: pb).write(items, plain: false) }
 		}
-
-		let result = await paster.paste(items, plain: false, target: NSRunningApplication.current) { events.append("close") }
-		#expect(result == .pasted)
-		#expect(events == ["close", "front", "cmdV"])
-		let back = readBack()
-		#expect(back.count == items.count)
-		for (got, sent) in zip(back, items) {
-			#expect(Set(got.representations.map(\.type)) == Set(sent.representations.map(\.type)))
-			for rep in sent.representations { #expect(got.data(for: rep.type) == rep.data, "\(rep.type)") }
-		}
-		#expect(back.compactMap { $0.data(for: PasteboardTypes.fileURL) } == files.compactMap { $0.data(for: PasteboardTypes.fileURL) })
-		for item in pb.pasteboardItems ?? [] {
-			#expect(item.types.map(\.rawValue).contains(PasteboardTypes.marker))
-		}
-
-		events = []
-		#expect(await paster.paste(items, plain: true, target: NSRunningApplication.current) {} == .pasted)
-		#expect(readBack() == [PasteboardItemData([(PasteboardTypes.string, Data("hi".utf8))])]
-			+ ["/tmp/c.txt", "/tmp/a.txt", "/tmp/b.txt"].map { PasteboardItemData([(PasteboardTypes.string, Data($0.utf8))]) })
-		#expect(events == ["front", "cmdV"])
+		#expect(pb.changeCount == before)
+		#expect(pb.string(forType: .string) == "keep me")
 	}
 
-	@Test func aTargetThatNeverComesForwardIsNotPastedInto() async {
-		var sent = false
-		let paster = Paster(pasteboard: pasteboard(), isTrusted: { true }, postPaste: { sent = true }, waitForFront: { _ in false })
-		let result = await paster.paste(items, plain: false, target: NSRunningApplication.current) {}
-		#expect(result == .copied)
-		#expect(!sent)
+	@Test func rejectedRepresentationDoesNotClearThePasteboard() throws {
+		let pb = pasteboard()
+		defer { pb.releaseGlobally() }
+		try #require(pb.setString("keep me", forType: .string))
+		let before = pb.changeCount
+		let item = PasteboardItemData([(PasteboardTypes.string, Data("new".utf8)), ("", Data())])
+		#expect(throws: (any Error).self) { try Paster(pasteboard: pb).write([item], plain: false) }
+		#expect(pb.changeCount == before)
+		#expect(pb.string(forType: .string) == "keep me")
+	}
+
+	@Test func rejectedWriteThrowsEvenWhenAllItemsWerePrepared() throws {
+		let pb = pasteboard()
+		defer { pb.releaseGlobally() }
+		var offered: [String] = []
+		let writer = Paster(pasteboard: pb, writeObjects: { items in
+			offered = items.compactMap { $0.string(forType: .string) }
+			return false
+		})
+		let items = [PasteboardItemData([(PasteboardTypes.string, Data("new".utf8))])]
+		#expect(throws: (any Error).self) { try writer.write(items, plain: false) }
+		#expect(offered == ["new"])
+	}
+
+	@Test func writePreservesItemsAndRepresentationsWithoutMaterializingFiles() throws {
+		let pb = pasteboard()
+		defer { pb.releaseGlobally() }
+		let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+		try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let file = dir.appendingPathComponent("Design Review.key", isDirectory: false)
+		let mixed = PasteboardItemData([(PasteboardTypes.html, Data("<b>hi</b>".utf8)),
+			(PasteboardTypes.string, Data("hi".utf8)), (PasteboardTypes.rtf, Data(#"{\rtf1 hi}"#.utf8)),
+			(PasteboardTypes.png, Data([0x89, 0x50, 0x4E, 0x47]))])
+		let items = [mixed, PasteboardItemData([(PasteboardTypes.fileURL, Data(file.absoluteString.utf8))]),
+			PasteboardItemData([(PasteboardTypes.url, Data("https://example.invalid/fixture".utf8))])]
+		try Paster(pasteboard: pb).write(items, plain: false)
+		let written = try #require(pb.pasteboardItems)
+		#expect(written.count == items.count)
+		for (out, input) in zip(written, items) {
+			// AppKit may advertise extra translations; check the original representations in their order.
+			let types = input.representations.map(\.type)
+			#expect(out.types.map(\.rawValue).filter(types.contains) == types)
+			for rep in input.representations { #expect(out.data(forType: .init(rep.type)) == rep.data) }
+			#expect(out.data(forType: .init(PasteboardTypes.marker)) == Data())
+			#expect(out.string(forType: .init(PasteboardTypes.source)) == (Bundle.main.bundleIdentifier ?? "app.copia.Copia"))
+		}
+		#expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+	}
+
+	@Test func plainCopyStripsFormattingAndUsesLexicalFilePathsInItemOrder() throws {
+		let pb = pasteboard()
+		defer { pb.releaseGlobally() }
+		let items = [PasteboardItemData([(PasteboardTypes.html, Data("<p>not chosen</p>".utf8)),
+			(PasteboardTypes.string, Data("string wins".utf8))]),
+			PasteboardItemData([(PasteboardTypes.string, Data([0xff])), (PasteboardTypes.rtf, Data()),
+				(PasteboardTypes.html, Data("<p>valid fallback</p>".utf8))]),
+			PasteboardItemData([(PasteboardTypes.png, Data([0x89]))]),
+			PasteboardItemData([(PasteboardTypes.html, Data("<p>Ship <b>it</b></p>".utf8))]),
+			PasteboardItemData([(PasteboardTypes.rtf, Data(#"{\rtf1 rich}"#.utf8))]),
+			PasteboardItemData([(PasteboardTypes.url, Data("https://example.invalid/fixture".utf8))]),
+			PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///tmp/Design%20Review.key".utf8))]),
+			PasteboardItemData([(PasteboardTypes.fileURL, Data("file:///.file/id=9999999.9999999".utf8))])]
+		try Paster(pasteboard: pb).write(items, plain: true)
+		let written = try #require(pb.pasteboardItems)
+		#expect(written.compactMap { $0.string(forType: .string) } == ["string wins", "valid fallback", "Ship it", "rich",
+			"https://example.invalid/fixture", "/tmp/Design Review.key", "/.file/id=9999999.9999999"])
+		for item in written {
+			#expect(item.types.map(\.rawValue).filter(PasteboardTypes.stored.contains) == [PasteboardTypes.string])
+			#expect(item.data(forType: .init(PasteboardTypes.marker)) == Data())
+			#expect(item.string(forType: .init(PasteboardTypes.source)) == (Bundle.main.bundleIdentifier ?? "app.copia.Copia"))
+		}
 	}
 }
 

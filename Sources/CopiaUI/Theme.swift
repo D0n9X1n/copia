@@ -243,14 +243,17 @@ public enum Theme {
 /// Caches each source app's icon and tint by bundle ID.
 @MainActor
 public final class SourceAppearance {
-	public static let shared = SourceAppearance()
+	public static let shared = SourceAppearance(usesWorkspace: true)
+	public static let fixtures = SourceAppearance(usesWorkspace: false)
+	private let usesWorkspace: Bool
+	private init(usesWorkspace: Bool) { self.usesWorkspace = usesWorkspace }
 	private var cache: [String: (icon: NSImage, tint: Theme.Tint)] = [:]
 
 	public func icon(for bundleID: String?) -> NSImage? { entry(for: bundleID)?.icon }
 	public func tint(for bundleID: String?) -> Theme.Tint { entry(for: bundleID)?.tint ?? Theme.neutralTint }
 
 	private func entry(for bundleID: String?) -> (icon: NSImage, tint: Theme.Tint)? {
-		guard let bundleID else { return nil }
+		guard usesWorkspace, let bundleID else { return nil }
 		if let hit = cache[bundleID] { return hit }
 		guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
 			let generic = (NSWorkspace.shared.icon(for: .application), Theme.neutralTint)

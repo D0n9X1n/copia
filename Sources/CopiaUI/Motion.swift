@@ -26,7 +26,8 @@ public enum MotionCurve: Equatable, Sendable {
 
 /// The one table every animation reads from.
 public enum Motion {
-	public static func value(_ event: MotionEvent, reduced: Bool) -> MotionCurve {
+	/// The published upper-bound curves are independent of the faster playback used by the UI.
+	public static func settleCeiling(_ event: MotionEvent, reduced: Bool) -> MotionCurve {
 		if reduced {
 			// Reduce Motion: open/close fade in place, the lens jumps, inserts and deletes crossfade.
 			return event == .lens ? .none : .linear(0.15)
@@ -38,6 +39,23 @@ public enum Motion {
 		case .delete, .undo: return .easeInOut(0.2)
 		case .reflow, .insert: return .spring(response: 0.3, damping: 0.9)
 		case .loading: return .linear(0.15)
+		}
+	}
+	public static func value(_ event: MotionEvent, reduced: Bool) -> MotionCurve {
+		if reduced {
+			switch event {
+			case .open, .close, .undo: return .linear(0.105)
+			case .reflow: return .linear(0.08)
+			default: return settleCeiling(event, reduced: true)
+			}
+		}
+		switch event {
+		case .open: return .spring(response: 0.23, damping: 0.86)
+		case .close: return .easeIn(0.125)
+		case .lens: return .spring(response: 0.16, damping: 0.9)
+		case .undo: return .easeInOut(0.16)
+		case .reflow: return .spring(response: 0.16, damping: 0.9)
+		default: return settleCeiling(event, reduced: false)
 		}
 	}
 }
@@ -94,12 +112,23 @@ public struct Animator {
 		NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 	}) -> Animator {
 		Animator { event, change, completion in
-			guard let animation = Motion.value(event, reduced: reduced()).animation else {
+			let curve = Motion.value(event, reduced: reduced())
+			guard let animation = curve.animation else {
 				change()
 				completion()
 				return
 			}
-			withAnimation(animation, completionCriteria: .logicallyComplete, change, completion: completion)
+			let fadeEnd: ContinuousClock.Instant?
+			switch (event, curve) {
+			case let (.delete, .easeInOut(duration)), let (.delete, .linear(duration)): fadeEnd = .now + .seconds(duration)
+			default: fadeEnd = nil
+			}
+			withAnimation(animation, completionCriteria: .logicallyComplete, change) {
+				// A second hosting view can report completion before its outgoing card finishes fading.
+				if let fadeEnd, .now < fadeEnd {
+					Task { try? await ContinuousClock().sleep(until: fadeEnd); completion() }
+				} else { completion() }
+			}
 		}
 	}
 

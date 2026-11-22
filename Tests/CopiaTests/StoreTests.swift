@@ -9,6 +9,7 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 	let live = LiveFileOps()
 	var listCalls = 0
 	var readCalls = 0
+	var mutationCalls = 0
 	var failCopyContaining: String?
 	var failWriteContaining: String?
 	var failRemoveContaining: String?
@@ -19,6 +20,7 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 	/// folder without search permission does.
 	var hideContaining: String?
 	func write(_ data: Data, to url: URL) throws {
+		mutationCalls += 1
 		if failAtomicWrite {
 			failAtomicWrite = false
 			try Data([8]).write(to: url.deletingLastPathComponent().appendingPathComponent(".atomic-leftover"))
@@ -33,11 +35,13 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 		return try Data(contentsOf: url, options: .mappedIfSafe)
 	}
 	func copy(_ from: URL, to: URL) throws {
+		mutationCalls += 1
 		if let f = failCopyContaining, from.path.contains(f) || to.path.contains(f) { failCopyContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		if let f = hideContaining, from.path.contains(f) { throw CocoaError(.fileReadNoPermission) }
 		try live.copy(from, to: to)
 	}
 	func remove(_ url: URL) throws {
+		mutationCalls += 1
 		if let f = failRemoveContaining, url.path.contains(f), live.exists(url) { failRemoveContaining = nil; throw CocoaError(.fileWriteUnknown) }
 		try live.remove(url)
 	}
@@ -56,31 +60,32 @@ final class FaultyFiles: FileOps, @unchecked Sendable {
 	}
 }
 
-private func text(_ s: String, at t: TimeInterval = 1_800_000_000) -> ClipDraft {
+func text(_ s: String, at t: TimeInterval = 1_800_000_000) -> ClipDraft {
 	ClipDraft(items: [PasteboardItemData([(PasteboardTypes.string, Data(s.utf8))])], copiedAt: Date(timeIntervalSince1970: t))
 }
 
-private func tempStore(files: FileOps = LiveFileOps()) throws -> (ClipStore, URL) {
+func tempStore(files: FileOps = LiveFileOps()) throws -> (ClipStore, URL) {
 	let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-store-\(UUID().uuidString)")
 	return (try ClipStore(directory: dir, files: files), dir)
 }
 
-private func fileCount(_ dir: URL, _ sub: String) -> Int {
+func fileCount(_ dir: URL, _ sub: String) -> Int {
 	(try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent(sub).path).count) ?? 0
 }
 
 /// Small SQL-only fixtures exercise scopes larger than a deliberately lowered bind limit.
-private func seedSQLRows(_ dir: URL, count: Int) throws {
+func seedSQLRows(_ dir: URL, count: Int) throws {
 	try editSQL(dir, """
 		WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i+1<\(count))
-		INSERT INTO clips SELECT 'key-'||i, 'text', 'title', 'preview', 0, NULL, NULL,
+		INSERT INTO clips (id,kind,title,preview_text,is_code,source_bundle,source_name,first_copied,last_copied,
+			copy_count,byte_size,meta,color_hex,url,file_names,preview_state,generation) SELECT 'key-'||i, 'text', 'title', 'preview', 0, NULL, NULL,
 			1, 1, 1, 7, '', NULL, NULL, '', 'ok', i FROM n;
 		INSERT INTO clips_fts (id,title,preview_text) SELECT id,title,preview_text FROM clips;
 		""")
 }
 
 /// Real SQLite edits preserve storage classes and bytes that StoredClip intentionally normalizes.
-private func editSQL(_ dir: URL, _ sql: String) throws {
+func editSQL(_ dir: URL, _ sql: String) throws {
 	var db: OpaquePointer?
 	guard sqlite3_open(dir.appendingPathComponent("copia.sqlite").path, &db) == SQLITE_OK else {
 		throw StoreError.sqlite("fixture open failed")
@@ -91,7 +96,7 @@ private func editSQL(_ dir: URL, _ sql: String) throws {
 	}
 }
 
-private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
+func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
 	var db: OpaquePointer?
 	guard sqlite3_open_v2(dir.appendingPathComponent("copia.sqlite").path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
 		throw StoreError.sqlite("fixture read open failed")
@@ -114,6 +119,16 @@ private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
 		}
 		rows.append(row)
 	}
+}
+
+func dataFiles(_ dir: URL) throws -> [URL: Data] {
+	var result: [URL: Data] = [:]
+	for name in ["blobs", "thumbs", "trash"] {
+		for url in try FileManager.default.contentsOfDirectory(at: dir.appendingPathComponent(name), includingPropertiesForKeys: nil) {
+			result[url] = try Data(contentsOf: url)
+		}
+	}
+	return result
 }
 
 @Suite struct StoreTests {
@@ -230,7 +245,7 @@ private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
 			("byte_size", ["0", "1", "1.5"]), ("meta", ["''", "'文'", "x'e69687'"]),
 			("color_hex", ["NULL", "''"]), ("url", ["NULL", "''"]),
 			("file_names", ["'a'", "'a' || char(10)"]),
-			("preview_state", ["'unknown-one'", "'unknown-two'"]), ("generation", ["1", "2"]),
+			("preview_state", ["'unknown-one'", "'unknown-two'"]), ("generation", ["1", "2"]), ("is_pinned", ["0", "1", "2"]),
 		]
 		await store.resetReadCounts()
 		for (column, values) in changes {
@@ -1010,7 +1025,7 @@ private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
 		await #expect(throws: StoreError.missingBlob) { try await store.items(for: clip.key) }
 	}
 
-	private static let writes = ["insert", "recopy", "preview", "delete", "restore", "prune", "erase"]
+	private static let writes = ["insert", "recopy", "pin", "preview", "delete", "restore", "prune", "erase"]
 
 	private func writeFixture(_ op: String, _ store: ClipStore) async throws -> (StoredClip, DeletedClip?) {
 		let (clip, _) = try await store.insert(text("https://example.com/original", at: 100))
@@ -1025,6 +1040,7 @@ private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
 		switch op {
 		case "insert": try await store.insert(text("https://example.com/new"))
 		case "recopy": try await store.insert(text("https://example.com/original", at: 200))
+		case "pin": try await store.setPinned(clip.key, to: true)
 		case "preview": try await store.setPreview(key: clip.key, generation: clip.generation, state: .ok, title: "Saved", image: Data([7]))
 		case "delete": _ = try await store.delete(clip.key)
 		case "restore": try await store.restore(try #require(deleted))
@@ -1045,6 +1061,7 @@ private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
 		case "recopy":
 			#expect(try await store.fetch(clip.key)?.copyCount == 2)
 			#expect(try await store.fetch(clip.key)?.lastCopied == Date(timeIntervalSince1970: 200))
+		case "pin": #expect(try await store.fetch(clip.key)?.isPinned == true)
 		case "preview", "restore":
 			#expect(try await store.fetch(clip.key)?.title == "Saved")
 			#expect(try await store.search("Saved") == [clip.key])
@@ -1092,15 +1109,6 @@ private func sqlTextRows(_ dir: URL, _ sql: String) throws -> [[String]] {
 		#expect(try dataFiles(dir) == frozen)
 	}
 
-	private func dataFiles(_ dir: URL) throws -> [URL: Data] {
-		var result: [URL: Data] = [:]
-		for name in ["blobs", "thumbs", "trash"] {
-			for url in try FileManager.default.contentsOfDirectory(at: dir.appendingPathComponent(name), includingPropertiesForKeys: nil) {
-				result[url] = try Data(contentsOf: url)
-			}
-		}
-		return result
-	}
 
 	@Test func failedDeleteStagingKeepsExactLiveFiles() async throws {
 		let faulty = FaultyFiles()

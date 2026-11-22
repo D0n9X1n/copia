@@ -5,12 +5,15 @@ import CopiaCore
 import CopiaFixtures
 @testable import CopiaUI
 
-/// The brief's extremes: labels longer after translation tail-truncate and never clip. A deleting card shrinks as it fades.
-@MainActor
-@Suite(.serialized) struct CardLabelTests {
+extension WindowTests {
+	/// The brief's extremes: labels longer after translation tail-truncate and never clip. A deleting card shrinks as it fades.
+	@MainActor @Suite struct CardLabelTests {}
+}
+
+extension WindowTests.CardLabelTests {
 	func card(_ clip: Clip, growth: Double? = nil, removing: Bool = false, reduced: Bool = false) -> some View {
 		ClipCard(clip: clip, tint: Theme.neutralTint, icon: nil, badge: nil, hovered: false, selected: false, removing: removing,
-			now: Fixtures.now, highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
+			age: ClipCard.relative(clip.timestamp, now: Fixtures.now), highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
 			.environment(\.copiaOverrides, CopiaOverrides(reduceMotion: reduced, labelGrowth: growth))
 			.environment(\.colorScheme, .light)
 	}
@@ -167,7 +170,7 @@ import CopiaFixtures
 		let r = try render([AnyView(card(clip, removing: true))])
 		#expect(stride(from: 3, to: r.pixels.count, by: 4).allSatisfy { r.pixels[$0] < 3 }, "a deleting card still shows")
 		let removing = ClipCard(clip: clip, tint: Theme.neutralTint, icon: nil, badge: nil, hovered: false, selected: false,
-			removing: true, now: Fixtures.now, highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
+			removing: true, age: ClipCard.relative(clip.timestamp, now: Fixtures.now), highlight: "", thumbnails: ThumbnailCache(), animator: .immediate)
 		let effects = Self.outerEffects(removing.body)
 		#expect(effects.scale == CGSize(width: StripMotion.deleteScale, height: StripMotion.deleteScale))
 		#expect(effects.opacity == 0)

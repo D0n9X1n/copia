@@ -5,14 +5,13 @@ import CopiaCore
 
 extension KeyboardShortcuts.Name {
 	public static let copiaHistory = Self("copiaHistory", initial: .init(.y, modifiers: [.command]))
-	public static let copiaPause = Self("copiaPause", initial: .init(.t, modifiers: [.command]))
+	public static let copiaPause = Self("copiaPause")
 }
 
 /// The onboarding status glyph for one permission.
 public enum PermissionGlyph: Equatable, Sendable {
 	case granted, needed
 
-	public init(accessibility: Bool) { self = accessibility ? .granted : .needed }
 	/// Only Always Allow lets Copia read without a prompt; default, ask and deny all still need the user.
 	public init(pasteboard: PermissionState.Pasteboard) { self = pasteboard == .allow ? .granted : .needed }
 
@@ -26,15 +25,10 @@ public enum PermissionGlyph: Equatable, Sendable {
 /// Permission state shown in onboarding and Settings.
 public struct PermissionState: Equatable, Sendable {
 	public enum Pasteboard: Sendable { case unset, ask, allow, deny }
-	public var accessibility: Bool
 	public var pasteboard: Pasteboard
 
-	public init(accessibility: Bool, pasteboard: Pasteboard) {
-		self.accessibility = accessibility
-		self.pasteboard = pasteboard
-	}
+	public init(pasteboard: Pasteboard) { self.pasteboard = pasteboard }
 
-	public var accessibilityGlyph: PermissionGlyph { PermissionGlyph(accessibility: accessibility) }
 	public var pasteboardGlyph: PermissionGlyph { PermissionGlyph(pasteboard: pasteboard) }
 }
 
@@ -50,7 +44,8 @@ public final class ShellModel {
 	public var retention: Retention = .month
 	public var ignoredApps: [String] = []
 	public var paused = false
-	public var permissions = PermissionState(accessibility: false, pasteboard: .unset)
+	public var showMenuBarIcon = true
+	public var permissions = PermissionState(pasteboard: .unset)
 	public var eraseConfirmation = false
 	/// Set when an erase could not remove every file.
 	public var eraseError: String?
@@ -61,8 +56,8 @@ public final class ShellModel {
 	@ObservationIgnored public var setRetention: (Retention) -> Void = { _ in }
 	@ObservationIgnored public var setIgnoredApps: ([String]) -> Void = { _ in }
 	@ObservationIgnored public var erase: () -> Void = {}
-	@ObservationIgnored public var requestAccessibility: () -> Void = {}
-	@ObservationIgnored public var openAccessibility: () -> Void = {}
+	@ObservationIgnored public var setShowMenuBarIcon: (Bool) -> Void = { _ in }
+	@ObservationIgnored public var togglePause: () -> Void = {}
 	@ObservationIgnored public var openPasteboard: () -> Void = {}
 	@ObservationIgnored public var openHistory: () -> Void = {}
 	@ObservationIgnored public var finishOnboarding: () -> Void = {}
@@ -98,6 +93,18 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 	let actions: Actions
 	private var shortcutsWereEnabled = true
 
+	/// Run before binding menu items or registering hotkeys. The package persists JSON strings, or false for disabled.
+	public static func migratePauseShortcut(in defaults: UserDefaults) {
+		let migrated = "migratedPauseShortcutV2", key = "KeyboardShortcuts_copiaPause"
+		guard !defaults.bool(forKey: migrated) else { return }
+		if let json = defaults.object(forKey: key) as? String,
+			let shortcut = try? JSONDecoder().decode(KeyboardShortcuts.Shortcut.self, from: Data(json.utf8)),
+			shortcut == .init(.t, modifiers: .command) {
+			defaults.removeObject(forKey: key)
+		}
+		defaults.set(true, forKey: migrated)
+	}
+
 	public init(actions: Actions, statusBar: NSStatusBar = .system) {
 		self.actions = actions
 		item = statusBar.statusItem(withLength: NSStatusItem.variableLength)
@@ -109,22 +116,21 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 			menuItem.target = self
 			menu.addItem(menuItem)
 		}
-		// The global shortcuts replace the ⌘Y/⌘T fallbacks and follow the user's recordings.
+		// Follow recordings, including when a shortcut is cleared.
 		menu.items.first { $0.action == #selector(history) }?.setShortcut(for: .copiaHistory)
 		menu.items.first { $0.action == #selector(pause) }?.setShortcut(for: .copiaPause)
 		menu.delegate = self
 		item.menu = menu
 	}
 
-	/// The menu rows, in order, with their titles, ⌘ fallbacks and actions. The caller sets the target.
+	/// The menu rows, in order, with their titles and actions. The caller sets the target.
 	static func items(paused: Bool) -> [NSMenuItem] {
 		let rows = [
-			NSMenuItem(title: "Open History", action: #selector(history), keyEquivalent: "y"),
-			NSMenuItem(title: pauseTitle(paused: paused), action: #selector(pause), keyEquivalent: "t"),
+			NSMenuItem(title: "Open History", action: #selector(history), keyEquivalent: ""),
+			NSMenuItem(title: pauseTitle(paused: paused), action: #selector(pause), keyEquivalent: ""),
 			NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","),
 			NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"),
 		]
-		rows.forEach { $0.keyEquivalentModifierMask = .command }
 		return [rows[0], rows[1], .separator(), rows[2], rows[3]]
 	}
 
@@ -137,6 +143,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 	}
 
 	public var button: NSStatusBarButton { item.button! }
+
+	public func setVisible(_ visible: Bool) { item.isVisible = visible }
 
 	public func setPaused(_ paused: Bool) { Self.show(paused: paused, in: menu, button: item.button) }
 
@@ -172,7 +180,7 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
 public struct SettingsView: View {
 	public static let width: CGFloat = 560
 	/// Each pane's height; the toolbar tabs sit above it.
-	public static let height: CGFloat = 320
+	public static let height: CGFloat = 400
 	@Bindable var model: ShellModel
 	let pickApp: () -> String?
 	let tab: SettingsTab
@@ -206,8 +214,11 @@ public struct SettingsView: View {
 				case let .error(message): Text(message).font(.callout).foregroundStyle(ShellTheme.error)
 				default: EmptyView()
 				}
+				Toggle("Show menu bar icon", isOn: Binding(get: { model.showMenuBarIcon }, set: { model.setShowMenuBarIcon($0) }))
 			}
 			Section("History") {
+				Button(MenuBarController.pauseTitle(paused: model.paused)) { model.togglePause() }
+					.disabled(model.storageStatus == .recoveryRequired)
 				Picker("Keep history", selection: Binding(get: { model.retention }, set: { model.setRetention($0); model.retention = $0 })) {
 					ForEach(Retention.allCases, id: \.self) { Text($0.title).tag($0) }
 				}
@@ -231,7 +242,7 @@ public struct SettingsView: View {
 				KeyboardShortcuts.Recorder("Show history", name: .copiaHistory)
 				KeyboardShortcuts.Recorder("Pause capture", name: .copiaPause)
 			} footer: {
-				Text("In the strip: ←/→ select, ↩ paste, ⇧↩ paste plain text, ⌘1–9 quick paste, ⌘C copy, ⌫ delete, ⌘Z undo, ⎋ close.")
+				Text("↩ or ⌘1–9 copies and closes history. Hold ⇧ to copy plain text. Press ⌘V where you want to paste. In results: ←/→ select, ⌘A selects all, ⌘C copies without closing, ⌫ deletes, and ⌘Z undoes. ⎋ clears search or closes history.")
 					.font(.callout).foregroundStyle(ShellTheme.secondary)
 			}
 		}
@@ -282,11 +293,10 @@ public struct SettingsView: View {
 // MARK: Onboarding
 
 public enum OnboardingStep: Int, CaseIterable, Sendable {
-	case welcome, accessibility, pasteboard, tryIt
+	case welcome, pasteboard, tryIt
 	public var title: String {
 		switch self {
 		case .welcome: "Welcome"
-		case .accessibility: "Accessibility"
 		case .pasteboard: "Pasteboard"
 		case .tryIt: "Try it"
 		}
@@ -326,23 +336,9 @@ public struct OnboardingView: View {
 		switch step {
 		case .welcome:
 			page(title: "Copia remembers what you copy.",
-				detail: "Everything you copy with ⌘C is kept here. Press ⌘Y to bring it back.",
+				detail: "Open history with ⌘Y to find and copy an earlier item.",
 				hero: AnyView(Image(nsImage: icon ?? NSImage()).resizable().frame(width: 128, height: 128))) {
 				Button("Get Started") { next() }.shellProminentButton().controlSize(.large)
-			}
-		case .accessibility:
-			page(title: "Paste where you were",
-				detail: "To paste into the app you were using, allow Copia in Privacy & Security → Accessibility. Without it, Copia copies and you press ⌘V.",
-				hero: AnyView(status(model.permissions.accessibilityGlyph))) {
-				if model.permissions.accessibility {
-					Button("Continue") { next() }.shellProminentButton().controlSize(.large)
-				} else {
-					HStack {
-						Button("Continue without") { next() }.buttonStyle(.glass).controlSize(.large)
-						Button("Allow Accessibility") { model.requestAccessibility(); model.openAccessibility() }
-							.shellProminentButton().controlSize(.large)
-					}
-				}
 			}
 		case .pasteboard:
 			page(title: "Let Copia read the clipboard",
@@ -358,7 +354,7 @@ public struct OnboardingView: View {
 				}
 			}
 		case .tryIt:
-			page(title: "Try it", detail: "Copy something, then press ⌘Y.",
+			page(title: "Try it", detail: "Copy something, then open history and press Return to copy it again. Use ⌘V in the app where you want to paste.",
 				hero: AnyView(KeyboardShortcuts.Recorder("Show history", name: .copiaHistory))) {
 				Button("Open History") { model.finishOnboarding(); model.openHistory() }
 					.shellProminentButton().controlSize(.large)

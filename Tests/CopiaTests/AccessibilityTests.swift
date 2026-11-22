@@ -11,26 +11,23 @@ final class ActionLog {
 	var entries: [String] = []
 
 	func actions() -> StripActions {
-		StripActions(
-			paste: { [unowned self] id, plain, beginClose in
-				entries.append("paste \(id) plain=\(plain)")
-				beginClose()
-				return .pasted
-			},
-			copy: { [unowned self] id in entries.append("copy \(id)") },
-			delete: { [unowned self] id in entries.append("delete \(id)") },
-			restore: { _, _ in },
-			openAccessibilitySettings: {})
+		var actions = StripActions.fixtures
+		actions.write = { [unowned self] id, plain in entries.append("write \(id) plain=\(plain)") }
+		actions.delete = { [unowned self] ids in entries += ids.map { "delete \($0)" }; return UUID() }
+		return actions
 	}
 }
 
-/// The strip as VoiceOver sees it: SwiftUI's accessibility tree, read in-process.
-@MainActor
-@Suite(.serialized) struct AccessibilityTests {
+extension WindowTests {
+	/// The strip as VoiceOver sees it: SwiftUI's accessibility tree, read in-process.
+	@MainActor @Suite struct AccessibilityTests {}
+}
+
+extension WindowTests.AccessibilityTests {
 	/// Wide enough that the lazy row realizes all nine cards.
 	static let allCards = PanelLayout.contentWidth(count: Fixtures.mixed.count) + 40
 
-	@Test func eachCardIsOneElementWithItsLabelAndFourNamedActions() async throws {
+	@Test func eachCardIsOneElementWithItsLabelAndMatchingNamedActions() async throws {
 		let host = StripHost(width: Self.allCards)
 		defer { host.close() }
 		await host.settle()
@@ -40,7 +37,7 @@ final class ActionLog {
 			let label = CardAccessibility(clip: clip, now: Fixtures.now).label
 			let matches = cards.filter { $0.label == label }
 			#expect(matches.count == 1, "\(label)")
-			#expect(Set(matches.first?.actions.map(\.name) ?? []) == ["Paste", "Paste as Plain Text", "Copy", "Delete"])
+			#expect(Set(matches.first?.actions.map(\.name) ?? []) == ["Copy and Close", "Copy as Plain Text and Close", "Copy", "Pin", "Delete"])
 		}
 		// One element per card: nothing inside a card is exposed on its own.
 		for card in cards { #expect(card.children.isEmpty) }
@@ -70,7 +67,25 @@ final class ActionLog {
 			_ = target.perform(selector, with: copy)
 		}
 		await host.settle()
-		#expect(log.entries == ["copy \(clip.id)"])
+		#expect(log.entries == ["write \(clip.id) plain=false"])
 		#expect(host.model.selectedID == clip.id)
+	}
+}
+
+extension WindowTests.AccessibilityTests {
+	@Test func groupSelectionIsSpokenAndGearOpensSettingsFromTheTopRight() async throws {
+		let host = StripHost(width: Self.allCards); defer { host.close() }
+		var opens = 0; host.model.actions.openSettings = { opens += 1 }
+		host.model.selectAllResults(); await host.settle()
+		#expect(host.cards.count == 9 && host.cards.allSatisfy(\.isSelected))
+		#expect(host.root.all.contains { $0.value == "9 selected" || $0.label == "9 selected" })
+		let gear = try #require(host.root.all.first { $0.role == "AXButton" && $0.label == "Settings" })
+		#expect(gear.frame.maxX > host.window.frame.maxX - 40 && gear.frame.midY > host.window.frame.maxY - Theme.topBarHeight)
+		let press = NSSelectorFromString("accessibilityPerformPress")
+		try #require(gear.object.responds(to: press))
+		_ = gear.object.perform(press); await host.settle()
+		#expect(opens == 1)
+		host.model.move(1); await host.settle()
+		#expect(host.cards.filter(\.isSelected).count == 1)
 	}
 }
