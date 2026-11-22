@@ -1,0 +1,77 @@
+import Testing
+import Foundation
+@testable import CopiaApp
+
+@MainActor
+@Suite struct ClipIndexTests {
+	let a = UUID(), b = UUID()
+
+	@Test func aSnapshotFetchedBeforeADeleteIsRejected() {
+		var index = ClipIndex<String>()
+		index.apply([a: "ka", b: "kb"], fetchedAt: index.mutations)
+		let before = index.mutations
+		index.noteDeleted(a, "trashed a")
+		let applied = index.apply([a: "ka", b: "kb"], fetchedAt: before)
+		#expect(!applied)
+		#expect(index.deletion(for: a) == "trashed a")
+		#expect(index.keys[a] == nil)
+	}
+
+	@Test func aRecopyOfADeletedClipEndsItsUndo() {
+		var index = ClipIndex<String>()
+		index.noteDeleted(a, "trashed a")
+		let applied = index.apply([a: "ka"], fetchedAt: index.mutations)
+		#expect(applied)
+		#expect(index.deletion(for: a) == nil)
+		#expect(index.takeEndedUndos() == [a])
+		#expect(index.takeEndedUndos().isEmpty)
+	}
+
+	@Test func eraseEndsEveryUndo() {
+		var index = ClipIndex<String>()
+		index.noteDeleted(a, "trashed a")
+		index.noteDeleted(b, "trashed b")
+		index.noteErased()
+		#expect(index.takeEndedUndos() == [a, b])
+	}
+
+	@Test func restoringPutsTheKeyBackBeforeAnyReload() {
+		var index = ClipIndex<String>()
+		index.apply([a: "ka"], fetchedAt: index.mutations)
+		index.noteDeleted(a, "trashed a")
+		let applied = index.apply([:], fetchedAt: index.mutations)
+		#expect(applied)
+		index.noteRestored(a, key: "ka")
+		#expect(index.keys[a] == "ka")
+		#expect(index.deletion(for: a) == nil)
+	}
+
+	@Test func closingForgetsDeletionsWithoutInvalidatingReloads() {
+		var index = ClipIndex<String>()
+		index.noteDeleted(a, "trashed a")
+		let before = index.mutations
+		index.clearDeletions()
+		#expect(index.deletion(for: a) == nil)
+		let applied = index.apply([b: "kb"], fetchedAt: before)
+		#expect(applied)
+	}
+
+	@Test func aSnapshotFetchedBeforeEraseIsRejected() {
+		var index = ClipIndex<String>()
+		index.apply([a: "ka"], fetchedAt: index.mutations)
+		let before = index.mutations
+		index.noteErased()
+		let applied = index.apply([a: "ka"], fetchedAt: before)
+		#expect(!applied)
+		#expect(index.keys.isEmpty)
+	}
+	@Test func expiringOneDeletionDoesNotForgetAnother() {
+		var index = ClipIndex<String>()
+		index.noteDeleted(a, "undo a")
+		index.noteDeleted(b, "undo b")
+		#expect(index.takeDeletion(for: a) == "undo a")
+		#expect(index.takeDeletion(for: a) == nil)
+		#expect(index.deletion(for: b) == "undo b")
+	}
+
+}

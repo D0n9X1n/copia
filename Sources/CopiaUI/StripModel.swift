@@ -1,0 +1,355 @@
+import Foundation
+import Observation
+import CopiaCore
+
+/// The strip's state and intents. It never touches windows, so it is fully testable headless.
+@MainActor
+@Observable
+public final class StripModel {
+	public private(set) var clips: [Clip]
+	public private(set) var selectedID: UUID?
+	public var query = "" {
+		didSet {
+			guard query != oldValue else { return }
+			reconcileSelection(preferredIndex: 0)
+			searchTask?.cancel()
+			searchTask = Task { [weak self] in
+				try? await Task.sleep(for: Self.searchDelay)
+				guard !Task.isCancelled else { return }
+				await self?.searchStore()
+			}
+		}
+	}
+	public var commandHeld = false
+	public var paused = false
+	public var storageStatus: StorageStatus = .ready
+	public var hoveredID: UUID?
+	public private(set) var toast: Toast?
+	public private(set) var isClosing = false
+	/// Cards are dropped while the strip is hidden so their views and images can be freed.
+	public private(set) var cardsMounted = false
+	/// Drives the open/close slide: false = below and transparent, true = in place.
+	public private(set) var appeared = false
+	/// Clip IDs currently animating out after a delete.
+	public private(set) var removingIDs: Set<UUID> = []
+
+	@ObservationIgnored public var actions: StripActions
+	@ObservationIgnored public var animator: Animator
+	@ObservationIgnored public var clock: ToastClock
+	@ObservationIgnored public var announce: (String) -> Void = { _ in }
+	/// Called as soon as closing starts, so the panel can give up key focus.
+	@ObservationIgnored public var onCloseStart: () -> Void = {}
+	/// Called when the close animation finishes, so the panel can hide and free memory.
+	@ObservationIgnored public var onCloseFinish: () -> Void = {}
+	@ObservationIgnored public var onUndoExpired: (UUID) -> Void = { _ in }
+
+	/// IDs the store's full-text search matched for `storeQuery`.
+	private var storeMatches: Set<UUID> = []
+	@ObservationIgnored private var storeQuery = ""
+	@ObservationIgnored private var searchTask: Task<Void, Never>?
+	/// Typing pauses this long before the store is searched.
+	public static let searchDelay: Duration = .milliseconds(120)
+	@ObservationIgnored private var undoEntry: (clip: Clip, index: Int)?
+	@ObservationIgnored private var cancelToast: ToastClock.Cancel?
+	/// Undo lasts 3 s from the delete, whatever toast is shown meanwhile.
+	@ObservationIgnored private var cancelUndoDeadline: ToastClock.Cancel?
+	@ObservationIgnored private var busy = false
+	@ObservationIgnored private var presentation = 0
+	/// Changes as soon as close starts, so a pending delete cannot create undo in a later presentation.
+	public private(set) var closeCount = 0
+
+	public static let toastLifetime: Duration = .seconds(3)
+
+	public init(clips: [Clip], actions: StripActions = .fixtures, animator: Animator = .immediate, clock: ToastClock = .live) {
+		self.clips = clips
+		self.actions = actions
+		self.animator = animator
+		self.clock = clock
+		selectedID = clips.first?.id
+	}
+
+	// MARK: Visible list
+
+	public var visibleClips: [Clip] {
+		let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !q.isEmpty else { return clips }
+		let stored = storeQuery == q ? storeMatches : []
+		return clips.filter { clip in
+			stored.contains(clip.id)
+				|| clip.text.localizedStandardContains(q)
+				|| clip.fileNames.contains { $0.localizedStandardContains(q) }
+				|| (clip.url?.absoluteString.localizedStandardContains(q) ?? false)
+		}
+	}
+
+	/// Adds the store's matches for the current query, which reach past the card text. A result for an older query is dropped.
+	public func searchStore() async {
+		let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !q.isEmpty else { return }
+		let found = await actions.search(q)
+		guard q == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+		storeQuery = q
+		storeMatches = found
+		reconcileSelection(preferredIndex: 0)
+	}
+
+	public var selectedIndex: Int? { visibleClips.firstIndex { $0.id == selectedID } }
+
+	/// The ⌘1–9 badge number for a clip, shown only while ⌘ is held.
+	public func badge(for id: UUID) -> Int? {
+		guard commandHeld, let i = visibleClips.prefix(9).firstIndex(where: { $0.id == id }) else { return nil }
+		return i + 1
+	}
+
+	// MARK: Selection
+
+	public func select(_ id: UUID) {
+		guard visibleClips.contains(where: { $0.id == id }), id != selectedID else { return }
+		animator.run(.lens, { self.selectedID = id }, {})
+	}
+
+	public func move(_ delta: Int) {
+		let visible = visibleClips
+		guard !visible.isEmpty else { return }
+		let i = selectedIndex ?? 0
+		select(visible[min(max(i + delta, 0), visible.count - 1)].id)
+	}
+
+	public func moveToEnd(_ last: Bool) {
+		guard let target = last ? visibleClips.last : visibleClips.first else { return }
+		select(target.id)
+	}
+
+	private func reconcileSelection(preferredIndex: Int) {
+		let visible = visibleClips
+		if let selectedID, visible.contains(where: { $0.id == selectedID }) { return }
+		selectedID = visible.isEmpty ? nil : visible[min(max(preferredIndex, 0), visible.count - 1)].id
+	}
+
+	/// Replaces the clip list (B2 pushes store changes here). Keeps the selection when it is still visible.
+	public func applySnapshot(_ newClips: [Clip]) {
+		let oldIndex = selectedIndex ?? 0
+		let inserted = newClips.first.map { first in !clips.contains { $0.id == first.id } } ?? false
+		let previewsChanged = newClips.contains { new in
+			clips.first { $0.id == new.id }.map { $0.preview != new.preview } ?? false
+		}
+		let apply = {
+			self.clips = newClips
+			self.reconcileSelection(preferredIndex: oldIndex)
+		}
+		if inserted, cardsMounted {
+			animator.run(.insert, apply, {})
+		} else if previewsChanged, cardsMounted {
+			animator.run(.loading, apply, {})
+		} else {
+			apply()
+		}
+	}
+
+	// MARK: Delete and undo
+
+	public func deleteSelected() async {
+		guard storageStatus != .recoveryRequired, !isClosing, !busy, let id = selectedID, let index = clips.firstIndex(where: { $0.id == id }) else { return }
+		busy = true
+		defer { busy = false }
+		let clip = clips[index]
+		let beganBeforeClose = closeCount
+		let visibleBefore = visibleClips
+		let visibleIndex = visibleBefore.firstIndex { $0.id == id } ?? 0
+		do {
+			try await actions.delete(id)
+		} catch {
+			showActionError(error, operation: "delete")
+			return
+		}
+		guard closeCount == beganBeforeClose else {
+			clips.removeAll { $0.id == id }
+			reconcileSelection(preferredIndex: visibleIndex)
+			return
+		}
+		animator.run(.delete, { self.removingIDs.insert(id) }, {
+			// An undo during the animation already put the card back.
+			guard self.removingIDs.remove(id) != nil else { return }
+			self.animator.run(.reflow, {
+				self.clips.removeAll { $0.id == id }
+				let remaining = visibleBefore.filter { $0.id != id }
+				self.selectedID = remaining.isEmpty ? nil : remaining[min(visibleIndex, remaining.count - 1)].id
+			}, {})
+		})
+		endUndo(expired: true)
+		undoEntry = (clip, index)
+		cancelUndoDeadline = clock.after(Self.toastLifetime) { [weak self] in
+			guard let self, self.undoEntry?.clip.id == clip.id else { return }
+			self.endUndo(expired: true)
+		}
+		show(.deleted)
+		announce(Toast.deleted.message)
+	}
+
+	public var canUndo: Bool { undoEntry != nil }
+
+	/// Ends the pending undo if it is for one of `ids`: the item was copied again or history was erased.
+	public func cancelUndo(for ids: Set<UUID>) {
+		guard let entry = undoEntry, ids.contains(entry.clip.id) else { return }
+		endUndo()
+		if toast == .deleted { dismissToast() }
+	}
+
+	public func undo() async {
+		guard storageStatus != .recoveryRequired, !busy, let entry = undoEntry else { return }
+		busy = true
+		defer { busy = false }
+		do {
+			try await actions.restore(entry.clip, entry.index)
+		} catch {
+			showActionError(error, operation: "restore")
+			return
+		}
+		endUndo()
+		dismissToast()
+		animator.run(.undo, {
+			self.removingIDs.remove(entry.clip.id)
+			if !self.clips.contains(where: { $0.id == entry.clip.id }) {
+				self.clips.insert(entry.clip, at: min(entry.index, self.clips.count))
+			}
+			if !self.visibleClips.contains(where: { $0.id == entry.clip.id }) { self.query = "" }
+			self.selectedID = entry.clip.id
+		}, {})
+	}
+
+	// MARK: Paste and actions
+
+	public func paste(plain: Bool) async {
+		guard let id = selectedID else { return }
+		await paste(id: id, plain: plain)
+	}
+
+	/// ⌘1–9 / ⇧⌘1–9: paste the item at that position.
+	public func paste(position: Int, plain: Bool) async {
+		let visible = visibleClips
+		guard (1...9).contains(position), position <= visible.count else { return }
+		selectedID = visible[position - 1].id
+		await paste(id: visible[position - 1].id, plain: plain)
+	}
+
+	/// One paste at a time: a second would rewrite the clipboard before the first one's ⌘V.
+	private var isPasting = false
+
+	private func paste(id: UUID, plain: Bool) async {
+		guard storageStatus != .recoveryRequired, !isClosing, !isPasting else { return }
+		isPasting = true
+		defer { isPasting = false }
+		do {
+			let result = try await actions.paste(id, plain) { [weak self] in self?.beginClose() }
+			if result == .accessibilityRequired { show(.accessibilityRequired) }
+		} catch {
+			showActionError(error, operation: "paste")
+		}
+	}
+
+	public func perform(_ action: CardAction, id: UUID) async {
+		guard storageStatus != .recoveryRequired else { return }
+		if selectedID != id { selectedID = id }
+		switch action {
+		case .paste: await paste(id: id, plain: false)
+		case .pastePlain: await paste(id: id, plain: true)
+		case .copy:
+			do { try await actions.copy(id) } catch { showActionError(error, operation: "copy") }
+		case .delete: await deleteSelected()
+		}
+	}
+
+	public func openAccessibilitySettings() { actions.openAccessibilitySettings() }
+
+	// MARK: Keys
+
+	/// ⎋ clears the search first, then closes.
+	public func escape() {
+		if !query.isEmpty { query = "" } else { beginClose() }
+	}
+
+	/// ⌫ deletes the selected card only when no search is typed.
+	public func backspace() async {
+		guard query.isEmpty else { return }
+		await deleteSelected()
+	}
+
+	// MARK: Open and close
+
+	/// Mounts the cards in their hidden position. Call `animateIn()` once the panel is on screen.
+	public func open() {
+		presentation += 1
+		isClosing = false
+		query = ""
+		appeared = false
+		cardsMounted = true
+		if selectedID == nil || !clips.contains(where: { $0.id == selectedID }) { selectedID = clips.first?.id }
+	}
+
+	/// Called after the open animation, so the panel can refresh its shadow.
+	@ObservationIgnored public var onOpenFinish: () -> Void = {}
+
+	public func animateIn() {
+		animator.run(.open, { self.appeared = true }, { self.onOpenFinish() })
+	}
+
+	public func beginClose() {
+		guard cardsMounted, !isClosing else { return }
+		isClosing = true
+		closeCount += 1
+		let generation = presentation
+		onCloseStart()
+		animator.run(.close, { self.appeared = false }, {
+			guard generation == self.presentation else { return }
+			self.finishClose()
+		})
+	}
+
+	private func finishClose() {
+		cardsMounted = false
+		isClosing = false
+		commandHeld = false
+		hoveredID = nil
+		endUndo()
+		dismissToast()
+		onCloseFinish()
+	}
+
+	// MARK: Toasts
+
+	private func showActionError(_ error: Error, operation: String) {
+		switch error as? StripActionError {
+		case .outcomeUnknown:
+			storageStatus = .recoveryRequired
+			show(.error(storageStatus.message))
+		case .undoExpired:
+			endUndo()
+			show(.error("Undo has expired."))
+		case nil:
+			show(.error("Couldn't \(operation): \(error.localizedDescription)"))
+		}
+	}
+
+	private func show(_ newToast: Toast) {
+		cancelToast?()
+		toast = newToast
+		cancelToast = clock.after(Self.toastLifetime) { [weak self] in
+			guard let self, self.toast == newToast else { return }
+			self.toast = nil
+		}
+	}
+
+	private func endUndo(expired: Bool = false) {
+		let id = undoEntry?.clip.id
+		undoEntry = nil
+		cancelUndoDeadline?()
+		cancelUndoDeadline = nil
+		if expired, let id { onUndoExpired(id) }
+	}
+
+	private func dismissToast() {
+		cancelToast?()
+		cancelToast = nil
+		toast = nil
+	}
+}

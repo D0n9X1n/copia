@@ -8,3 +8,5 @@ xcuserdata/
 DerivedData/
 Package.resolved.bak
 /renders/
+/.local/
+/.claude/

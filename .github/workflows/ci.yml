@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-bench:
+    runs-on: xcode-27
+    timeout-minutes: 40
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Wiki check
+        run: |
+          python3 scripts/check-wiki.py
+          python3 scripts/check-wiki.py --self-test
+
+      - name: Script self-tests
+        run: |
+          scripts/test-check-archs.sh
+          scripts/test-setup-release-signing.sh
+
+      - name: Build (universal, release)
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Test
+        run: swift test
+
+      - name: Benchmark (fails over budget)
+        id: benchmark
+        run: |
+          swift build -c release --product copia-bench
+          "$(swift build -c release --show-bin-path)/copia-bench" --json bench.json
+
+      # A separate instrumented run explains failures; it never replaces the unprofiled gate above.
+      - name: Profile failed benchmark
+        if: failure() && steps.benchmark.outcome == 'failure'
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          BIN="$(swift build -c release --show-bin-path)/copia-bench"
+          test -x "$BIN"
+          xcrun xctrace record --template 'Time Profiler' --time-limit 100s \
+            --output cpu-profile.trace --target-stdout profile-output.log \
+            --launch -- "$BIN" --no-sck --idle 60 --opens 1 --json profile-bench.json
+
+      - name: App bundle (unsigned)
+        run: |
+          scripts/build-app.sh --unsigned
+          test -f dist/Copia.app/Contents/Info.plist
+          test -f dist/Copia.app/Contents/Resources/Assets.car
+          test -f dist/Copia.app/Contents/Resources/AppIcon.icns
+          test -d dist/Copia.app/Contents/Resources/KeyboardShortcuts_KeyboardShortcuts.bundle
+          scripts/check-archs.sh dist/Copia.app/Contents/MacOS/Copia
+
+      - name: Upload benchmark
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench
+          path: bench.json
+          if-no-files-found: ignore
+
+      - name: Upload failure profile
+        if: always() && steps.benchmark.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: failure-profile
+          path: |
+            cpu-profile.trace
+            profile-output.log
+            profile-bench.json
+          if-no-files-found: ignore
+          retention-days: 7
