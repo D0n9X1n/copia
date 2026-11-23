@@ -297,6 +297,8 @@ public final class AppController {
 				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
 				await self.reload()
+				// The copy the strip opened on, saved only now: Esc can put it back.
+				if change == self.openChange { self.model.openedOn(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key))) }
 				// A newer change (Copia's own write, or another copy) since this one wins.
 				guard change >= self.lastChange else { return }
 				self.onClipboard = (change, result.clip.key, false)
@@ -337,11 +339,7 @@ public final class AppController {
 		model.open(clipboard: clipboardCard(change: change))
 		panel.show(on: screen, visibleFrame: visibleFrameOverride)
 		focus.focus()
-		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
-			model.heldKeyPatience = StripModel.patience(repeatDelay: NSEvent.keyRepeatDelay)
-			model.animateIn()
-		}
+		DispatchQueue.main.async { [weak self] in self?.model.animateIn() }
 	}
 
 	/// Shows the store's current history. The newest reload wins, and one that raced a delete or restore fetches again.

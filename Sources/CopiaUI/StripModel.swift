@@ -21,6 +21,9 @@ public final class StripModel {
 			searchRevision += 1
 			storeMatches = []
 			reconcileSelection(preferredIndex: 0)
+			// The filter moved the lens off the card the user arrowed to: that browse is over, even if a later filter
+			// brings the card back.
+			if let target = browseTarget, selectedID != target { dropBrowse() }
 			searchTask?.cancel()
 			searchTask = Task { [weak self] in
 				try? await Task.sleep(for: Self.searchDelay)
@@ -302,21 +305,8 @@ public final class StripModel {
 	@ObservationIgnored private var browseGeneration = 0
 	@ObservationIgnored private var lensAfterClose: UUID?
 	@ObservationIgnored private var cancelling = false
-	/// The plain ← → Home End keys now down. The clipboard waits for their release, so a held key writes once, where it stops.
-	@ObservationIgnored private var heldBrowseKeys: Set<UInt16> = []
-	/// The lens rested while a key was still down; its release restarts the full settle. Cleared by the release, a write
-	/// or a dropped browse.
-	@ObservationIgnored private var settledWhileHeld = false
-	/// Settles in a row with a key down and no key event: a release AppKit swallowed (⌘ pressed mid-hold) ends the wait.
-	@ObservationIgnored private var quietSettles = 0
-	/// Quiet settles that outlast the user's initial key-repeat delay (System Settings › Keyboard, up to 2 s) by 100 ms;
-	/// repeats then arrive every 100 ms or faster. At least four (600 ms).
-	/// The app sets it from the user's setting; the default assumes macOS's 500 ms.
-	@ObservationIgnored public var heldKeyPatience = StripModel.patience(repeatDelay: 0.5)
-	public static func patience(repeatDelay: TimeInterval) -> Int {
-		let settle = Double(browseSettle.components.attoseconds) / 1e18 + Double(browseSettle.components.seconds)
-		return max(4, Int(((repeatDelay + 0.1) / settle).rounded(.up)))
-	}
+	/// A copy made elsewhere since the strip opened: the copy it opened on is no longer the restore point.
+	@ObservationIgnored private var replacedSinceOpen = false
 	/// The browse generation when a queued pick was requested; the pick only cancels a browse older than itself.
 	@TaskLocal static var pickRequestedAt: Int?
 	/// Asks the app to look at the pasteboard now, so a decision is never made on a copy the next poll would have reported.
@@ -433,6 +423,13 @@ public final class StripModel {
 		}
 	}
 
+	/// The copy the strip opened on, which the app only learned about after opening, is now saved: it is the restore point
+	/// unless a pick or a copy made elsewhere has replaced it since.
+	public func openedOn(_ card: ClipboardCard) {
+		guard cardsMounted, !isClosing, committed == nil, !replacedSinceOpen, clips.contains(where: { $0.id == card.id }) else { return }
+		committed = card
+	}
+
 	/// The app saw the clipboard change without Copia: a copy made elsewhere, captured (`card`) or not (nil).
 	/// It is the clipboard now, and ⎋ keeps it.
 	public func clipboardChanged(to card: ClipboardCard?) {
@@ -445,6 +442,7 @@ public final class StripModel {
 	/// The pasteboard changed without Copia, before any capture says what it holds. A browse not yet written is dropped,
 	/// and a close's keep or restore is cancelled, so neither overwrites the newer copy.
 	public func clipboardReplaced() {
+		replacedSinceOpen = true
 		dropBrowse()
 		clipboard = nil
 		committed = nil
@@ -453,16 +451,6 @@ public final class StripModel {
 
 	// MARK: Browsing
 
-	/// A plain ←, →, Home or End went down (or repeated) or up. While one is down the lens moves but the clipboard waits.
-	public func browseKey(_ code: UInt16, down: Bool) {
-		quietSettles = 0
-		if down { heldBrowseKeys.insert(code); return }
-		heldBrowseKeys.remove(code)
-		guard heldBrowseKeys.isEmpty, settledWhileHeld else { return }
-		settledWhileHeld = false
-		// Released after the lens rested: it rests once more from here, then the clipboard follows.
-		armSettle()
-	}
 
 	/// ← or →: move the lens, and the clipboard follows once it rests. Browsing from Search stays in Search,
 	/// so ⌫ and typing still edit the query.
@@ -497,12 +485,6 @@ public final class StripModel {
 		settleTimer = clock.after(Self.browseSettle) { [weak self] in
 			guard let self, generation == browseGeneration else { return }
 			settleTimer = nil
-			if !heldBrowseKeys.isEmpty {
-				quietSettles += 1
-				guard quietSettles >= heldKeyPatience else { settledWhileHeld = true; armSettle(); return }
-				heldBrowseKeys = []
-			}
-			settledWhileHeld = false
 			request { await self.writeBrowse(id, generation: generation) }
 		}
 	}
@@ -513,7 +495,6 @@ public final class StripModel {
 		if olderThanPick, let requested = Self.pickRequestedAt, requested != browseGeneration { return }
 		settleTimer?()
 		settleTimer = nil
-		settledWhileHeld = false
 		browseTarget = nil
 		browseGeneration += 1
 	}
@@ -548,7 +529,8 @@ public final class StripModel {
 
 	public func perform(_ action: CardAction, id: UUID) async {
 		guard storageStatus != .recoveryRequired, visibleClips.contains(where: { $0.id == id }) else { return }
-		selectOnPress(id)
+		// A queued action keeps the lens where an arrow pressed after it put it.
+		if Self.pickRequestedAt.map({ $0 == browseGeneration }) ?? true { selectOnPress(id) }
 		switch action {
 		case .activate, .copyPlain, .copy: await copy(id: id, plain: action == .copyPlain, dismiss: action != .copy)
 		case .delete: await delete(ids: [id])
@@ -592,7 +574,7 @@ public final class StripModel {
 	public func open(clipboard known: ClipboardCard? = nil) {
 		presentation += 1
 		copiedID = nil
-		heldBrowseKeys = []
+		replacedSinceOpen = false
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
 		let held = known.flatMap { c in clips.contains { $0.id == c.id } ? c : nil }
@@ -620,7 +602,6 @@ public final class StripModel {
 		guard cardsMounted, !isClosing else { return }
 		let cancel = cancelling, lit = selectedID, target = browseTarget
 		cancelling = false
-		heldBrowseKeys = []
 		dropBrowse()
 		// A copy made elsewhere from here on cancels the keep or restore below.
 		let shown = presentation, browse = browseGeneration

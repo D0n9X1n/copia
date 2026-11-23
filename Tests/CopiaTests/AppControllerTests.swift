@@ -700,6 +700,23 @@ extension WindowTests.AppControllerTests {
 		#expect(await eventually { r.board.string(forType: .string) == "older" }, "the first arrow still copies")
 	}
 
+	@Test func escapeRestoresACopyMadeJustBeforeOpeningOnceItIsSaved() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("oldest"); try await r.copy("older")
+		r.copyElsewhere("just copied")
+		// Opened before the next poll: the browse's own check saves the copy the strip opened on.
+		r.controller.toggleHistory()
+		model.browse(1)
+		try #require(await eventually { r.board.string(forType: .string) == "oldest" })
+		let saved = await eventually { model.clips.contains { $0.text == "just copied" } && model.restoreHint == .restore }
+		try #require(saved, "clips \(model.clips.map(\.text)) board \(r.board.string(forType: .string) ?? "nil") hint \(String(describing: model.restoreHint)) clipboard \(String(describing: model.clipboard)) committed \(String(describing: model.committed))")
+		model.escape()
+		#expect(await eventually { r.board.string(forType: .string) == "just copied" })
+	}
+
 	@Test func escapeNeverRestoresOverACopyMadeWhileCaptureWasPaused() async throws {
 		let r = try AppRig(); await r.launch(); r.stop()
 		let model = r.controller.model, panel = r.controller.panel

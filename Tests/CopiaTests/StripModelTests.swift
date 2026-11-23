@@ -1351,65 +1351,21 @@ extension StripModelTests {
 		for _ in 0..<200 { await Task.yield() }
 		#expect(r.writes.count == 1)
 	}
-
-	@Test func aHeldArrowPastTheKeyRepeatDelayWritesOnceAfterRelease() async {
-		let r = StripRig()
-		r.model.heldKeyPatience = StripModel.patience(repeatDelay: 0.5)
-		r.model.browseKey(124, down: true)
-		r.model.browse(1)
-		// The initial key-repeat delay (500 ms) outlasts the settle; nothing is written while the key is down.
-		for _ in 0..<10 { r.probe.advance(by: .milliseconds(50)) }
-		for _ in 0..<3 { r.model.browseKey(124, down: true); r.model.browse(1); r.probe.advance(by: .milliseconds(40)) }
-		for _ in 0..<200 { await Task.yield() }
-		#expect(r.writes.isEmpty)
-		r.model.browseKey(124, down: false)
-		r.probe.advance(by: .milliseconds(149))
-		for _ in 0..<200 { await Task.yield() }
-		#expect(r.writes.isEmpty, "the lens rests the full settle after release")
-		r.probe.advance(by: .milliseconds(1))
-		for _ in 0..<200 { await Task.yield() }
-		#expect(r.writes == ["write \(Fixtures.mixed[4].id) plain=false"])
-	}
-
-	@Test func aKeyUpThatNeverArrivesCannotHoldTheNextPresentation() async {
-		let r = StripRig()
-		r.model.browseKey(124, down: true)
-		r.model.beginClose(); r.model.open()
-		r.model.browse(1)
-		await r.settle()
-		#expect(r.writes.count == 1)
-	}
 }
 
-/// #26 re-review: two keys held at once, a swallowed release, and an arrow pressed right after a queued pick.
+/// #26 re-review: a held arrow, and an arrow pressed right after a queued pick.
 extension StripModelTests {
-	@Test func releasingOneArrowWhileAnotherIsHeldKeepsTheClipboardWaiting() async {
+	/// A held arrow writes the first card once the 500 ms repeat delay outlasts the settle, then the card where it stops:
+	/// never an earlier card last.
+	@Test func anArrowHeldPastTheRepeatDelayEndsOnTheCardWhereItStops() async {
 		let r = StripRig()
-		r.model.browseKey(123, down: true)
-		r.model.browseKey(124, down: true); r.model.browse(1)
-		r.probe.advance(by: .milliseconds(200))
-		r.model.browseKey(123, down: false)
-		r.probe.advance(by: .milliseconds(200))
-		for _ in 0..<200 { await Task.yield() }
-		#expect(r.writes.isEmpty, "→ is still down")
-		r.model.browseKey(124, down: false)
-		await r.settle()
-		#expect(r.writes == ["write \(Fixtures.mixed[1].id) plain=false"])
-	}
-
-	@Test func aReleaseAppKitSwallowedEndsTheWaitAfterAQuietSpell() async {
-		let r = StripRig()
-		r.model.browseKey(124, down: true); r.model.browse(1)
-		r.model.heldKeyPatience = StripModel.patience(repeatDelay: 0.5)
-		#expect(r.model.heldKeyPatience == 4 && StripModel.patience(repeatDelay: 2) * 150 > 2_000)
-		for _ in 1..<r.model.heldKeyPatience { r.probe.advance(by: StripModel.browseSettle) }
-		for _ in 0..<200 { await Task.yield() }
-		#expect(r.writes.isEmpty)
-		await r.settle()
-		#expect(r.writes == ["write \(Fixtures.mixed[1].id) plain=false"])
 		r.model.browse(1)
+		// The 500 ms initial repeat delay: the lens rests and B is written while the key is still down.
+		for _ in 0..<10 { r.probe.advance(by: .milliseconds(50)); for _ in 0..<50 { await Task.yield() } }
+		for _ in 0..<3 { r.model.browse(1); r.probe.advance(by: .milliseconds(40)) }
 		await r.settle()
-		#expect(r.writes.count == 2, "the stale hold is gone")
+		#expect(r.writes == ["write \(Fixtures.mixed[1].id) plain=false", "write \(Fixtures.mixed[4].id) plain=false"])
+		#expect(r.model.selectedID == Fixtures.mixed[4].id && r.model.lensOnClipboard)
 	}
 
 	@Test func anArrowPressedRightAfterAQueuedPickStillCopies() async {
@@ -1421,5 +1377,40 @@ extension StripModelTests {
 		await r.settle()
 		#expect(r.writes == ["write \(b) plain=false", "write \(c) plain=false"])
 		#expect(r.model.selectedID == c && r.model.lensOnClipboard)
+	}
+}
+
+/// #26 third review: a filter ends a browse, and a queued action never takes the lens back from a later arrow.
+extension StripModelTests {
+	@Test func aFilterThatMovesTheLensOffTheArrowedCardEndsThatBrowse() async {
+		let r = StripRig(), b = Fixtures.mixed[1]
+		r.model.browse(1)
+		r.model.query = "no such fixture"
+		r.model.query = String(b.text.prefix(12))
+		#expect(r.model.selectedID == b.id)
+		await r.settle()
+		#expect(r.writes.isEmpty, "the filter, not an arrow, put the lens back on B")
+	}
+
+	@Test func aQueuedMenuCopyNeverTakesTheLensBackFromALaterArrow() async {
+		let r = StripRig(), b = Fixtures.mixed[1].id, c = Fixtures.mixed[2].id
+		r.model.select(b)
+		r.model.request { await r.model.perform(.copy, id: b) }
+		r.model.browse(1)
+		for _ in 0..<200 { await Task.yield() }
+		await r.settle()
+		#expect(r.writes == ["write \(b) plain=false", "write \(c) plain=false"])
+		#expect(r.model.selectedID == c && r.model.lensOnClipboard)
+	}
+
+	@Test func theCopyTheStripOpenedOnBecomesTheRestorePointOnceSaved() async {
+		let r = StripRig(), x = Fixtures.mixed[3].id
+		r.model.browse(1)
+		await r.settle()
+		r.model.openedOn(ClipboardCard(id: x))
+		#expect(r.model.committed == ClipboardCard(id: x) && r.model.restoreHint == .restore)
+		r.model.clipboardReplaced()
+		r.model.openedOn(ClipboardCard(id: x))
+		#expect(r.model.committed == nil, "a copy made elsewhere since opening wins")
 	}
 }

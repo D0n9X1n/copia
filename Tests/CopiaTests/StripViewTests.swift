@@ -520,11 +520,18 @@ extension WindowTests.StripViewTests {
 		}
 		let field = try #require(host.window.contentView.flatMap { searchField(in: $0) })
 		let frame = host.window.convertToScreen(field.convert(field.bounds, to: nil))
-		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.restore) })
-		let count = try #require(host.root.all.first { $0.label == "2 items" || $0.value == "2 items" })
-		// The 240 pt pill gives up width (its field is 30 pt narrower than the pill) but keeps at least 160.
-		#expect(frame.width < 240 - 30 && frame.width >= 160 - 30, "field \(frame.width)")
-		#expect(frame.maxX < chip.frame.minX && chip.frame.maxX < count.frame.minX, "field \(frame) chip \(chip.frame) count \(count.frame)")
-		#expect(chip.frame.height <= 30 && count.frame.height < 20 && host.window.frame.contains(count.frame))
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.restore) }).frame
+		let count = try #require(host.root.all.first { $0.label == "2 items" || $0.value == "2 items" }).frame
+		// The same strip without the chip: the field is wider, so the chip took its width from Search.
+		let wide = StripHost(clips: Array(Fixtures.mixed.prefix(2)), width: 600, overrides: CopiaOverrides(reduceMotion: true))
+		defer { wide.close() }
+		await wide.settle()
+		let full = try #require(wide.window.contentView.flatMap { searchField(in: $0) })
+		let fullWidth = full.bounds.width
+		#expect(frame.width < fullWidth - 10, "field \(frame.width) with the chip, \(fullWidth) without")
+		// The pill keeps at least 160 pt; its field is 40 pt narrower (10 + glyph + 6 leading, 10 trailing).
+		#expect(frame.width >= 160 - 40, "field \(frame.width)")
+		#expect(frame.maxX < chip.minX && chip.maxX < count.minX, "field \(frame) chip \(chip) count \(count)")
+		#expect(chip.height <= 30 && count.height < 20 && host.window.frame.contains(count))
 	}
 }

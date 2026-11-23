@@ -64,23 +64,10 @@ class StripFieldEditor: NSTextView {
 	weak var model: StripModel?
 	private(set) var keyModifiers: NSEvent.ModifierFlags = []
 
-	/// Plain ← → Home End: while one is down the clipboard waits, so a held arrow writes once, where it stops.
-	/// ⌘ arrows jump once (AppKit may swallow their release), and ⇧ ⌥ ⌃ arrows edit text, so neither holds the clipboard.
-	static let browseKeys: Set<UInt16> = [123, 124, 115, 119]
-	static func holdsBrowse(_ event: NSEvent) -> Bool {
-		browseKeys.contains(event.keyCode) && event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty
-	}
-
 	override func keyDown(with event: NSEvent) {
 		keyModifiers = event.modifierFlags
 		defer { keyModifiers = [] }
-		if Self.holdsBrowse(event), !hasMarkedText() { model?.browseKey(event.keyCode, down: true) }
 		super.keyDown(with: event)
-	}
-	override func keyUp(with event: NSEvent) {
-		// Any release of the key ends its hold, whatever modifiers are down by then.
-		if Self.browseKeys.contains(event.keyCode) { model?.browseKey(event.keyCode, down: false) }
-		super.keyUp(with: event)
 	}
 	override func insertText(_ string: Any, replacementRange: NSRange) {
 		model?.intent = .search
