@@ -76,6 +76,9 @@ public final class AppController {
 	private var ownWrite: Int?
 	/// The newest pasteboard change Copia has seen, from its own writes or the watcher.
 	private var lastChange = Int.min
+	/// The pasteboard's change count when the strip last opened: a copy made before then is what it opened on, not a
+	/// copy made elsewhere during the presentation, so the first poll that sees it cancels nothing.
+	private var openChange: Int?
 	/// Tests: runs after the store read, right before the pasteboard write.
 	var beforePasteboardWrite: () -> Void = {}
 	private let sources: SourceAppearance
@@ -284,7 +287,7 @@ public final class AppController {
 			// and a browse, keep or restore not yet written is cancelled, even while the strip closes.
 			lastChange = max(lastChange, change)
 			onClipboard = nil
-			model.clipboardReplaced()
+			if change != openChange { model.clipboardReplaced() } else if model.cardsMounted { model.clipboardChanged(to: nil) }
 		}
 		watcher.onDraft = { [weak self] draft in
 			guard let self else { return }
@@ -319,8 +322,8 @@ public final class AppController {
 	// MARK: Strip
 
 	/// The stored card the clipboard holds right now, if Copia knows it.
-	private func clipboardCard() -> ClipboardCard? {
-		guard let onClipboard, onClipboard.change == clipboardSource.changeCount,
+	private func clipboardCard(change: Int? = nil) -> ClipboardCard? {
+		guard let onClipboard, onClipboard.change == change ?? clipboardSource.changeCount,
 			let id = index.keys.first(where: { $0.value == onClipboard.key })?.key else { return nil }
 		return ClipboardCard(id: id, plain: onClipboard.plain)
 	}
@@ -328,10 +331,17 @@ public final class AppController {
 	public func toggleHistory(on chosenScreen: NSScreen? = nil) {
 		if panel.isVisible, model.cardsMounted { model.beginClose(); return }
 		guard let screen = chosenScreen ?? NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main else { return }
-		model.open(clipboard: clipboardCard())
+		// One pasteboard read decides both where the lens opens and what the strip opened on.
+		let change = clipboardSource.changeCount
+		openChange = change
+		model.open(clipboard: clipboardCard(change: change))
 		panel.show(on: screen, visibleFrame: visibleFrameOverride)
 		focus.focus()
-		DispatchQueue.main.async { [weak self] in self?.model.animateIn() }
+		DispatchQueue.main.async { [weak self] in
+			guard let self else { return }
+			model.heldKeyPatience = StripModel.patience(repeatDelay: NSEvent.keyRepeatDelay)
+			model.animateIn()
+		}
 	}
 
 	/// Shows the store's current history. The newest reload wins, and one that raced a delete or restore fetches again.

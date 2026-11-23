@@ -1318,7 +1318,7 @@ extension StripModelTests {
 		#expect(!r.model.cardsMounted, "the second click still closes")
 	}
 
-	@Test func escapeRestoresAPickStillLoading() async {
+	@Test func escapeKeepsTheLastPickThatLandedWhenOneIsStillLoading() async {
 		let probe = ClockProbe(), gate = WriteGate(), a = Fixtures.mixed[0].id, b = Fixtures.mixed[2].id
 		let model = StripModel(clips: Fixtures.mixed, animator: .immediate, clock: probe.clock)
 		var landed: [UUID] = []
@@ -1336,8 +1336,8 @@ extension StripModelTests {
 		model.escape()
 		gate.release(); await pick.value
 		for _ in 0..<500 { await Task.yield() }
-		#expect(landed == [b], "Esc puts back the last pick, even one still loading")
-		#expect(model.selectedID == b)
+		#expect(landed.isEmpty, "B never reached the clipboard and its lens never lit; Esc keeps A, which it still holds")
+		#expect(model.selectedID == a)
 	}
 
 	@Test func theLensRestsExactly150msBeforeTheClipboardFollows() async {
@@ -1354,15 +1354,15 @@ extension StripModelTests {
 
 	@Test func aHeldArrowPastTheKeyRepeatDelayWritesOnceAfterRelease() async {
 		let r = StripRig()
-		r.model.browseKey(down: true)
+		r.model.heldKeyPatience = StripModel.patience(repeatDelay: 0.5)
+		r.model.browseKey(124, down: true)
 		r.model.browse(1)
-		// The initial key-repeat delay outlasts the settle; nothing is written while the key is down.
-		r.probe.advance(by: .milliseconds(500))
-		for _ in 0..<3 { r.model.browse(1); r.probe.advance(by: .milliseconds(40)) }
-		r.probe.advance(by: .milliseconds(500))
+		// The initial key-repeat delay (500 ms) outlasts the settle; nothing is written while the key is down.
+		for _ in 0..<10 { r.probe.advance(by: .milliseconds(50)) }
+		for _ in 0..<3 { r.model.browseKey(124, down: true); r.model.browse(1); r.probe.advance(by: .milliseconds(40)) }
 		for _ in 0..<200 { await Task.yield() }
 		#expect(r.writes.isEmpty)
-		r.model.browseKey(down: false)
+		r.model.browseKey(124, down: false)
 		r.probe.advance(by: .milliseconds(149))
 		for _ in 0..<200 { await Task.yield() }
 		#expect(r.writes.isEmpty, "the lens rests the full settle after release")
@@ -1373,10 +1373,53 @@ extension StripModelTests {
 
 	@Test func aKeyUpThatNeverArrivesCannotHoldTheNextPresentation() async {
 		let r = StripRig()
-		r.model.browseKey(down: true)
+		r.model.browseKey(124, down: true)
 		r.model.beginClose(); r.model.open()
 		r.model.browse(1)
 		await r.settle()
 		#expect(r.writes.count == 1)
+	}
+}
+
+/// #26 re-review: two keys held at once, a swallowed release, and an arrow pressed right after a queued pick.
+extension StripModelTests {
+	@Test func releasingOneArrowWhileAnotherIsHeldKeepsTheClipboardWaiting() async {
+		let r = StripRig()
+		r.model.browseKey(123, down: true)
+		r.model.browseKey(124, down: true); r.model.browse(1)
+		r.probe.advance(by: .milliseconds(200))
+		r.model.browseKey(123, down: false)
+		r.probe.advance(by: .milliseconds(200))
+		for _ in 0..<200 { await Task.yield() }
+		#expect(r.writes.isEmpty, "→ is still down")
+		r.model.browseKey(124, down: false)
+		await r.settle()
+		#expect(r.writes == ["write \(Fixtures.mixed[1].id) plain=false"])
+	}
+
+	@Test func aReleaseAppKitSwallowedEndsTheWaitAfterAQuietSpell() async {
+		let r = StripRig()
+		r.model.browseKey(124, down: true); r.model.browse(1)
+		r.model.heldKeyPatience = StripModel.patience(repeatDelay: 0.5)
+		#expect(r.model.heldKeyPatience == 4 && StripModel.patience(repeatDelay: 2) * 150 > 2_000)
+		for _ in 1..<r.model.heldKeyPatience { r.probe.advance(by: StripModel.browseSettle) }
+		for _ in 0..<200 { await Task.yield() }
+		#expect(r.writes.isEmpty)
+		await r.settle()
+		#expect(r.writes == ["write \(Fixtures.mixed[1].id) plain=false"])
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.writes.count == 2, "the stale hold is gone")
+	}
+
+	@Test func anArrowPressedRightAfterAQueuedPickStillCopies() async {
+		let r = StripRig(), b = Fixtures.mixed[1].id, c = Fixtures.mixed[2].id
+		r.model.select(b)
+		r.model.requestCopy(id: b, plain: false, dismiss: false)
+		r.model.browse(1)
+		for _ in 0..<200 { await Task.yield() }
+		await r.settle()
+		#expect(r.writes == ["write \(b) plain=false", "write \(c) plain=false"])
+		#expect(r.model.selectedID == c && r.model.lensOnClipboard)
 	}
 }

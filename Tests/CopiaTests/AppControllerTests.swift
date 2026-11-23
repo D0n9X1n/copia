@@ -687,6 +687,39 @@ extension WindowTests.AppControllerTests {
 		#expect(r.board.string(forType: .string) == "secret")
 	}
 
+	@Test func aCopyMadeBeforeOpeningNeverCancelsTheFirstArrow() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("older"); try await r.copy("newest")
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		// Opened before the next poll: the strip opened on the secret, which Copia never saves.
+		r.controller.toggleHistory()
+		model.browse(1)
+		#expect(await eventually { r.board.string(forType: .string) == "older" }, "the first arrow still copies")
+	}
+
+	@Test func escapeNeverRestoresOverACopyMadeWhileCaptureWasPaused() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		model.browse(1)
+		try #require(await eventually { r.board.string(forType: .string) == "second" })
+		r.controller.watcher.setPaused(true)
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		r.controller.watcher.setPaused(false)
+		model.escape()
+		try await Task.sleep(for: .milliseconds(300))
+		#expect(r.board.string(forType: .string) == "secret")
+	}
+
 	@Test func aDoubleClickAfterAnUnseenCopyWritesTheCardAgain() async throws {
 		let r = try AppRig(); await r.launch(); r.stop()
 		let model = r.controller.model, panel = r.controller.panel

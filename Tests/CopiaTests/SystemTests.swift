@@ -174,6 +174,19 @@ final class FakePasteboard: PasteboardSource {
 		#expect(pb.reads == 1)
 	}
 
+	@Test func resumingReportsACopyMadeWhilePausedWithoutCapturingIt() {
+		let pb = FakePasteboard()
+		let (w, drafts) = make(pb)
+		var changes: [Int] = []
+		w.onChange = { changes.append($0) }
+		w.setPaused(true)
+		pb.copy("while paused")
+		w.setPaused(false)
+		#expect(changes == [w.observedChange] && drafts().isEmpty && pb.reads == 0)
+		w.setPaused(true); w.setPaused(false)
+		#expect(changes.count == 1, "no copy, no report")
+	}
+
 	@Test func aCopyThatLandsDuringTheReadIsNotStoredUnderTheOldTypes() {
 		let pb = FakePasteboard()
 		let (w, drafts) = make(pb)

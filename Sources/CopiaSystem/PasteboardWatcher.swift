@@ -120,7 +120,13 @@ public final class PasteboardWatcher {
 	public func setPaused(_ value: Bool) {
 		paused = value
 		// Resuming starts from the current contents, so anything copied while paused is never captured.
-		if !value { lastChange = source.changeCount; _ = log.candidates(until: uptime(), currentFrontmost: frontmost()) }
+		guard !value else { return }
+		_ = log.candidates(until: uptime(), currentFrontmost: frontmost())
+		let change = source.changeCount
+		guard change != lastChange else { return }
+		lastChange = change
+		// Never captured, but still a copy made elsewhere: whoever relies on the last seen change hears about it.
+		onChange(change)
 	}
 
 	/// One poll. Called by the timer; tests call it directly.

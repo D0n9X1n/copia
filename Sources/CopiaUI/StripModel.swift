@@ -302,12 +302,23 @@ public final class StripModel {
 	@ObservationIgnored private var browseGeneration = 0
 	@ObservationIgnored private var lensAfterClose: UUID?
 	@ObservationIgnored private var cancelling = false
-	/// The newest pick still loading. A close before it lands keeps it, and ⎋ puts it back, since it is the last pick.
-	@ObservationIgnored private var pendingPick: ClipboardCard?
-	/// An arrow, Home or End is down. The clipboard waits for its release, so a held key writes once, where it stops.
-	@ObservationIgnored private var browseKeyDown = false
-	/// The lens rested while the key was still down.
+	/// The plain ← → Home End keys now down. The clipboard waits for their release, so a held key writes once, where it stops.
+	@ObservationIgnored private var heldBrowseKeys: Set<UInt16> = []
+	/// The lens rested while a key was still down; its release restarts the full settle. Cleared by the release, a write
+	/// or a dropped browse.
 	@ObservationIgnored private var settledWhileHeld = false
+	/// Settles in a row with a key down and no key event: a release AppKit swallowed (⌘ pressed mid-hold) ends the wait.
+	@ObservationIgnored private var quietSettles = 0
+	/// Quiet settles that outlast the user's initial key-repeat delay (System Settings › Keyboard, up to 2 s) by 100 ms;
+	/// repeats then arrive every 100 ms or faster. At least four (600 ms).
+	/// The app sets it from the user's setting; the default assumes macOS's 500 ms.
+	@ObservationIgnored public var heldKeyPatience = StripModel.patience(repeatDelay: 0.5)
+	public static func patience(repeatDelay: TimeInterval) -> Int {
+		let settle = Double(browseSettle.components.attoseconds) / 1e18 + Double(browseSettle.components.seconds)
+		return max(4, Int(((repeatDelay + 0.1) / settle).rounded(.up)))
+	}
+	/// The browse generation when a queued pick was requested; the pick only cancels a browse older than itself.
+	@TaskLocal static var pickRequestedAt: Int?
 	/// Asks the app to look at the pasteboard now, so a decision is never made on a copy the next poll would have reported.
 	@ObservationIgnored public var syncClipboard: () -> Void = {}
 	/// Read by the app's writer right before it touches the pasteboard: false means the write is stale and is dropped.
@@ -339,10 +350,10 @@ public final class StripModel {
 
 	/// Resolve targets synchronously, and never deliver a queued UI command into a later presentation.
 	func request(_ operation: @escaping @MainActor () async -> Void) {
-		let generation = presentation, close = closeCount
+		let generation = presentation, close = closeCount, browse = browseGeneration
 		Task {
 			guard cardsMounted, !isClosing, presentation == generation, close == closeCount else { return }
-			await operation()
+			await Self.$pickRequestedAt.withValue(browse) { await operation() }
 		}
 	}
 
@@ -356,7 +367,7 @@ public final class StripModel {
 	/// first click's copy did not land, or a copy made elsewhere replaced it.
 	func click(_ id: UUID, count: Int) async {
 		guard count >= 2 else { return await copy(id: id, plain: false, dismiss: false) }
-		dropBrowse()
+		dropBrowse(olderThanPick: true)
 		let requested = closeCount
 		await acquireWriter()
 		defer { releaseWriter() }
@@ -372,8 +383,7 @@ public final class StripModel {
 
 	/// A pick: click, ⌘C, Return, ⌘1–9 or a menu or VoiceOver action. It drops any browse not yet written.
 	public func copy(id: UUID, plain: Bool, dismiss: Bool) async {
-		dropBrowse()
-		pendingPick = ClipboardCard(id: id, plain: plain)
+		dropBrowse(olderThanPick: true)
 		let requested = closeCount
 		await acquireWriter()
 		defer { releaseWriter() }
@@ -407,8 +417,6 @@ public final class StripModel {
 		let close = closeCount, generation = presentation
 		let card = ClipboardCard(id: id, plain: plain)
 		copiedID = nil
-		// A pick that finished, landed or not, is no longer one a close must keep.
-		defer { if !browsing, pendingPick == card { pendingPick = nil } }
 		do {
 			// A browse never overwrites a copy made elsewhere; a pick does.
 			guard try await land(card, ownership: browsing, current: current ?? { [unowned self] in
@@ -445,11 +453,12 @@ public final class StripModel {
 
 	// MARK: Browsing
 
-	/// An arrow, Home or End went down or up. While one is down the lens can move but the clipboard waits.
-	public func browseKey(down: Bool) {
-		guard browseKeyDown != down else { return }
-		browseKeyDown = down
-		guard !down, settledWhileHeld else { return }
+	/// A plain ←, →, Home or End went down (or repeated) or up. While one is down the lens moves but the clipboard waits.
+	public func browseKey(_ code: UInt16, down: Bool) {
+		quietSettles = 0
+		if down { heldBrowseKeys.insert(code); return }
+		heldBrowseKeys.remove(code)
+		guard heldBrowseKeys.isEmpty, settledWhileHeld else { return }
 		settledWhileHeld = false
 		// Released after the lens rested: it rests once more from here, then the clipboard follows.
 		armSettle()
@@ -484,18 +493,24 @@ public final class StripModel {
 	private func armSettle() {
 		guard let id = browseTarget else { return }
 		settleTimer?()
-		settledWhileHeld = false
 		let generation = browseGeneration
 		settleTimer = clock.after(Self.browseSettle) { [weak self] in
 			guard let self, generation == browseGeneration else { return }
 			settleTimer = nil
-			guard !browseKeyDown else { settledWhileHeld = true; return }
+			if !heldBrowseKeys.isEmpty {
+				quietSettles += 1
+				guard quietSettles >= heldKeyPatience else { settledWhileHeld = true; armSettle(); return }
+				heldBrowseKeys = []
+			}
+			settledWhileHeld = false
 			request { await self.writeBrowse(id, generation: generation) }
 		}
 	}
 
-	/// Cancels a browse not yet written. Picks, opens, closes and deleting its card call it.
-	private func dropBrowse() {
+	/// Cancels a browse not yet written. Picks, opens, closes and deleting its card call it. A queued pick cancels only
+	/// a browse from before it was requested; an arrow pressed after it still copies.
+	private func dropBrowse(olderThanPick: Bool = false) {
+		if olderThanPick, let requested = Self.pickRequestedAt, requested != browseGeneration { return }
 		settleTimer?()
 		settleTimer = nil
 		settledWhileHeld = false
@@ -517,23 +532,18 @@ public final class StripModel {
 		await write(id, plain: false, browsing: true, current: current)
 	}
 
-	/// A close's write: ⌘Y keeps the lit card or a pick still loading, ⎋ restores the last pick. It runs after every
-	/// write already queued, and is dropped if the strip reopens first. A restore or a kept browse never overwrites a copy
-	/// made elsewhere; a kept pick does, as any pick does.
-	private func writeAfterClose(_ target: ClipboardCard, restoring: Bool, pick: Bool = false, presentation generation: Int,
-		browse: Int) async {
+	/// A close's write: ⌘Y keeps the lit card, ⎋ restores the last pick that landed. It runs after every write already
+	/// queued, and is dropped if the strip reopens or a copy is made elsewhere first; it never overwrites that copy.
+	private func writeAfterClose(_ target: ClipboardCard, restoring: Bool, presentation generation: Int, browse: Int) async {
 		await acquireWriter()
 		defer { releaseWriter() }
 		syncClipboard()
-		let guarded = !pick
 		let current = { [unowned self] in
-			presentation == generation && storageStatus != .recoveryRequired && (!guarded || browse == browseGeneration)
+			presentation == generation && storageStatus != .recoveryRequired && browse == browseGeneration
 		}
 		guard current(), clipboard != target else { return }
-		let browsed = clipboard != committed
-		guard (try? await land(target, ownership: guarded, current: current)) == true else { return }
-		if pick { committed = target }
-		if restoring, browsed { announce("Previous clipboard restored") }
+		guard (try? await land(target, ownership: true, current: current)) == true else { return }
+		if restoring { announce("Previous clipboard restored") }
 	}
 
 	public func perform(_ action: CardAction, id: UUID) async {
@@ -582,8 +592,7 @@ public final class StripModel {
 	public func open(clipboard known: ClipboardCard? = nil) {
 		presentation += 1
 		copiedID = nil
-		pendingPick = nil
-		browseKeyDown = false
+		heldBrowseKeys = []
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
 		let held = known.flatMap { c in clips.contains { $0.id == c.id } ? c : nil }
@@ -609,25 +618,21 @@ public final class StripModel {
 
 	public func beginClose() {
 		guard cardsMounted, !isClosing else { return }
-		let cancel = cancelling, lit = selectedID, target = browseTarget, pick = pendingPick
+		let cancel = cancelling, lit = selectedID, target = browseTarget
 		cancelling = false
-		pendingPick = nil
-		browseKeyDown = false
+		heldBrowseKeys = []
 		dropBrowse()
 		// A copy made elsewhere from here on cancels the keep or restore below.
 		let shown = presentation, browse = browseGeneration
 		if cancel {
-			// ⎋ puts back the last pick, even one still loading. It runs after any write still in flight.
-			if let restore = pick ?? committed, clips.contains(where: { $0.id == restore.id }) {
+			// ⎋ puts back the last pick that landed. It runs after any write still in flight, and writes only if one changed it.
+			if let restore = committed, clips.contains(where: { $0.id == restore.id }) {
 				lensAfterClose = restore.id
-				Task { await self.writeAfterClose(restore, restoring: true, pick: pick != nil, presentation: shown, browse: browse) }
+				Task { await self.writeAfterClose(restore, restoring: true, presentation: shown, browse: browse) }
 			}
 		} else if !isClosingAfterCopy, let lit, lit == target, clipboard != ClipboardCard(id: lit) {
 			// ⌘Y or clicking away keeps the card the user arrowed to.
 			Task { await self.writeAfterClose(ClipboardCard(id: lit), restoring: false, presentation: shown, browse: browse) }
-		} else if let pick, clips.contains(where: { $0.id == pick.id }) {
-			// A pick still loading is kept, never lost to the close.
-			Task { await self.writeAfterClose(pick, restoring: false, pick: true, presentation: shown, browse: browse) }
 		}
 		isClosing = true
 		closeCount += 1
