@@ -57,6 +57,10 @@ enum RenderRunner {
 			list.append(Scene(name: "07-reduce-transparency-\(mode)", dark: dark, overrides: CopiaOverrides(reduceTransparency: true)))
 			list.append(Scene(name: "07-increase-contrast-\(mode)", dark: dark, overrides: CopiaOverrides(highContrast: true)))
 			list.append(Scene(name: "08-hover-\(mode)", dark: dark, prepare: { m in m.hoveredID = m.clips[2].id }))
+			// The footer pin: filled on a pinned card, an outline on the primary and hovered cards, an empty slot elsewhere.
+			list.append(Scene(name: "08-pins-\(mode)", dark: dark, clips: { mixed, _ in
+				var c = mixed; c[0].isPinned = true; return c
+			}, prepare: { m in m.hoveredID = m.clips[2].id }))
 			list.append(Scene(name: "08-loading-\(mode)", dark: dark, clips: { mixed, _ in
 				var c = mixed; c[2].preview = .pending; c[3].preview = .pending; return c
 			}))

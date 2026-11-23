@@ -134,6 +134,15 @@ struct ClipCard: View {
 	let thumbnails: ThumbnailCache
 	/// Runs the preview fade-in, so it comes from the Motion table and tests see it.
 	let animator: Animator
+	/// Shows the footer pin button; a pinned card always shows its filled pin.
+	var showsPin = false
+	/// Reserves the footer pin slot, so the strip's click gesture can toggle the pin there. False keeps the static
+	/// footer (design renders).
+	var pinControl = false
+
+	/// The pin button's hit area in card coordinates: the footer's trailing 24×24 slot. The strip is always laid out
+	/// left to right, so this is the right-hand end. The card's click gesture ignores presses that start on a visible pin.
+	static let pinSlot = CGRect(x: Theme.cardSize.width - 12 - 24, y: Theme.cardSize.height - Theme.footerHeight + 2, width: 24, height: 24)
 
 	@Environment(\.colorSchemeContrast) private var contrast
 	@Environment(\.colorScheme) private var scheme
@@ -204,7 +213,6 @@ struct ClipCard: View {
 				.lineLimit(1)
 				.truncationMode(.tail)
 			Spacer(minLength: 4)
-			if clip.isPinned { Image(systemName: "pin.fill").foregroundStyle(Theme.ink) }
 			if let badge {
 				Text("⌘\(badge)")
 					.font(.system(size: 10, weight: .semibold).monospacedDigit())
@@ -213,6 +221,12 @@ struct ClipCard: View {
 					.padding(.horizontal, 2)
 					.background(Theme.field, in: .rect(cornerRadius: Theme.smallRadius, style: .continuous))
 					.transition(.opacity.combined(with: .scale(scale: 0.8)))
+			}
+			if pinControl {
+				// The slot is reserved even when empty, so hovering never reflows the footer text.
+				PinGlyph(pinned: clip.isPinned, shown: clip.isPinned || showsPin, highContrast: highContrast)
+			} else if clip.isPinned {
+				Image(systemName: "pin.fill").foregroundStyle(Theme.ink)
 			}
 		}
 		.padding(.horizontal, 12)
@@ -235,6 +249,36 @@ struct ClipCard: View {
 		case ..<172_800: return "Yesterday"
 		default: return "\(Int(seconds / 86_400))d"
 		}
+	}
+}
+
+/// The footer's pin: filled when pinned, an outline on the hovered or primary card, otherwise an empty slot.
+/// A plain image, not a Button: a Button mounted on the primary card added ~5 ms to every ⌘Y open.
+/// StripView's card gesture turns a click that starts and ends on it into a pin toggle.
+private struct PinGlyph: View {
+	let pinned: Bool
+	let shown: Bool
+	let highContrast: Bool
+	@State private var hovering = false
+
+	var body: some View {
+		Group {
+			if shown {
+				Image(systemName: pinned ? "pin.fill" : "pin")
+					.font(.system(size: 11, weight: .semibold))
+					.foregroundStyle(pinned || hovering ? Theme.ink : Theme.ink2(highContrast: highContrast))
+					.frame(width: ClipCard.pinSlot.width, height: ClipCard.pinSlot.height)
+					.background {
+						if hovering { RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous).fill(Theme.field) }
+					}
+					.contentShape(.rect)
+					.onHover { hovering = $0 }
+					.help(pinned ? "Unpin" : "Pin")
+			} else {
+				Color.clear.allowsHitTesting(false)
+			}
+		}
+		.frame(width: ClipCard.pinSlot.width, height: ClipCard.pinSlot.height)
 	}
 }
 

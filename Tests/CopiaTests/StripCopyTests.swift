@@ -41,16 +41,17 @@ extension WindowTests.StripCopyTests {
 				host.panel.hide(); host.model.open(); host.panel.orderFrontRegardless(); host.panel.makeKey()
 				host.model.animateIn(); await host.settle(250)
 			}
-			let fourth = try center(clips[3])
+			let fourth = try center(clips[3]), start = writes.count
 			host.mouse(.leftMouseDown, at: fourth); host.mouse(.leftMouseUp, at: fourth)
 			try #require(host.model.selectedID == clips[3].id)
 			await host.settle(90)
-			let second = try center(clips[1]), before = writes.count
+			let second = try center(clips[1])
 			host.mouse(.leftMouseDown, at: second)
 			#expect(host.model.selectedID == clips[1].id)
 			host.mouse(.leftMouseUp, at: second); await host.settle(110)
 			#expect(host.cards.contains { $0.label.hasSuffix(clips[1].text) && $0.isSelected })
-			#expect(writes.count == before && host.model.cardsMounted)
+			// Each single click copies its own card at once and keeps the strip open.
+			#expect(Array(writes.dropFirst(start)) == [clips[3].id, clips[1].id] && host.model.cardsMounted)
 			if keyboard {
 				host.key("\r", code: 36)
 			} else {
@@ -59,7 +60,8 @@ extension WindowTests.StripCopyTests {
 				host.mouse(.leftMouseUp, at: second, count: 2)
 			}
 			await host.settle(300)
-			#expect(Array(writes.dropFirst(before)) == [clips[1].id])
+			// Return writes again; the double-click's second click only closes.
+			#expect(Array(writes.dropFirst(start)) == [clips[3].id, clips[1].id] + (keyboard ? [clips[1].id] : []))
 			#expect(board.string(forType: .string) == clips[1].text)
 			#expect(!host.model.cardsMounted)
 		}

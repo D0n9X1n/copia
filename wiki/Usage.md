@@ -22,7 +22,7 @@ Allow clipboard access so Copia can save new copies. Accessibility is not a prer
 - **⌘C** anywhere: the item appears below your pins. Copying something again moves it to the front of its pinned or unpinned group.
 - **⌘Y**: open or close the strip on the display under the pointer. Change this shortcut in Settings → Shortcuts.
 
-The strip opens in **Results**. Press a card to select it immediately; double-click copies the pointed card, not a previously selected card. Return or ⌘1–9 copies and closes; add Shift for plain text. Press ⌘V in the destination when ready.
+The strip opens in **Results**. Click a card to select it and copy it at once; the strip stays open, so you can click another card instead. Double-click copies the pointed card and closes the strip, writing the clipboard once. Return or ⌘1–9 copies and closes; add Shift for plain text. Press ⌘V in the destination when ready.
 
 | Key in Results | Action |
 |---|---|
@@ -31,6 +31,7 @@ The strip opens in **Results**. Press a card to select it immediately; double-cl
 | ⌘A | Select the matches visible now; later matches do not join this selection |
 | ⌫ · ⌘Z | Delete selected cards as a batch · undo the whole batch |
 | ⌘P | Pin or unpin the primary card; pinned cards sort first and do not age out |
+| Pin button | Pin or unpin that card without copying it; it appears on the hovered and selected cards and stays on pinned ones |
 | Type or click Search | Edit the query |
 | ⎋ | Clear the search, then close |
 

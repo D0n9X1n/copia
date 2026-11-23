@@ -33,6 +33,8 @@ public struct StripView: View {
 	@State private var row = HistoryRowPosition()
 	/// Cards deleted while the strip is open, so an undo brings them back with the reverse of the delete.
 	@State private var departed: Set<UUID> = []
+	/// What the current press is for, decided when it starts. Not observed, so a press never re-renders the strip.
+	@State private var press = PressLatch()
 	@Environment(\.accessibilityReduceTransparency) private var systemReduceTransparency
 	@Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 	@Environment(\.colorSchemeContrast) private var systemContrast
@@ -56,6 +58,9 @@ public struct StripView: View {
 			Spacer(minLength: 0)
 			StripSlide(model: model, reduced: reduceMotion) { strip.frame(height: Theme.panelHeight) }
 		}
+		// Copia ships one left-to-right localization. Pinning the strip's own layout keeps the footer pin, its hit area and
+		// newest-first order fixed; card text still follows its own direction (CardPresentation.textDirection).
+		.environment(\.layoutDirection, .leftToRight)
 	}
 
 	/// Opening slides up without a fade (Reduce Motion fades in place). Closing slides down and fades out together,
@@ -165,10 +170,21 @@ public struct StripView: View {
 		let selected = model.isSelected(clip.id)
 		let tint = clip.sourceBundleID == nil ? Theme.neutralTint : sources.tint(for: clip.sourceBundleID)
 		let timestamp = now()
+		let showsPin = clip.isPinned || primary || model.hoveredID == clip.id
+		/// Whether this card owns the current press: it started on the card, not on a pin that was visible at that moment.
+		func cardOwnsPress(_ start: CGPoint) -> Bool {
+			guard let panel = focus.field?.window as? StripPanel else { return false }
+			if press.number != panel.pressNumber || press.card != clip.id {
+				press.number = panel.pressNumber
+				press.card = clip.id
+				press.onPin = showsPin && ClipCard.pinSlot.contains(start)
+			}
+			return !press.onPin
+		}
 		return ClipCard(clip: clip, tint: tint, icon: sources.icon(for: clip.sourceBundleID),
 			badge: model.badge(at: index), hovered: model.hoveredID == clip.id, selected: selected,
 			removing: model.removingIDs.contains(clip.id), age: ClipCard.relative(clip.timestamp, now: timestamp), highlight: model.query, thumbnails: thumbnails,
-			animator: model.animator)
+			animator: model.animator, showsPin: showsPin, pinControl: true)
 			.background {
 				if primary {
 					LensRing(removing: model.removingIDs.contains(clip.id)).matchedGeometryEffect(id: "lens", in: lensSpace)
@@ -185,11 +201,25 @@ public struct StripView: View {
 			.onHover { inside in
 				if inside { model.hoveredID = clip.id } else if model.hoveredID == clip.id { model.hoveredID = nil }
 			}
-			.onTapGesture(count: 2) { model.requestCopy(id: clip.id, plain: false, dismiss: true) }
-			.simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
-				guard (focus.field?.window as? StripPanel)?.handlingContextClick != true else { return }
-				model.selectOnPress(clip.id); focus.focus()
-			})
+			.simultaneousGesture(DragGesture(minimumDistance: 0)
+				.onChanged { value in
+					guard (focus.field?.window as? StripPanel)?.handlingContextClick != true, cardOwnsPress(value.startLocation) else { return }
+					model.selectOnPress(clip.id); focus.focus()
+				}
+				.onEnded { value in
+					// A click copies on release; a drag (the panel tracks the whole press) or a release away from the card does not.
+					guard let panel = focus.field?.window as? StripPanel, let count = panel.primaryClickCount else { return }
+					guard cardOwnsPress(value.startLocation) else {
+						// A click that starts and ends on the visible pin toggles it, without copying or selecting.
+						if ClipCard.pinSlot.contains(value.location) { model.request { await model.togglePin(clip.id) } }
+						return
+					}
+					guard CGRect(origin: .zero, size: Theme.cardSize).contains(value.location) else { return }
+					// It is a double-click only if the press before it was a click on this same card, not on a pin or another card.
+					let double = count >= 2 && press.lastClick.map { $0.0 == panel.pressNumber &- 1 && $0.1 == clip.id } == true
+					press.lastClick = (panel.pressNumber, clip.id)
+					model.request { await model.click(clip.id, count: double ? 2 : 1) }
+				})
 			.accessibilityElement(children: .ignore)
 			.accessibilityLabel(CardAccessibility(clip: clip, now: timestamp).label)
 			.accessibilityAddTraits(selected ? .isSelected : [])
@@ -319,4 +349,13 @@ struct CardAccessibility {
 		}
 		return "\(clip.isPinned ? "Pinned, " : "")\(kind) from \(source), \(spoken): \(preview)"
 	}
+}
+
+/// The decision for one press. A reference type, so recording it does not invalidate the view.
+@MainActor final class PressLatch {
+	var number = -1
+	var card: UUID?
+	var onPin = false
+	/// The press number and card of the last release that counted as a card click.
+	var lastClick: (Int, UUID)?
 }

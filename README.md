@@ -95,12 +95,13 @@ Then copy something and press <kbd>⌘Y</kbd>.
 | Key | In the strip |
 |---|---|
 | <kbd>←</kbd> <kbd>→</kbd> | Select the previous or next card |
+| Click | Select and copy the card; the strip stays open |
 | <kbd>↩</kbd> or double-click | Copy the selected or pointed card and close |
 | <kbd>⇧</kbd><kbd>↩</kbd> | Copy as plain text and close |
 | <kbd>⌘1</kbd> – <kbd>⌘9</kbd> | Copy that card and close |
 | <kbd>⌘C</kbd> | Copy the primary card without closing |
 | <kbd>⌫</kbd> · <kbd>⌘Z</kbd> | Delete selected results · undo the batch |
-| <kbd>⌘A</kbd> · <kbd>⌘P</kbd> | Freeze the current filtered selection · pin/unpin the primary card |
+| <kbd>⌘A</kbd> · <kbd>⌘P</kbd> | Freeze the current filtered selection · pin/unpin the primary card (or click a card’s pin button) |
 | Type · <kbd>Tab</kbd> or <kbd>↓</kbd> | Edit Search · return to Results after composing |
 | <kbd>⎋</kbd> | Clear the search, then close |
 

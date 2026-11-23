@@ -88,6 +88,8 @@ extension WindowTests.LensTests {
 			let next = try rings()
 			#expect(next[0] < 1.5 && next[1] < 1.5 && next[2] > 2, "reduced=\(reduced) \(next)")
 			host.mouse(.leftMouseUp, at: try cards()[2])
+			// The release now copies; let that queued write land before the host and its log go away.
+			await host.settle()
 		}
 	}
 }

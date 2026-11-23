@@ -280,7 +280,21 @@ public final class StripModel {
 
 	// MARK: Card actions
 
+	/// One clipboard write at a time. Later copies wait their turn in order instead of being dropped.
 	private var writing = false
+	@ObservationIgnored private var writeWaiters: [CheckedContinuation<Void, Never>] = []
+	/// The clip this presentation's last write put on the clipboard in full, so a double-click closes without writing it again.
+	@ObservationIgnored private var copiedID: UUID?
+
+	/// Takes the writer, or waits until the current holder hands it over. Pair every call with `releaseWriter()`.
+	private func acquireWriter() async {
+		if writing { await withCheckedContinuation { writeWaiters.append($0) } } else { writing = true }
+	}
+
+	/// Hands the writer straight to the oldest waiter, so a newer copy can never overtake one already queued.
+	private func releaseWriter() {
+		if writeWaiters.isEmpty { writing = false } else { writeWaiters.removeFirst().resume() }
+	}
 
 	/// Resolve targets synchronously, and never deliver a queued UI command into a later presentation.
 	func request(_ operation: @escaping @MainActor () async -> Void) {
@@ -296,14 +310,45 @@ public final class StripModel {
 		request { await self.copy(id: id, plain: plain, dismiss: dismiss) }
 	}
 
+	/// A pointer release. The press already selected the card, so this never changes the selection.
+	/// The first click copies at once; the second click of a double-click closes, writing again only when the
+	/// first click's copy did not land.
+	func click(_ id: UUID, count: Int) async {
+		guard count >= 2 else { return await copy(id: id, plain: false, dismiss: false) }
+		let requested = closeCount
+		await acquireWriter()
+		defer { releaseWriter() }
+		guard canWrite(since: requested) else { return }
+		if copiedID == id {
+			isClosingAfterCopy = true
+			beginClose()
+		} else {
+			await write(id, plain: false, dismiss: true)
+		}
+	}
+
 	public func copy(id: UUID, plain: Bool, dismiss: Bool) async {
-		guard storageStatus != .recoveryRequired, cardsMounted, !isClosing, !writing else { return }
+		let requested = closeCount
+		await acquireWriter()
+		defer { releaseWriter() }
+		guard canWrite(since: requested) else { return }
+		await write(id, plain: plain, dismiss: dismiss)
+	}
+
+	/// A copy that waited out a close belongs to that presentation; it never writes into the next one.
+	private func canWrite(since requested: Int) -> Bool {
+		storageStatus != .recoveryRequired && cardsMounted && !isClosing && closeCount == requested
+	}
+
+	/// The caller holds the writer.
+	private func write(_ id: UUID, plain: Bool, dismiss: Bool) async {
 		let close = closeCount
-		writing = true
-		defer { writing = false }
+		copiedID = nil
 		do {
 			try await actions.write(id, plain)
-			guard dismiss, close == closeCount else { return }
+			guard close == closeCount else { return }
+			if !plain { copiedID = id }
+			guard dismiss else { return }
 			isClosingAfterCopy = true
 			beginClose()
 		} catch {
@@ -349,6 +394,7 @@ public final class StripModel {
 	/// Mounts the cards in their hidden position. Call `animateIn()` once the panel is on screen.
 	public func open() {
 		presentation += 1
+		copiedID = nil
 		intent = .results
 		frozenIDs = nil
 		isClosing = false

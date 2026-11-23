@@ -37,12 +37,34 @@ public final class StripPanel: NSPanel {
 	/// including when the menu tracks its own nested events inside sendEvent.
 	var openContextMenu: ((NSEvent) -> Bool)?
 	private(set) var handlingContextClick = false
+	/// The click count of the primary mouse-up being delivered, nil otherwise or after a drag.
+	/// Cards read it to tell a click from a double-click.
+	private(set) var primaryClickCount: Int?
+	private var pressStart: CGPoint?
+	private var pressMoved = false
+	/// A press that began inside context-menu tracking or with Control never becomes a click.
+	private var pressIsContext = false
+	/// Changes on every primary press, so a card can decide once per press what it is for.
+	private(set) var pressNumber = 0
 
 	override public func sendEvent(_ event: NSEvent) {
 		let previous = handlingContextClick
 		handlingContextClick = previous || event.type == .rightMouseDown || event.type == .rightMouseDragged
 			|| (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
 		defer { handlingContextClick = previous }
+		switch event.type {
+		case .leftMouseDown:
+			pressStart = event.locationInWindow; pressMoved = false; pressIsContext = handlingContextClick; pressNumber &+= 1
+		case .leftMouseDragged, .leftMouseUp:
+			if let start = pressStart, hypot(event.locationInWindow.x - start.x, event.locationInWindow.y - start.y) >= 4 { pressMoved = true }
+		default: break
+		}
+		let previousCount = primaryClickCount
+		// Context-menu tracking, a Control-click and a press that moved are not clicks.
+		primaryClickCount = event.type == .leftMouseUp && !handlingContextClick && !pressIsContext
+			&& !event.modifierFlags.contains(.control) && !pressMoved
+			? event.clickCount : nil
+		defer { primaryClickCount = previousCount }
 		if !previous, handlingContextClick, event.type != .rightMouseDragged, openContextMenu?(event) == true { return }
 		super.sendEvent(event)
 	}

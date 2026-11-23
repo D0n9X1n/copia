@@ -597,3 +597,203 @@ extension StripModelTests {
 		#expect(r.model.clips == [recopy] && !r.model.canUndo && r.model.toast == nil)
 	}
 }
+
+/// #22: a pointer click copies at once; the second click of a double-click closes without a second write.
+extension StripModelTests {
+	@Test func aSingleClickSelectsAndCopiesThePointedCardWithoutClosing() async {
+		let r = StripRig(), id = Fixtures.mixed[3].id
+		r.model.selectOnPress(id)
+		await r.model.click(id, count: 1)
+		#expect(r.model.selectedID == id)
+		#expect(r.log == ["write \(id) plain=false"])
+		#expect(r.model.cardsMounted && !r.model.isClosing)
+	}
+
+	@Test func aDoubleClickClosesAfterTheFirstClickWithoutWritingAgain() async {
+		let r = StripRig(), id = Fixtures.mixed[2].id
+		await r.model.click(id, count: 1)
+		await r.model.click(id, count: 2)
+		#expect(r.log == ["write \(id) plain=false", "closeStart"])
+		#expect(r.model.closeCount == 1 && !r.model.cardsMounted)
+	}
+
+	@Test func aSecondClickOnAnotherCardCopiesThatCardAndCloses() async {
+		let r = StripRig(), first = Fixtures.mixed[1].id, second = Fixtures.mixed[4].id
+		r.model.selectOnPress(first)
+		await r.model.click(first, count: 1)
+		r.model.selectOnPress(second)
+		await r.model.click(second, count: 2)
+		#expect(r.model.selectedID == second)
+		#expect(r.log == ["write \(first) plain=false", "write \(second) plain=false", "closeStart"])
+	}
+
+	@Test func aDoubleClickAfterAFailedFirstCopyRetriesAndCloses() async {
+		let r = StripRig(), id = Fixtures.mixed[2].id
+		var fail = true
+		r.model.actions.write = { id, plain in
+			if fail { fail = false; throw RigError.boom }
+			r.log.append("write \(id) plain=\(plain)")
+		}
+		await r.model.click(id, count: 1)
+		#expect(r.model.cardsMounted)
+		await r.model.click(id, count: 2)
+		#expect(r.log == ["write \(id) plain=false", "closeStart"])
+	}
+
+	@Test func reopeningForgetsTheLastClickedCopy() async {
+		let r = StripRig(), id = Fixtures.mixed[2].id
+		await r.model.click(id, count: 1)
+		r.model.beginClose(); r.model.open(); r.log.removeAll()
+		await r.model.click(id, count: 2)
+		#expect(r.log == ["write \(id) plain=false", "closeStart"])
+	}
+}
+
+extension WriteOverlapTests {
+	@Test func aDoubleClickDuringTheFirstClicksWriteClosesWhenThatWriteLands() async {
+		let model = StripModel(clips: Fixtures.mixed, animator: .immediate), gate = WriteGate(), id = Fixtures.mixed[2].id
+		model.actions.write = { id, _ in
+			gate.started.append(id)
+			await withCheckedContinuation { gate.waiting.append($0) }
+		}
+		model.open()
+		let first = Task { await model.click(id, count: 1) }
+		while gate.waiting.isEmpty { await Task.yield() }
+		let second = Task { await model.click(id, count: 2) }
+		for _ in 0..<50 { await Task.yield() }
+		#expect(model.cardsMounted && !model.isClosing)
+		gate.release()
+		await first.value
+		await second.value
+		#expect(gate.started == [id])
+		#expect(model.closeCount == 1 && !model.cardsMounted)
+	}
+}
+
+/// Review follow-ups for #22: no click is dropped, and only this presentation's successful write counts as copied.
+extension StripModelTests {
+	@Test func aFailedWriteForgetsTheEarlierCopySoTheDoubleClickRetries() async {
+		let r = StripRig(), id = Fixtures.mixed[2].id
+		var failNext = false
+		r.model.actions.write = { id, plain in
+			if failNext { failNext = false; throw RigError.boom }
+			r.log.append("write \(id) plain=\(plain)")
+		}
+		await r.model.click(id, count: 1)
+		failNext = true
+		await r.model.click(id, count: 1)
+		await r.model.click(id, count: 2)
+		#expect(r.log == ["write \(id) plain=false", "write \(id) plain=false", "closeStart"])
+	}
+
+	@Test func aClickStillCopiesWhenTypingHidesTheCardBeforeItRuns() async {
+		let r = StripRig(), id = Fixtures.mixed[2].id
+		r.model.query = "zzzz-no-such-text"
+		try? #require(!r.model.visibleClips.contains { $0.id == id })
+		await r.model.click(id, count: 1)
+		#expect(r.log == ["write \(id) plain=false"])
+	}
+}
+
+extension WriteOverlapTests {
+	@Test func aClickOnAnotherCardDuringAWriteWaitsAndThenCopiesThatCard() async {
+		let model = StripModel(clips: Fixtures.mixed, animator: .immediate), gate = WriteGate()
+		let a = Fixtures.mixed[1].id, b = Fixtures.mixed[4].id
+		model.actions.write = { id, _ in
+			gate.started.append(id)
+			await withCheckedContinuation { gate.waiting.append($0) }
+		}
+		model.open()
+		let first = Task { await model.click(a, count: 1) }
+		while gate.waiting.isEmpty { await Task.yield() }
+		model.selectOnPress(b)
+		let second = Task { await model.click(b, count: 1) }
+		for _ in 0..<50 { await Task.yield() }
+		#expect(gate.started == [a] && model.selectedID == b)
+		gate.release()
+		await first.value
+		for _ in 0..<1_000 where gate.waiting.isEmpty { await Task.yield() }
+		#expect(gate.started == [a, b])
+		gate.release()
+		await second.value
+		#expect(model.cardsMounted && !model.isClosing)
+	}
+
+	@Test func aWriteThatLandsAfterReopeningDoesNotCountForTheNewPresentation() async {
+		let model = StripModel(clips: Fixtures.mixed, animator: .immediate), gate = WriteGate(), id = Fixtures.mixed[2].id
+		model.actions.write = { id, _ in
+			gate.started.append(id)
+			await withCheckedContinuation { gate.waiting.append($0) }
+		}
+		model.open()
+		let first = Task { await model.click(id, count: 1) }
+		while gate.waiting.isEmpty { await Task.yield() }
+		model.beginClose(); model.open()
+		gate.release()
+		await first.value
+		var writes: [UUID] = []
+		model.actions.write = { id, _ in writes.append(id) }
+		await model.click(id, count: 2)
+		#expect(writes == [id])
+		#expect(model.closeCount == 2 && !model.cardsMounted)
+	}
+}
+
+extension WriteOverlapTests {
+	@Test func aCopyQueuedBehindAWriteNeverRunsInTheNextPresentation() async {
+		let model = StripModel(clips: Fixtures.mixed, animator: .immediate), gate = WriteGate()
+		let a = Fixtures.mixed[1].id, b = Fixtures.mixed[4].id
+		model.actions.write = { id, _ in
+			gate.started.append(id)
+			await withCheckedContinuation { gate.waiting.append($0) }
+		}
+		model.open()
+		let first = Task { await model.click(a, count: 1) }
+		while gate.waiting.isEmpty { await Task.yield() }
+		let queued = Task { await model.click(b, count: 1) }
+		for _ in 0..<50 { await Task.yield() }
+		model.beginClose(); model.open()
+		gate.release()
+		await first.value
+		await queued.value
+		#expect(gate.started == [a])
+		#expect(model.cardsMounted && !model.isClosing)
+	}
+}
+
+/// Review round 2: a release copies without touching the selection, and queued copies run strictly in order.
+extension StripModelTests {
+	@Test func aReleaseCopiesItsCardButLeavesANewerKeyboardSelection() async {
+		let r = StripRig(), a = Fixtures.mixed[2].id
+		r.model.selectOnPress(a)
+		r.model.move(1)
+		let moved = r.model.selectedID
+		try? #require(moved != a)
+		await r.model.click(a, count: 1)
+		#expect(r.model.selectedID == moved)
+		#expect(r.log == ["write \(a) plain=false"])
+	}
+}
+
+extension WriteOverlapTests {
+	@Test func aNewClickCannotOvertakeOneAlreadyWaiting() async {
+		let model = StripModel(clips: Fixtures.mixed, animator: .immediate), gate = WriteGate()
+		let a = Fixtures.mixed[1].id, b = Fixtures.mixed[4].id, c = Fixtures.mixed[6].id
+		var third: Task<Void, Never>?
+		model.actions.write = { id, _ in
+			gate.started.append(id)
+			guard id == a else { return }
+			await withCheckedContinuation { gate.waiting.append($0) }
+			// C arrives in the instant A's write returns, before B's turn has run.
+			third = Task { await model.click(c, count: 1) }
+		}
+		model.open()
+		let first = Task { await model.click(a, count: 1) }
+		while gate.waiting.isEmpty { await Task.yield() }
+		let second = Task { await model.click(b, count: 1) }
+		for _ in 0..<50 { await Task.yield() }
+		gate.release()
+		await first.value; await second.value; await third?.value
+		#expect(gate.started == [a, b, c])
+	}
+}
