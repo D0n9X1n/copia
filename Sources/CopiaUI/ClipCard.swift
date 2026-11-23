@@ -134,6 +134,15 @@ struct ClipCard: View {
 	let thumbnails: ThumbnailCache
 	/// Runs the preview fade-in, so it comes from the Motion table and tests see it.
 	let animator: Animator
+	/// Shows the footer pin button; a pinned card always shows its filled pin.
+	var showsPin = false
+	/// Toggles the pin. A reference, not a closure, so a clock tick that leaves the card's values alone does not re-evaluate it.
+	/// Nil keeps the static footer (design renders).
+	var pinTarget: StripModel?
+
+	/// The pin button's hit area in card coordinates: the footer's trailing 24×24 slot. The strip is always laid out
+	/// left to right, so this is the right-hand end. The card's click gesture ignores presses that start on a visible pin.
+	static let pinSlot = CGRect(x: Theme.cardSize.width - 12 - 24, y: Theme.cardSize.height - Theme.footerHeight + 2, width: 24, height: 24)
 
 	@Environment(\.colorSchemeContrast) private var contrast
 	@Environment(\.colorScheme) private var scheme
@@ -204,7 +213,6 @@ struct ClipCard: View {
 				.lineLimit(1)
 				.truncationMode(.tail)
 			Spacer(minLength: 4)
-			if clip.isPinned { Image(systemName: "pin.fill").foregroundStyle(Theme.ink) }
 			if let badge {
 				Text("⌘\(badge)")
 					.font(.system(size: 10, weight: .semibold).monospacedDigit())
@@ -213,6 +221,12 @@ struct ClipCard: View {
 					.padding(.horizontal, 2)
 					.background(Theme.field, in: .rect(cornerRadius: Theme.smallRadius, style: .continuous))
 					.transition(.opacity.combined(with: .scale(scale: 0.8)))
+			}
+			if let pinTarget {
+				// The slot is reserved even when empty, so hovering never reflows the footer text.
+				PinButton(pinned: clip.isPinned, shown: clip.isPinned || showsPin, highContrast: highContrast, id: clip.id, target: pinTarget)
+			} else if clip.isPinned {
+				Image(systemName: "pin.fill").foregroundStyle(Theme.ink)
 			}
 		}
 		.padding(.horizontal, 12)
@@ -234,6 +248,49 @@ struct ClipCard: View {
 		case ..<86_400: return "\(Int(seconds / 3_600))h"
 		case ..<172_800: return "Yesterday"
 		default: return "\(Int(seconds / 86_400))d"
+		}
+	}
+}
+
+/// The footer's pin toggle: filled when pinned, an outline on the hovered or primary card, otherwise an empty slot.
+private struct PinButton: View {
+	let pinned: Bool
+	let shown: Bool
+	let highContrast: Bool
+	let id: UUID
+	let target: StripModel
+	@State private var hovering = false
+
+	var body: some View {
+		Group {
+			if shown {
+				Button { target.request { await target.togglePin(id) } } label: {
+					Image(systemName: pinned ? "pin.fill" : "pin")
+						.font(.system(size: 11, weight: .semibold))
+						.foregroundStyle(pinned || hovering ? Theme.ink : Theme.ink2(highContrast: highContrast))
+						.frame(width: ClipCard.pinSlot.width, height: ClipCard.pinSlot.height)
+						.contentShape(.rect)
+				}
+				.buttonStyle(PinButtonStyle(hovering: hovering))
+				.onHover { hovering = $0 }
+				.help(pinned ? "Unpin" : "Pin")
+			} else {
+				Color.clear.allowsHitTesting(false)
+			}
+		}
+		.frame(width: ClipCard.pinSlot.width, height: ClipCard.pinSlot.height)
+	}
+}
+
+private struct PinButtonStyle: ButtonStyle {
+	let hovering: Bool
+
+	func makeBody(configuration: Configuration) -> some View {
+		configuration.label.background {
+			let shape = RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
+			// Pressed doubles the hover fill.
+			if hovering || configuration.isPressed { shape.fill(Theme.field) }
+			if configuration.isPressed { shape.fill(Theme.field) }
 		}
 	}
 }

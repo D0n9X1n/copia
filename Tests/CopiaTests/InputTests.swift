@@ -14,13 +14,14 @@ final class InputHost {
 	let focus: SearchFocus
 	let log = ActionLog()
 
-	init(clips: [Clip] = Fixtures.mixed, focus: SearchFocus = SearchFocus(), reduced: Bool = false) {
+	init(clips: [Clip] = Fixtures.mixed, focus: SearchFocus = SearchFocus(), reduced: Bool = false, direction: LayoutDirection = .leftToRight) {
 		self.focus = focus
 		model = StripModel(clips: clips)
 		AccessibilityNode.enableInProcess()
 		model.actions = log.actions()
 		panel.host.rootView = AnyView(StripView(model: model, focus: focus, thumbnails: ThumbnailCache(), now: { Fixtures.now }, sources: .fixtures)
-			.environment(\.copiaOverrides, CopiaOverrides(reduceTransparency: true, reduceMotion: reduced)))
+			.environment(\.copiaOverrides, CopiaOverrides(reduceTransparency: true, reduceMotion: reduced))
+			.environment(\.layoutDirection, direction))
 		// As AppController wires it: ⌘ held shows the 1–9 badges.
 		panel.onKeyEquivalent = { [unowned self] event in focus.handleKeyEquivalent(event, model: model) }
 		panel.onFlagsChanged = { [unowned self] flags in model.commandHeld = flags.contains(.command) }
@@ -63,8 +64,8 @@ final class InputHost {
 		mouse(type, at: panel.convertPoint(fromScreen: CGPoint(x: node.frame.midX, y: node.frame.midY)), count: count)
 	}
 
-	func mouse(_ type: NSEvent.EventType, at point: CGPoint, count: Int = 1) {
-		let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+	func mouse(_ type: NSEvent.EventType, at point: CGPoint, count: Int = 1, flags: NSEvent.ModifierFlags = []) {
+		let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
 			windowNumber: panel.windowNumber, context: nil, eventNumber: count, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!
 		panel.sendEvent(event)
 	}
@@ -240,22 +241,24 @@ extension WindowTests.InputTests {
 		#expect(!host.model.commandHeld)
 	}
 
-	@Test func pointerDownMovesTheLensBeforeUpWithoutActivating() async throws {
+	@Test func pointerDownMovesTheLensAndEachSingleClickCopiesWithoutClosing() async throws {
 		let host = InputHost()
 		defer { host.close() }
 		await host.settle()
-		for clip in [Fixtures.mixed[2], Fixtures.mixed[0], Fixtures.mixed[1]] {
+		let order = [Fixtures.mixed[2], Fixtures.mixed[0], Fixtures.mixed[1]]
+		for clip in order {
 			let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: clip, now: Fixtures.now).label })
 			host.mouse(.leftMouseDown, at: card)
 			#expect(host.model.selectedID == clip.id)
+			#expect(!host.log.entries.contains("write \(clip.id) plain=false"), "copies on release, not on press")
 			host.mouse(.leftMouseUp, at: card)
+			await host.settle(Int(NSEvent.doubleClickInterval * 1000) + 50)
 		}
-		await host.settle(Int(NSEvent.doubleClickInterval * 1000) + 50)
-		#expect(host.log.entries.isEmpty)
-		#expect(host.model.cardsMounted)
+		#expect(host.log.entries == order.map { "write \($0.id) plain=false" })
+		#expect(host.model.cardsMounted && !host.model.isClosing)
 	}
 
-	@Test func doubleClickingACardActivatesExactlyOnce() async throws {
+	@Test func doubleClickingACardWritesOnceAndCloses() async throws {
 		let host = InputHost()
 		defer { host.close() }
 		await host.settle()
@@ -264,7 +267,41 @@ extension WindowTests.InputTests {
 		host.click(card, count: 2)
 		await host.settle(300)
 		#expect(host.log.entries == ["write \(clip.id) plain=false"])
+		#expect(host.model.selectedID == clip.id)
 		#expect(host.model.isClosing || !host.model.cardsMounted)
+	}
+
+	@Test func aDragOrANonPrimaryReleaseOnACardDoesNotCopy() async throws {
+		let host = InputHost()
+		defer { host.close() }
+		await host.settle()
+		let card = try #require(host.cards.first { $0.label.contains("Safari") })
+		let start = host.panel.convertPoint(fromScreen: CGPoint(x: card.frame.midX, y: card.frame.midY))
+		host.mouse(.leftMouseDown, at: start)
+		host.mouse(.leftMouseDragged, at: CGPoint(x: start.x + 40, y: start.y))
+		host.mouse(.leftMouseUp, at: CGPoint(x: start.x + 40, y: start.y))
+		host.mouse(.rightMouseUp, at: start)
+		host.mouse(.leftMouseUp, at: start, flags: .control)
+		// A drag that comes back to where it started is still a drag.
+		host.mouse(.leftMouseDown, at: start)
+		host.mouse(.leftMouseDragged, at: CGPoint(x: start.x + 40, y: start.y))
+		host.mouse(.leftMouseDragged, at: start)
+		host.mouse(.leftMouseUp, at: start)
+		// A Control-modified release during a live press is not a primary click.
+		host.mouse(.leftMouseDown, at: start)
+		host.mouse(.leftMouseUp, at: start, flags: .control)
+		// Small drags that end 8 pt from the press are a drag, even though no drag event reached 4 pt.
+		host.mouse(.leftMouseDown, at: start)
+		host.mouse(.leftMouseDragged, at: CGPoint(x: start.x + 3, y: start.y))
+		host.mouse(.leftMouseUp, at: CGPoint(x: start.x + 8, y: start.y))
+		// A short move that ends just past the card's edge does not copy.
+		let edge = host.panel.convertPoint(fromScreen: CGPoint(x: card.frame.maxX - 1, y: card.frame.midY))
+		host.mouse(.leftMouseDown, at: edge)
+		host.mouse(.leftMouseDragged, at: CGPoint(x: edge.x + 3, y: edge.y))
+		host.mouse(.leftMouseUp, at: CGPoint(x: edge.x + 3, y: edge.y))
+		await host.settle(Int(NSEvent.doubleClickInterval * 1000) + 50)
+		#expect(host.log.entries.isEmpty)
+		#expect(host.model.cardsMounted)
 	}
 }
 
@@ -301,7 +338,7 @@ extension WindowTests.InputTests {
 		#expect(editor.isFieldEditor && host.panel.firstResponder === editor)
 		host.key("a", code: 0); await host.settle()
 		#expect(host.model.intent == .search && host.model.query == "a" && editor.string == "a")
-		#expect(host.model.selectedID == clip.id && host.log.entries.isEmpty)
+		#expect(host.model.selectedID == clip.id && host.log.entries == ["write \(clip.id) plain=false"])
 	}
 
 	@Test func aReentrantViewUpdateCannotClearTheCharacterBeingCommitted() async throws {
@@ -529,5 +566,163 @@ extension WindowTests.InputTests {
 		await host.settle()
 		#expect(host.model.cardsMounted && host.model.selectedIDs.isEmpty && host.log.entries.isEmpty)
 		#expect(host.model.clips == Fixtures.mixed)
+	}
+}
+
+/// #23: the footer pin button toggles the pin without copying, closing or moving the selection.
+extension WindowTests.InputTests {
+	/// The centre of a card's pin slot, in panel coordinates. AX frames are bottom-left screen rects.
+	func pinPoint(_ card: AXNode, in host: InputHost) -> CGPoint {
+		let slot = ClipCard.pinSlot
+		return host.panel.convertPoint(fromScreen: CGPoint(x: card.frame.minX + slot.midX, y: card.frame.maxY - slot.midY))
+	}
+
+	@Test func thePinButtonTogglesThePinWithoutCopyingClosingOrSelecting() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		var pins: [String] = []
+		host.model.actions.setPinned = { id, pinned in pins.append("\(pinned ? "pin" : "unpin") \(id)") }
+		let primary = try #require(host.model.selectedID)
+		let target = try #require(host.model.clips.first { !$0.isPinned && $0.id != primary })
+		func card(_ id: UUID) throws -> AXNode {
+			let clip = try #require(host.model.clips.first { $0.id == id })
+			return try #require(host.cards.first { $0.label == CardAccessibility(clip: clip, now: Fixtures.now).label })
+		}
+		// Hovering shows the outline pin on a non-primary card.
+		host.model.hoveredID = target.id; await host.settle()
+		var point = pinPoint(try card(target.id), in: host)
+		host.mouse(.leftMouseDown, at: point); host.mouse(.leftMouseUp, at: point); await host.settle(300)
+		#expect(pins == ["pin \(target.id)"])
+		#expect(host.model.clips.first { $0.id == target.id }?.isPinned == true)
+		#expect(host.model.selectedID == primary)
+		#expect(host.log.entries.isEmpty && host.model.cardsMounted)
+		// The filled pin stays visible after the pointer leaves, and clicking it unpins.
+		host.model.hoveredID = nil; await host.settle()
+		point = pinPoint(try card(target.id), in: host)
+		host.mouse(.leftMouseDown, at: point); host.mouse(.leftMouseUp, at: point); await host.settle(300)
+		#expect(pins == ["pin \(target.id)", "unpin \(target.id)"])
+		#expect(host.model.clips.first { $0.id == target.id }?.isPinned == false)
+		#expect(host.model.selectedID == primary && host.log.entries.isEmpty && host.model.cardsMounted)
+	}
+
+	@Test func thePrimaryCardShowsItsPinButtonWithoutHover() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		var pins: [String] = []
+		host.model.actions.setPinned = { id, pinned in pins.append("\(pinned ? "pin" : "unpin") \(id)") }
+		let primary = try #require(host.model.clips.first { $0.id == host.model.selectedID })
+		try #require(!primary.isPinned)
+		host.model.hoveredID = nil; await host.settle()
+		let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: primary, now: Fixtures.now).label })
+		let point = pinPoint(card, in: host)
+		host.mouse(.leftMouseDown, at: point); host.mouse(.leftMouseUp, at: point); await host.settle(300)
+		#expect(pins == ["pin \(primary.id)"])
+		#expect(host.log.entries.isEmpty && host.model.cardsMounted)
+	}
+
+	@Test func theEmptyPinSlotOnAnUnhoveredCardIsPartOfTheCard() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		var pins = 0
+		host.model.actions.setPinned = { _, _ in pins += 1 }
+		let primary = try #require(host.model.selectedID)
+		let target = try #require(host.model.clips.first { !$0.isPinned && $0.id != primary })
+		let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: target, now: Fixtures.now).label })
+		host.model.hoveredID = nil
+		let point = pinPoint(card, in: host)
+		host.mouse(.leftMouseDown, at: point)
+		#expect(host.model.selectedID == target.id)
+		host.mouse(.leftMouseUp, at: point); await host.settle(300)
+		#expect(pins == 0 && host.log.entries == ["write \(target.id) plain=false"])
+	}
+}
+
+extension WindowTests.InputTests {
+	@Test func aLeftClickDeliveredInsideContextMenuTrackingDoesNotCopy() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		let card = try #require(host.cards.first { $0.label.contains("Safari") })
+		let point = host.panel.convertPoint(fromScreen: CGPoint(x: card.frame.midX, y: card.frame.midY))
+		host.panel.openContextMenu = { [unowned host] _ in
+			host.mouse(.leftMouseDown, at: point); host.mouse(.leftMouseUp, at: point)
+			return true
+		}
+		host.mouse(.rightMouseDown, at: point)
+		await host.settle(Int(NSEvent.doubleClickInterval * 1000) + 50)
+		#expect(host.log.entries.isEmpty && host.model.cardsMounted)
+	}
+}
+
+/// Review round 3: what a press is for is decided when it starts, and kept until it ends.
+extension WindowTests.InputTests {
+	@Test func aPressThatStartedDuringMenuTrackingDoesNotCopyOnALaterRelease() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		let card = try #require(host.cards.first { $0.label.contains("Safari") })
+		let point = host.panel.convertPoint(fromScreen: CGPoint(x: card.frame.midX, y: card.frame.midY))
+		host.panel.openContextMenu = { [unowned host] _ in host.mouse(.leftMouseDown, at: point); return true }
+		host.mouse(.rightMouseDown, at: point)
+		host.panel.openContextMenu = nil
+		host.mouse(.leftMouseUp, at: point)
+		await host.settle(Int(NSEvent.doubleClickInterval * 1000) + 50)
+		#expect(host.log.entries.isEmpty && host.model.cardsMounted)
+	}
+
+	@Test func pressingAnEmptyPinSlotCopiesEvenWhenSelectionRevealsThePinBeforeRelease() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		var pins = 0
+		host.model.actions.setPinned = { _, _ in pins += 1 }
+		let primary = try #require(host.model.selectedID)
+		let target = try #require(host.model.clips.first { !$0.isPinned && $0.id != primary })
+		let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: target, now: Fixtures.now).label })
+		host.model.hoveredID = nil; await host.settle()
+		let point = pinPoint(card, in: host)
+		host.mouse(.leftMouseDown, at: point)
+		await host.settle()
+		#expect(host.model.selectedID == target.id)
+		host.mouse(.leftMouseUp, at: point); await host.settle(300)
+		#expect(pins == 0 && host.log.entries == ["write \(target.id) plain=false"])
+	}
+
+	@Test func pressingAVisiblePinNeverCopiesEvenIfSelectionHidesItBeforeRelease() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		var pins = 0
+		host.model.actions.setPinned = { _, _ in pins += 1 }
+		let primary = try #require(host.model.clips.first { $0.id == host.model.selectedID })
+		try #require(!primary.isPinned)
+		host.model.hoveredID = nil; await host.settle()
+		let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: primary, now: Fixtures.now).label })
+		let point = pinPoint(card, in: host)
+		host.mouse(.leftMouseDown, at: point)
+		host.model.move(1); await host.settle()
+		host.mouse(.leftMouseUp, at: point); await host.settle(300)
+		#expect(host.log.entries.isEmpty && host.model.cardsMounted)
+	}
+}
+
+/// Review round 4: the pin follows the layout direction, and a pin click never starts a card double-click.
+extension WindowTests.InputTests {
+	@Test func aRightToLeftHostStillLaysTheStripOutLeftToRightWithThePinOnTheRight() async throws {
+		let host = InputHost(direction: .rightToLeft); defer { host.close() }; await host.settle()
+		var pins = 0
+		host.model.actions.setPinned = { _, _ in pins += 1 }
+		let primary = try #require(host.model.clips.first { $0.id == host.model.selectedID })
+		host.model.hoveredID = nil; await host.settle()
+		let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: primary, now: Fixtures.now).label })
+		#expect(host.panel.frame.contains(CGPoint(x: card.frame.midX, y: card.frame.midY)), "newest card stays at the left, inside the panel")
+		let point = pinPoint(card, in: host)
+		host.mouse(.leftMouseDown, at: point); host.mouse(.leftMouseUp, at: point); await host.settle(300)
+		#expect(pins == 1 && host.log.entries.isEmpty)
+	}
+
+	@Test func aCardClickRightAfterAPinClickIsASingleClick() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		var pins = 0
+		host.model.actions.setPinned = { _, _ in pins += 1 }
+		let primary = try #require(host.model.clips.first { $0.id == host.model.selectedID })
+		host.model.hoveredID = nil; await host.settle()
+		let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: primary, now: Fixtures.now).label })
+		let pin = pinPoint(card, in: host), beside = CGPoint(x: pin.x - 16, y: pin.y)
+		host.mouse(.leftMouseDown, at: pin, count: 1); host.mouse(.leftMouseUp, at: pin, count: 1)
+		host.mouse(.leftMouseDown, at: beside, count: 2); host.mouse(.leftMouseUp, at: beside, count: 2)
+		await host.settle(300)
+		#expect(pins == 1)
+		#expect(host.log.entries == ["write \(primary.id) plain=false"])
+		#expect(host.model.cardsMounted && !host.model.isClosing)
 	}
 }
