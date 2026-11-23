@@ -121,6 +121,14 @@ pages=data[key]; print(json.dumps(pages if '--slurp' in args and '--paginate' in
         pr=members.pop();self.gate(False);members.append(pr)
         self.data['issues?state=open&per_page=100'][1].append(dict(number=99));self.gate(False)
 
+    def test_closure_event_tolerates_github_timestamp_skew_but_not_a_stale_close(self):
+        # GitHub stamped v0.0.4's #22 closedAt 2 s before its ClosedEvent from the merged PR.
+        event=self.data['issue2']['timelineItems']['nodes'][-1]
+        for created,ok in [('2026-11-01T00:00:02Z',True),('2026-10-31T23:59:58Z',True),('2026-11-01T00:00:06Z',False),('2026-10-31T23:00:00Z',False)]:
+            with self.subTest(created=created):
+                event['createdAt']=created;self.gate(ok)
+        event['createdAt']='2026-11-01T00:00:00Z'
+
     def test_event_sha_cannot_be_a_ref_that_happens_to_resolve_to_the_tag(self):
         self.env['GITHUB_SHA']='HEAD'
         self.assertIn('event', self.gate(False))
