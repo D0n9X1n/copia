@@ -2,7 +2,7 @@ import Testing
 import AppKit
 import Synchronization
 import CopiaCore
-import CopiaUI
+@testable import CopiaUI
 @testable import CopiaApp
 @testable import CopiaStore
 @testable import CopiaSystem
@@ -663,6 +663,64 @@ extension WindowTests.AppControllerTests {
 		model.escape()
 		try await Task.sleep(for: .milliseconds(300))
 		#expect(r.board.string(forType: .string) == "second", "Copia never puts back a card over content it did not save")
+	}
+
+	@Test func aBrowseNeverOverwritesACopyMadeElsewhereBeforeTheNextPoll() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		try #require(model.lensOnClipboard)
+		// Another app copies a password; the half-second poll has not seen it yet.
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		model.browse(1)
+		try await Task.sleep(for: .milliseconds(400))
+		#expect(r.board.string(forType: .string) == "secret", "the browse must not overwrite a copy it has not seen")
+		#expect(model.committed == nil && !model.lensOnClipboard)
+		model.escape()
+		try await Task.sleep(for: .milliseconds(300))
+		#expect(r.board.string(forType: .string) == "secret")
+	}
+
+	@Test func aDoubleClickAfterAnUnseenCopyWritesTheCardAgain() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("one"); try await r.copy("two")
+		r.controller.toggleHistory()
+		let one = try #require(model.clips.first { $0.text == "one" }).id
+		await model.click(one, count: 1)
+		try #require(r.board.string(forType: .string) == "one")
+		r.copyElsewhere("theirs")
+		await model.click(one, count: 2)
+		#expect(r.board.string(forType: .string) == "one", "the closing click must put its card back")
+		#expect(await eventually { model.clips.contains { $0.text == "theirs" } }, "the unseen copy is saved first")
+	}
+
+	@Test func losingKeyFocusThroughTheAppKeepsTheArrowedCard() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		panel.makeKey()
+		try #require(await eventually { panel.isKeyWindow })
+		model.browse(1)
+		// Settings takes key before the lens rests, through the app's own observer.
+		r.controller.openSettings()
+		defer { r.controller.settings().orderOut(nil) }
+		try #require(await eventually { !model.cardsMounted })
+		#expect(await eventually { r.board.string(forType: .string) == "second" })
 	}
 
 }

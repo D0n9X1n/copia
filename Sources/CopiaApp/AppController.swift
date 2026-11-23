@@ -209,16 +209,19 @@ public final class AppController {
 			Task { await self.store.invalidateGroup(token); await self.refreshStorageStatus() }
 		}
 		model.actions.openSettings = { [weak self] in self?.openSettings() }
+		model.syncClipboard = { [weak self] in self?.watcher.tick() }
 		model.actions.write = { [weak self] id, plain in
 			guard let self, let key = index.keys[id] else { throw StoreError.missingBlob }
 			let close = model.closeCount
 			do {
 				let items = try await store.items(for: key)
+				// A copy made elsewhere during the read is seen (and saved) now, so it can cancel a browse, keep or restore.
+				watcher.tick()
 				// Checked after the read: a write whose card, presentation or browse moved on meanwhile is dropped.
 				guard model.closeCount == close, model.writeIsCurrent() else { throw CancellationError() }
+				// A browse, keep or restore: Paster checks right before clearing that the pasteboard is still what Copia last saw.
+				let expected: Int? = model.writeRequiresOwnership ? watcher.observedChange : nil
 				beforePasteboardWrite()
-				// ⎋'s restore: Paster checks right before clearing that no copy was made elsewhere since Copia's last write.
-				let expected: Int? = model.writeRequiresOwnership ? (ownWrite ?? .min) : nil
 				let change = try paster.write(items, plain: plain, expecting: expected)
 				ownWrite = change
 				lastChange = max(lastChange, change)
@@ -277,10 +280,11 @@ public final class AppController {
 		}
 		watcher.onChange = { [weak self] change in
 			guard let self, change != ownWrite else { return }
-			// Copied elsewhere, captured or not: Copia no longer knows the clipboard until a capture says otherwise.
+			// Copied elsewhere, captured or not: Copia no longer knows the clipboard until a capture says otherwise,
+			// and a browse, keep or restore not yet written is cancelled, even while the strip closes.
 			lastChange = max(lastChange, change)
 			onClipboard = nil
-			if model.cardsMounted { model.clipboardChanged(to: nil) }
+			model.clipboardReplaced()
 		}
 		watcher.onDraft = { [weak self] draft in
 			guard let self else { return }

@@ -918,6 +918,7 @@ extension StripModelTests {
 		#expect(r.writes.isEmpty && r.model.selectedID == b)
 	}
 
+	/// A browse and a restore both ask; neither may overwrite a copy made elsewhere.
 	@Test func aRestoreAsksTheAppToCheckOwnershipRightBeforeWriting() async {
 		let r = StripRig(), a = Fixtures.mixed[0].id
 		var guarded: [Bool] = []
@@ -928,15 +929,23 @@ extension StripModelTests {
 		await r.settle()
 		r.model.escape()
 		await r.settle()
-		#expect(guarded == [false, true])
+		#expect(guarded == [true, true])
 		#expect(!r.model.writeRequiresOwnership)
+		await r.model.copy(id: a, plain: false, dismiss: false)
+		#expect(guarded == [true, true], "a pick is never guarded") // the strip is closed: the pick is dropped
+		r.model.open()
+		await r.model.copy(id: a, plain: false, dismiss: false)
+		#expect(guarded == [true, true, false], "a pick overwrites, as a click always has")
 	}
 
 	@Test func aRestoreTheAppRefusesLeavesTheClipboardAlone() async {
 		let r = StripRig(), a = Fixtures.mixed[0].id, b = Fixtures.mixed[1].id
 		let log = r.model.actions.write
+		var browsed = false
 		r.model.actions.write = { id, plain in
-			if r.model.writeRequiresOwnership { throw CancellationError() }
+			// The browse lands; then a copy elsewhere makes the app refuse the restore.
+			if r.model.writeRequiresOwnership, browsed { throw CancellationError() }
+			browsed = true
 			try await log(id, plain)
 		}
 		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
@@ -1257,4 +1266,117 @@ extension WriteOverlapTests {
 		#expect(gate.started == [e, b])
 	}
 
+}
+
+/// #26 review: copies made elsewhere, held arrows and picks still loading.
+extension StripModelTests {
+	@Test func aCopyMadeElsewhereCancelsABrowseNotYetWritten() async {
+		let r = StripRig()
+		r.model.browse(1)
+		r.model.clipboardReplaced()
+		await r.settle()
+		#expect(r.writes.isEmpty && r.model.clipboard == nil && r.model.committed == nil)
+	}
+
+	@Test func closingAfterACopyMadeElsewhereNeverReplaysTheBrowse() async {
+		let r = StripRig()
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.writes.count == 1)
+		r.model.clipboardReplaced()
+		r.model.beginClose()
+		await r.settle()
+		#expect(r.writes.count == 1, "⌘Y must not put the browsed card back over the newer copy")
+	}
+
+	@Test func aCopyMadeElsewhereDuringTheCloseCancelsTheKeep() async {
+		let r = StripRig()
+		r.model.browse(1)
+		r.model.beginClose()
+		r.model.clipboardReplaced()
+		await r.settle()
+		#expect(r.writes.isEmpty)
+	}
+
+	@Test func aCopyFoundRightBeforeTheBrowseWriteCancelsIt() async {
+		let r = StripRig()
+		var unseen = true
+		r.model.syncClipboard = { [unowned r] in
+			if unseen { unseen = false; r.model.clipboardReplaced() }
+		}
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.writes.isEmpty && !r.model.lensOnClipboard)
+	}
+
+	@Test func aDoubleClickWritesAgainWhenTheClipboardChangedUnseen() async {
+		let r = StripRig(), b = Fixtures.mixed[1].id
+		await r.model.click(b, count: 1)
+		r.model.syncClipboard = { [unowned r] in r.model.clipboardReplaced(); r.model.syncClipboard = {} }
+		await r.model.click(b, count: 2)
+		#expect(r.writes == ["write \(b) plain=false", "write \(b) plain=false"])
+		#expect(!r.model.cardsMounted, "the second click still closes")
+	}
+
+	@Test func escapeRestoresAPickStillLoading() async {
+		let probe = ClockProbe(), gate = WriteGate(), a = Fixtures.mixed[0].id, b = Fixtures.mixed[2].id
+		let model = StripModel(clips: Fixtures.mixed, animator: .immediate, clock: probe.clock)
+		var landed: [UUID] = []
+		model.actions.write = { id, _ in
+			gate.started.append(id)
+			if gate.started.count == 1 { await withCheckedContinuation { gate.waiting.append($0) } }
+			guard model.writeIsCurrent() else { throw CancellationError() }
+			landed.append(id)
+		}
+		model.open(clipboard: ClipboardCard(id: a))
+		model.select(b)
+		let pick = Task { await model.click(b, count: 1) }
+		for _ in 0..<1_000 where gate.waiting.isEmpty { await Task.yield() }
+		model.browse(1)
+		model.escape()
+		gate.release(); await pick.value
+		for _ in 0..<500 { await Task.yield() }
+		#expect(landed == [b], "Esc puts back the last pick, even one still loading")
+		#expect(model.selectedID == b)
+	}
+
+	@Test func theLensRestsExactly150msBeforeTheClipboardFollows() async {
+		#expect(StripModel.browseSettle == .milliseconds(150))
+		let r = StripRig()
+		r.model.browse(1)
+		r.probe.advance(by: .milliseconds(149))
+		for _ in 0..<200 { await Task.yield() }
+		#expect(r.writes.isEmpty)
+		r.probe.advance(by: .milliseconds(1))
+		for _ in 0..<200 { await Task.yield() }
+		#expect(r.writes.count == 1)
+	}
+
+	@Test func aHeldArrowPastTheKeyRepeatDelayWritesOnceAfterRelease() async {
+		let r = StripRig()
+		r.model.browseKey(down: true)
+		r.model.browse(1)
+		// The initial key-repeat delay outlasts the settle; nothing is written while the key is down.
+		r.probe.advance(by: .milliseconds(500))
+		for _ in 0..<3 { r.model.browse(1); r.probe.advance(by: .milliseconds(40)) }
+		r.probe.advance(by: .milliseconds(500))
+		for _ in 0..<200 { await Task.yield() }
+		#expect(r.writes.isEmpty)
+		r.model.browseKey(down: false)
+		r.probe.advance(by: .milliseconds(149))
+		for _ in 0..<200 { await Task.yield() }
+		#expect(r.writes.isEmpty, "the lens rests the full settle after release")
+		r.probe.advance(by: .milliseconds(1))
+		for _ in 0..<200 { await Task.yield() }
+		#expect(r.writes == ["write \(Fixtures.mixed[4].id) plain=false"])
+	}
+
+	@Test func aKeyUpThatNeverArrivesCannotHoldTheNextPresentation() async {
+		let r = StripRig()
+		r.model.browseKey(down: true)
+		r.model.beginClose(); r.model.open()
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.writes.count == 1)
+	}
 }

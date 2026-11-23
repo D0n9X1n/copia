@@ -885,6 +885,30 @@ extension WindowTests.InputTests {
 		let on = host.cards.filter { $0.valueDescription == "On clipboard" }
 		#expect(on.count == 1 && on.first?.label == CardAccessibility(clip: Fixtures.mixed[1], now: Fixtures.now).label)
 	}
+
+	@Test func aHeldArrowWritesNothingUntilItIsReleased() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		func send(_ type: NSEvent.EventType, repeated: Bool = false) {
+			host.panel.sendEvent(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.function, .numericPad],
+				timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: host.panel.windowNumber, context: nil,
+				characters: Self.rightArrow.0, charactersIgnoringModifiers: Self.rightArrow.0, isARepeat: repeated, keyCode: Self.rightArrow.1)!)
+		}
+		send(.keyDown)
+		// Past the settle, still inside the initial key-repeat delay.
+		await host.settle(settleMs)
+		send(.keyDown, repeated: true)
+		await host.settle(settleMs)
+		#expect(host.log.entries.isEmpty && host.model.selectedID == Fixtures.mixed[2].id)
+		send(.keyUp)
+		await host.settle(settleMs)
+		#expect(host.log.entries == ["write \(Fixtures.mixed[2].id) plain=false"])
+	}
+
+	@Test func theLensTurnsAccentOver120msLinearUnderReduceMotion() {
+		#expect(LensRing.fillIn(onClipboard: true, reduced: true) == .linear(duration: 0.12))
+		#expect(LensRing.fillIn(onClipboard: true, reduced: false) == .easeOut(duration: 0.12))
+		#expect(LensRing.fillIn(onClipboard: false, reduced: true) == nil)
+	}
 }
 
 extension WindowTests.LensTests {

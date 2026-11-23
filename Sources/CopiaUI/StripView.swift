@@ -324,7 +324,7 @@ struct LensRing: View {
 	/// Grey to accent fades in once the write lands; accent to grey is instant, so the lens never claims a copy early.
 	static func fillIn(onClipboard: Bool, reduced: Bool) -> Animation? {
 		guard onClipboard else { return nil }
-		return reduced ? .linear(duration: 0.1) : .easeOut(duration: 0.12)
+		return reduced ? .linear(duration: 0.12) : .easeOut(duration: 0.12)
 	}
 
 	var body: some View {

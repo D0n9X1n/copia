@@ -416,3 +416,65 @@ extension WindowTests.StripViewTests {
 		#expect(Diagnostics.bodyEvaluations > before)
 	}
 }
+
+/// #26 review: the chip and the no-results keycap as VoiceOver and the layout see them.
+extension WindowTests.StripViewTests {
+	@Test func theCopiedChipAndTheNoResultsKeycapAreSpoken() async throws {
+		let host = StripHost(overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.actions.write = { _, _ in }
+		host.model.beginClose(); host.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[0].id)); host.model.animateIn()
+		host.model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		await host.settle()
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.restore) })
+		#expect(host.isOnScreen(chip))
+		#expect(chip.frame.minY >= host.window.frame.maxY - Theme.topBarHeight, "the chip sits in the top bar")
+		host.model.query = "zzzz-no-such-card"
+		await host.settle()
+		#expect(host.root.all.contains { $0.label == RestoreHintView.spoken(.copied) })
+		#expect(host.root.all.contains { $0.label == "Escape clears search" })
+	}
+
+	@Test func theTopBarStartsAtTheCardsInsetAndNeverWrapsTheCountInANarrowStrip() async throws {
+		let width = PanelLayout.contentWidth(count: 2)
+		let host = StripHost(clips: Array(Fixtures.mixed.prefix(2)), width: width, overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		host.model.query = "e"
+		await host.settle()
+		func searchField(in view: NSView) -> NSTextField? {
+			if let field = view as? NSTextField, field.accessibilityLabel() == "Search clipboard history" { return field }
+			return view.subviews.lazy.compactMap { searchField(in: $0) }.first
+		}
+		let field = try #require(host.window.contentView.flatMap { searchField(in: $0) })
+		let frame = host.window.convertToScreen(field.convert(field.bounds, to: nil))
+		let count = try #require(host.root.all.first { $0.label == "2 of 2" || $0.value == "2 of 2" })
+		#expect(count.frame.height < 20, "the count stays on one line: \(count.frame)")
+		#expect(host.window.frame.contains(count.frame))
+		#expect(frame.maxX < count.frame.minX)
+		// The pill starts at the cards' 24 pt inset: the field sits 54 pt in (24 + 10 padding + glyph + 6), 4 pt right of
+		// where the old 20 pt inset put it.
+		let fieldStart = frame.minX - host.window.frame.minX
+		#expect(abs(fieldStart - 54) < 1, "the field starts \(fieldStart) pt in")
+		#expect(frame.width >= 160 - 30, "the pill never shrinks below 160 pt: field \(frame.width)")
+	}
+
+	@Test func theChipNeverPushesTheCountOutOfTheBar() async throws {
+		let host = StripHost(width: 1008, overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.actions.write = { _, _ in }
+		host.model.storageStatus = .cleanupPending
+		host.model.beginClose(); host.model.open(); host.model.animateIn()
+		host.model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		await host.settle()
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.unsaved) })
+		let count = try #require(host.root.all.first { $0.label == "9 items" || $0.value == "9 items" })
+		#expect(chip.frame.maxX <= count.frame.minX, "chip \(chip.frame) count \(count.frame)")
+		#expect(count.frame.height < 20 && host.window.frame.contains(count.frame), "count \(count.frame)")
+	}
+}

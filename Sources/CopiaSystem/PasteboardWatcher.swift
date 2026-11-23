@@ -49,6 +49,8 @@ public final class PasteboardWatcher {
 	let frontmost: () -> String?
 	let appName: (String) -> String?
 	private var lastChange: Int
+	/// The change count the last poll saw. A write that must not overwrite an unseen copy expects the pasteboard here.
+	public var observedChange: Int { lastChange }
 	/// The pasteboard change of the copy handed to `onDraft`, set just before the call.
 	public private(set) var lastCaptureChange = 0
 	private var log: ActivationLog

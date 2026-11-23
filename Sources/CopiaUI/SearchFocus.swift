@@ -64,10 +64,18 @@ class StripFieldEditor: NSTextView {
 	weak var model: StripModel?
 	private(set) var keyModifiers: NSEvent.ModifierFlags = []
 
+	/// ← → Home End: while one is down the clipboard waits, so a held arrow writes once, where it stops.
+	static let browseKeys: Set<UInt16> = [123, 124, 115, 119]
+
 	override func keyDown(with event: NSEvent) {
 		keyModifiers = event.modifierFlags
 		defer { keyModifiers = [] }
+		if Self.browseKeys.contains(event.keyCode) { model?.browseKey(down: true) }
 		super.keyDown(with: event)
+	}
+	override func keyUp(with event: NSEvent) {
+		if Self.browseKeys.contains(event.keyCode) { model?.browseKey(down: false) }
+		super.keyUp(with: event)
 	}
 	override func insertText(_ string: Any, replacementRange: NSRange) {
 		model?.intent = .search

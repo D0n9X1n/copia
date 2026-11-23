@@ -302,6 +302,14 @@ public final class StripModel {
 	@ObservationIgnored private var browseGeneration = 0
 	@ObservationIgnored private var lensAfterClose: UUID?
 	@ObservationIgnored private var cancelling = false
+	/// The newest pick still loading. A close before it lands keeps it, and ⎋ puts it back, since it is the last pick.
+	@ObservationIgnored private var pendingPick: ClipboardCard?
+	/// An arrow, Home or End is down. The clipboard waits for its release, so a held key writes once, where it stops.
+	@ObservationIgnored private var browseKeyDown = false
+	/// The lens rested while the key was still down.
+	@ObservationIgnored private var settledWhileHeld = false
+	/// Asks the app to look at the pasteboard now, so a decision is never made on a copy the next poll would have reported.
+	@ObservationIgnored public var syncClipboard: () -> Void = {}
 	/// Read by the app's writer right before it touches the pasteboard: false means the write is stale and is dropped.
 	@ObservationIgnored public private(set) var writeIsCurrent: () -> Bool = { true }
 	/// Read by the app's writer: ⎋'s restore must not overwrite a copy made elsewhere since Copia's last write.
@@ -353,6 +361,7 @@ public final class StripModel {
 		await acquireWriter()
 		defer { releaseWriter() }
 		guard canWrite(since: requested) else { return }
+		syncClipboard()
 		if copiedID == id, clipboard == ClipboardCard(id: id) {
 			isClosingAfterCopy = true
 			beginClose()
@@ -364,6 +373,7 @@ public final class StripModel {
 	/// A pick: click, ⌘C, Return, ⌘1–9 or a menu or VoiceOver action. It drops any browse not yet written.
 	public func copy(id: UUID, plain: Bool, dismiss: Bool) async {
 		dropBrowse()
+		pendingPick = ClipboardCard(id: id, plain: plain)
 		let requested = closeCount
 		await acquireWriter()
 		defer { releaseWriter() }
@@ -395,10 +405,13 @@ public final class StripModel {
 	private func write(_ id: UUID, plain: Bool, dismiss: Bool = false, browsing: Bool = false,
 		current: (() -> Bool)? = nil) async {
 		let close = closeCount, generation = presentation
+		let card = ClipboardCard(id: id, plain: plain)
 		copiedID = nil
+		// A pick that finished, landed or not, is no longer one a close must keep.
+		defer { if !browsing, pendingPick == card { pendingPick = nil } }
 		do {
-			let card = ClipboardCard(id: id, plain: plain)
-			guard try await land(card, current: current ?? { [unowned self] in
+			// A browse never overwrites a copy made elsewhere; a pick does.
+			guard try await land(card, ownership: browsing, current: current ?? { [unowned self] in
 				presentation == generation && closeCount == close
 			}), close == closeCount else { return }
 			if !plain { copiedID = id }
@@ -421,11 +434,31 @@ public final class StripModel {
 		copiedID = nil
 	}
 
+	/// The pasteboard changed without Copia, before any capture says what it holds. A browse not yet written is dropped,
+	/// and a close's keep or restore is cancelled, so neither overwrites the newer copy.
+	public func clipboardReplaced() {
+		dropBrowse()
+		clipboard = nil
+		committed = nil
+		copiedID = nil
+	}
+
 	// MARK: Browsing
+
+	/// An arrow, Home or End went down or up. While one is down the lens can move but the clipboard waits.
+	public func browseKey(down: Bool) {
+		guard browseKeyDown != down else { return }
+		browseKeyDown = down
+		guard !down, settledWhileHeld else { return }
+		settledWhileHeld = false
+		// Released after the lens rested: it rests once more from here, then the clipboard follows.
+		armSettle()
+	}
 
 	/// ← or →: move the lens, and the clipboard follows once it rests. Browsing from Search stays in Search,
 	/// so ⌫ and typing still edit the query.
 	public func browse(_ delta: Int) {
+		guard !isClosing else { return }
 		let before = selectedID, mode = intent
 		move(delta)
 		intent = mode
@@ -434,6 +467,7 @@ public final class StripModel {
 
 	/// ⌘←, ⌘→, Home or End: jump to the first or last card, and the clipboard follows once the lens rests.
 	public func browseToEnd(_ last: Bool) {
+		guard !isClosing else { return }
 		let before = selectedID, mode = intent
 		moveToEnd(last)
 		intent = mode
@@ -442,13 +476,20 @@ public final class StripModel {
 
 	private func follow(from before: UUID?) {
 		guard let id = selectedID, id != before, storageStatus != .recoveryRequired else { return }
-		settleTimer?()
 		browseGeneration += 1
 		browseTarget = id
+		armSettle()
+	}
+
+	private func armSettle() {
+		guard let id = browseTarget else { return }
+		settleTimer?()
+		settledWhileHeld = false
 		let generation = browseGeneration
 		settleTimer = clock.after(Self.browseSettle) { [weak self] in
 			guard let self, generation == browseGeneration else { return }
 			settleTimer = nil
+			guard !browseKeyDown else { settledWhileHeld = true; return }
 			request { await self.writeBrowse(id, generation: generation) }
 		}
 	}
@@ -457,6 +498,7 @@ public final class StripModel {
 	private func dropBrowse() {
 		settleTimer?()
 		settleTimer = nil
+		settledWhileHeld = false
 		browseTarget = nil
 		browseGeneration += 1
 	}
@@ -466,6 +508,7 @@ public final class StripModel {
 		let requested = closeCount
 		await acquireWriter()
 		defer { releaseWriter() }
+		syncClipboard()
 		let current = { [unowned self] in
 			generation == browseGeneration && selectedID == id && !removingIDs.contains(id) && !pendingDelete.contains(id)
 				&& visibleClips.contains { $0.id == id } && canWrite(since: requested)
@@ -474,15 +517,23 @@ public final class StripModel {
 		await write(id, plain: false, browsing: true, current: current)
 	}
 
-	/// A close's write: ⌘Y keeps the lit card, ⎋ restores the last pick. It runs after every write already queued,
-	/// and is dropped if the strip reopens first. A restore never overwrites a copy made elsewhere.
-	private func writeAfterClose(_ target: ClipboardCard, restoring: Bool, presentation generation: Int) async {
+	/// A close's write: ⌘Y keeps the lit card or a pick still loading, ⎋ restores the last pick. It runs after every
+	/// write already queued, and is dropped if the strip reopens first. A restore or a kept browse never overwrites a copy
+	/// made elsewhere; a kept pick does, as any pick does.
+	private func writeAfterClose(_ target: ClipboardCard, restoring: Bool, pick: Bool = false, presentation generation: Int,
+		browse: Int) async {
 		await acquireWriter()
 		defer { releaseWriter() }
-		let current = { [unowned self] in presentation == generation && storageStatus != .recoveryRequired }
+		syncClipboard()
+		let guarded = !pick
+		let current = { [unowned self] in
+			presentation == generation && storageStatus != .recoveryRequired && (!guarded || browse == browseGeneration)
+		}
 		guard current(), clipboard != target else { return }
-		guard (try? await land(target, ownership: restoring, current: current)) == true else { return }
-		if restoring { announce("Previous clipboard restored") }
+		let browsed = clipboard != committed
+		guard (try? await land(target, ownership: guarded, current: current)) == true else { return }
+		if pick { committed = target }
+		if restoring, browsed { announce("Previous clipboard restored") }
 	}
 
 	public func perform(_ action: CardAction, id: UUID) async {
@@ -531,6 +582,8 @@ public final class StripModel {
 	public func open(clipboard known: ClipboardCard? = nil) {
 		presentation += 1
 		copiedID = nil
+		pendingPick = nil
+		browseKeyDown = false
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
 		let held = known.flatMap { c in clips.contains { $0.id == c.id } ? c : nil }
@@ -556,19 +609,25 @@ public final class StripModel {
 
 	public func beginClose() {
 		guard cardsMounted, !isClosing else { return }
-		let cancel = cancelling, lit = selectedID, target = browseTarget
+		let cancel = cancelling, lit = selectedID, target = browseTarget, pick = pendingPick
 		cancelling = false
+		pendingPick = nil
+		browseKeyDown = false
 		dropBrowse()
-		let shown = presentation
+		// A copy made elsewhere from here on cancels the keep or restore below.
+		let shown = presentation, browse = browseGeneration
 		if cancel {
-			// ⎋ puts back the last pick. It runs after any browse write still in flight, and writes only if one landed.
-			if let restore = committed, clips.contains(where: { $0.id == restore.id }) {
+			// ⎋ puts back the last pick, even one still loading. It runs after any write still in flight.
+			if let restore = pick ?? committed, clips.contains(where: { $0.id == restore.id }) {
 				lensAfterClose = restore.id
-				Task { await self.writeAfterClose(restore, restoring: true, presentation: shown) }
+				Task { await self.writeAfterClose(restore, restoring: true, pick: pick != nil, presentation: shown, browse: browse) }
 			}
 		} else if !isClosingAfterCopy, let lit, lit == target, clipboard != ClipboardCard(id: lit) {
 			// ⌘Y or clicking away keeps the card the user arrowed to.
-			Task { await self.writeAfterClose(ClipboardCard(id: lit), restoring: false, presentation: shown) }
+			Task { await self.writeAfterClose(ClipboardCard(id: lit), restoring: false, presentation: shown, browse: browse) }
+		} else if let pick, clips.contains(where: { $0.id == pick.id }) {
+			// A pick still loading is kept, never lost to the close.
+			Task { await self.writeAfterClose(pick, restoring: false, pick: true, presentation: shown, browse: browse) }
 		}
 		isClosing = true
 		closeCount += 1
