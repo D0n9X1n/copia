@@ -108,7 +108,12 @@ public struct StripView: View {
 					.background(Theme.card, in: .capsule)
 					.accessibilityLabel(model.storageStatus.message)
 			}
-			Spacer()
+			if let hint = model.restoreHint {
+				RestoreHintView(hint: hint, highContrast: highContrast, copied: model.clipboard?.id, reduceMotion: reduceMotion)
+					.fixedSize()
+					.transition(reduceMotion ? .opacity : .scale(scale: 0.85, anchor: .leading).combined(with: .opacity))
+			}
+			Spacer(minLength: 12)
 			if model.paused {
 				Label("Capture paused", systemImage: "pause.fill")
 					.font(.system(size: 11, weight: .semibold))
@@ -119,12 +124,15 @@ public struct StripView: View {
 			Text(countLabel)
 				.font(.system(size: 11, weight: .medium).monospacedDigit())
 				.foregroundStyle(Theme.glassInk2(highContrast: highContrast))
+				.lineLimit(1).fixedSize()
 			Button { model.actions.openSettings() } label: { Image(systemName: "gearshape") }
 				.buttonStyle(.plain).accessibilityLabel("Settings").help("Open Settings")
 		}
-		.padding(.leading, 16)
+		// Search lines up with the first card.
+		.padding(.leading, Theme.rowPadding)
 		.padding(.trailing, 20)
 		.padding(.top, 6)
+		.animation(reduceMotion ? .linear(duration: 0.12) : .spring(response: 0.28, dampingFraction: 0.78), value: model.restoreHint)
 	}
 
 	private var countLabel: String {
@@ -141,7 +149,7 @@ public struct StripView: View {
 			emptyState(symbol: "list.clipboard", title: "Nothing copied yet",
 				detail: "Copy anything with ⌘C and it appears here.")
 		} else if visible.isEmpty {
-			emptyState(symbol: "magnifyingglass", title: "No matches for “\(model.query)”", detail: "⎋ clears search")
+			emptyState(symbol: "magnifyingglass", title: "No matches for “\(model.query)”", key: ("esc", "Escape"), detail: "clears search")
 		} else {
 			HistoryRow(clips: visible, position: row, overrides: overrides, reduced: reduceMotion, model: model) { clip, index in
 				card(clip, index: index).transition(transition(for: clip.id))
@@ -184,10 +192,12 @@ public struct StripView: View {
 		return ClipCard(clip: clip, tint: tint, icon: sources.icon(for: clip.sourceBundleID),
 			badge: model.badge(at: index), hovered: model.hoveredID == clip.id, selected: selected,
 			removing: model.removingIDs.contains(clip.id), age: ClipCard.relative(clip.timestamp, now: timestamp), highlight: model.query, thumbnails: thumbnails,
-			animator: model.animator, showsPin: showsPin, pinControl: true)
+			animator: model.animator, showsPin: showsPin, pinControl: true, onClipboard: primary && model.lensOnClipboard)
 			.background {
 				if primary {
-					LensRing(removing: model.removingIDs.contains(clip.id)).matchedGeometryEffect(id: "lens", in: lensSpace)
+					LensRing(removing: model.removingIDs.contains(clip.id), onClipboard: model.lensOnClipboard, highContrast: highContrast)
+						.animation(LensRing.fillIn(onClipboard: model.lensOnClipboard, reduced: reduceMotion), value: model.lensOnClipboard)
+						.matchedGeometryEffect(id: "lens", in: lensSpace)
 						.allowsHitTesting(false)
 				}
 			}
@@ -222,6 +232,7 @@ public struct StripView: View {
 				})
 			.accessibilityElement(children: .ignore)
 			.accessibilityLabel(CardAccessibility(clip: clip, now: timestamp).label)
+			.accessibilityValue(model.clipboard?.id == clip.id ? "On clipboard" : "")
 			.accessibilityAddTraits(selected ? .isSelected : [])
 			.accessibilityActions {
 				ForEach(CardAction.allCases, id: \.self) { action in
@@ -245,12 +256,18 @@ public struct StripView: View {
 		}
 	}
 
-	private func emptyState(symbol: String, title: String, detail: String) -> some View {
+	/// `key`, when set, is drawn as a keycap before `detail` and spoken by name.
+	private func emptyState(symbol: String, title: String, key: (shown: String, spoken: String)? = nil, detail: String) -> some View {
 		VStack(spacing: 10) {
 			Image(systemName: symbol).font(.system(size: 40, weight: .regular)).foregroundStyle(Theme.ink.opacity(0.55))
 			Text(title).font(.system(size: 20, weight: .semibold)).foregroundStyle(Theme.ink)
 				.lineLimit(1).truncationMode(.tail)
-			Text(detail).font(.system(size: 13)).foregroundStyle(Theme.glassInk2(highContrast: highContrast))
+			HStack(spacing: 6) {
+				if let key { KeyCap(label: key.shown, highContrast: highContrast) }
+				Text(detail).font(.system(size: 13)).foregroundStyle(Theme.glassInk2(highContrast: highContrast))
+			}
+			.accessibilityElement(children: .ignore)
+			.accessibilityLabel(key.map { "\($0.spoken) \(detail)" } ?? detail)
 		}
 		.frame(maxWidth: .infinity, maxHeight: .infinity)
 		.padding(.bottom, 12)
@@ -291,31 +308,111 @@ private struct StripSlide<Content: View>: View {
 	}
 }
 
-/// The selection lens (brief): a 3 pt accent stroke over a 12% accent fill, radius 21, 5 pt outside the card, behind it.
-/// An opaque halo band edges the stroke outside and fills the gap inside it (tucking 1 pt under the card), so the ring
-/// reaches 3:1 on any glass; the fill tints that band. The lens fades with a deleting card, so no block shows.
+/// The selection lens (brief): radius 21, 5 pt outside the card, behind it. An opaque halo band edges the ring outside
+/// and fills the gap inside it (tucking 1 pt under the card), so the ring reaches 3:1 on any glass.
+/// On the clipboard: a 3 pt accent stroke over a 12% accent fill, and the card itself takes a 6% accent wash
+/// (`ClipCard.onClipboard`). Selected but not on the clipboard: the same ring in a quiet grey, untinted, as macOS draws
+/// a selection that is not the active one. The lens fades with a deleting card,
+/// so no block shows.
 struct LensRing: View {
 	var removing = false
+	var onClipboard = true
+	var highContrast = false
 	static let fillOpacity = Theme.lensFillOpacity
 	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
+
+	/// Grey to accent fades in once the write lands; accent to grey is instant, so the lens never claims a copy early.
+	static func fillIn(onClipboard: Bool, reduced: Bool) -> Animation? {
+		guard onClipboard else { return nil }
+		return reduced ? .linear(duration: 0.1) : .easeOut(duration: 0.12)
+	}
 
 	var body: some View {
 		ZStack {
 			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
 				.strokeBorder(Theme.lensHalo, lineWidth: Self.band)
 			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-				.fill(Color.accentColor.opacity(Self.fillOpacity))
+				.strokeBorder(Theme.lensIdle(highContrast: highContrast), lineWidth: 3)
 				.padding(Theme.lensHaloWidth)
-			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-				.strokeBorder(Color.accentColor, lineWidth: 3)
-				.padding(Theme.lensHaloWidth)
+				.opacity(onClipboard ? 0 : 1)
+			ZStack {
+				RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+					.fill(Color.accentColor.opacity(Self.fillOpacity))
+				RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+					.strokeBorder(Color.accentColor, lineWidth: 3)
+			}
+			.padding(Theme.lensHaloWidth)
+			.opacity(onClipboard ? 1 : 0)
 		}
 		.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
 		.opacity(removing ? 0 : 1)
 	}
 }
 
-/// The search capsule: 32 pt tall, 240 wide, 360 with a query.
+/// After a browse copies: pops in beside Search to confirm the copy and, outside a search, offer ⎋ as the way back.
+struct RestoreHintView: View {
+	let hint: RestoreHint
+	let highContrast: Bool
+	/// The card on the clipboard; each new one bounces the check.
+	let copied: UUID?
+	let reduceMotion: Bool
+
+	var body: some View {
+		HStack(spacing: 8) {
+			Image(systemName: "checkmark.circle.fill")
+				.font(.system(size: 13, weight: .semibold))
+				.foregroundStyle(.white, Color.accentColor)
+				.symbolEffect(.bounce, options: .speed(1.4), value: reduceMotion ? nil : copied)
+			Text("Copied")
+				.font(.system(size: 12, weight: .semibold))
+				.foregroundStyle(Theme.ink)
+			if hint != .copied {
+				Rectangle().fill(Theme.stroke(hovered: true, highContrast: highContrast)).frame(width: 1, height: 14)
+				if hint == .restore { KeyCap(label: "esc", highContrast: highContrast) }
+				Text(hint == .restore ? "restores previous" : "Previous clipboard can’t be restored")
+					.font(.system(size: 12))
+					.foregroundStyle(Theme.ink2(highContrast: highContrast))
+					.lineLimit(1)
+					.truncationMode(.tail)
+			}
+		}
+		.padding(.leading, 8).padding(.trailing, 12).frame(height: 28)
+		.background(Theme.card, in: .capsule)
+		.overlay { Capsule().strokeBorder(Theme.stroke(hovered: false, highContrast: highContrast)) }
+		.shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+		.accessibilityElement(children: .ignore)
+		.accessibilityLabel(Self.spoken(hint))
+	}
+
+	static func spoken(_ hint: RestoreHint) -> String {
+		switch hint {
+		case .restore: "Copied. Escape restores the previous clipboard"
+		case .unsaved: "Copied. Previous clipboard can’t be restored"
+		case .copied: "Copied"
+		}
+	}
+}
+
+/// A key drawn as a small keycap, for hints that name a key.
+struct KeyCap: View {
+	let label: String
+	let highContrast: Bool
+
+	var body: some View {
+		Text(label)
+			.font(.system(size: 10, weight: .semibold))
+			.foregroundStyle(Theme.ink)
+			.padding(.horizontal, 5)
+			.frame(minWidth: 26, minHeight: 18)
+			.background(Theme.field, in: .rect(cornerRadius: 4, style: .continuous))
+			.overlay {
+				if highContrast { RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(Theme.ink, lineWidth: 1) }
+			}
+	}
+}
+
+/// The search capsule: 32 pt tall, 240 wide, 360 with a query. In a narrow strip it gives up width (down to 160)
+/// before the count, the chip or the gear do.
 struct SearchPill: View {
 	@Bindable var model: StripModel
 	let focus: SearchFocus
@@ -326,8 +423,9 @@ struct SearchPill: View {
 			SearchField(model: model, focus: focus)
 		}
 		.padding(.horizontal, 10)
-		.frame(width: model.query.isEmpty ? 240 : 360, height: 32)
+		.frame(minWidth: 160, maxWidth: model.query.isEmpty ? 240 : 360, minHeight: 32, maxHeight: 32)
 		.background(Theme.field, in: .capsule)
+		.layoutPriority(1)
 	}
 }
 

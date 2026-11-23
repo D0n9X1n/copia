@@ -17,6 +17,9 @@ public enum Theme {
 		/// Metadata ink for text directly on the glass, whose backing varies with the wallpaper (ink2 is for solid cards).
 		static let glassInk2Light: UInt32 = 0x48484D
 		static let glassInk2Dark: UInt32 = 0xE0E0E5
+		/// The selected-only lens ring on a white halo and on a black one.
+		static let lensIdleLight: UInt32 = 0x86868B
+		static let lensIdleDark: UInt32 = 0x98989D
 	}
 
 	/// Dark-mode black scrim over the glass: bounds how light the backing gets over a bright wallpaper.
@@ -36,6 +39,14 @@ public enum Theme {
 
 	/// The lens's 12% accent fill (brief).
 	public static let lensFillOpacity = 0.12
+
+	/// The on-clipboard card's accent wash: light enough that ink2 keeps 4.5:1 for every macOS accent.
+	public static let cardWashOpacity = 0.06
+
+	/// The card surface under the on-clipboard wash.
+	static func cardWash(accent: SIMD3<Double>, dark: Bool) -> SIMD3<Double> {
+		composite(accent, over: rgb(dark ? Hex.cardDark : Hex.cardLight), alpha: cardWashOpacity)
+	}
 
 	/// The gap inside the ring: the halo tinted by the accent fill.
 	static func lensGap(accent: SIMD3<Double>, halo: SIMD3<Double>) -> SIMD3<Double> {
@@ -109,6 +120,30 @@ public enum Theme {
 
 	/// The lens's halo: fills the gap inside the accent ring and edges it outside, so the ring reaches 3:1 on any glass.
 	public static let lensHalo = Color(nsColor: NSColor(name: nil) { appearance in
+		let halo = currentHalo(appearance)
+		return NSColor(srgbRed: halo.x, green: halo.y, blue: halo.z, alpha: 1)
+	})
+
+	/// The ring of a card that is selected but not on the clipboard: grey on the same halo.
+	public static func lensIdle(highContrast: Bool) -> Color {
+		Color(nsColor: lensIdleNS(highContrast: highContrast))
+	}
+
+	public static func lensIdleNS(highContrast: Bool) -> NSColor {
+		NSColor(name: nil) { appearance in
+			let grey = lensIdle(halo: currentHalo(appearance), highContrast: highContrast)
+			return NSColor(srgbRed: grey.x, green: grey.y, blue: grey.z, alpha: 1)
+		}
+	}
+
+	/// A neutral grey that keeps 3:1 against the halo; Increase Contrast uses the ink.
+	static func lensIdle(halo: SIMD3<Double>, highContrast: Bool) -> SIMD3<Double> {
+		let lightHalo = luminance(halo) > 0.5
+		if highContrast { return rgb(lightHalo ? Hex.inkLight : Hex.inkDark) }
+		return rgb(lightHalo ? Hex.lensIdleLight : Hex.lensIdleDark)
+	}
+
+	static func currentHalo(_ appearance: NSAppearance) -> SIMD3<Double> {
 		let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
 		var accent = SIMD3<Double>(0, 0.48, 1)
 		appearance.performAsCurrentDrawingAppearance {
@@ -116,9 +151,8 @@ public enum Theme {
 				accent = SIMD3(c.redComponent, c.greenComponent, c.blueComponent)
 			}
 		}
-		let halo = lensHalo(accent: accent, dark: dark)
-		return NSColor(srgbRed: halo.x, green: halo.y, blue: halo.z, alpha: 1)
-	})
+		return lensHalo(accent: accent, dark: dark)
+	}
 
 	/// Card stroke: 8% black / 10% white, 16% on hover, 25% with Increase Contrast.
 	public static func stroke(hovered: Bool, highContrast: Bool) -> Color {

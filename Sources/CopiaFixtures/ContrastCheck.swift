@@ -114,7 +114,8 @@ public enum ContrastCheck {
 	/// The lens ring whose outer edge is `ring` (points): its 3 pt stroke against the pixels just outside it and the
 	/// 2 pt gap inside it, sampled along the middle of all four sides. Returns a low (5th) percentile, so one stray
 	/// pixel cannot pass or fail it.
-	public static func lens(in bitmap: Bitmap, ring: CGRect, scale: CGFloat) -> Double {
+	/// `percentile` picks a lower or higher point: a higher one asks only whether most of a ring is there.
+	public static func lens(in bitmap: Bitmap, ring: CGRect, scale: CGFloat, percentile p: Double = 0.05) -> Double {
 		let (outside, stroke, gap) = (-1.0, 1.5, 4.0)  // points from the outer edge
 		var ratios: [Double] = []
 		func sample(_ at: (Double) -> (x: Double, y: Double)) {
@@ -131,7 +132,7 @@ public enum ContrastCheck {
 			sample { (ring.minX + $0, y) }
 			sample { (ring.maxX - $0, y) }
 		}
-		return percentile(ratios, 0.05)
+		return percentile(ratios, p)
 	}
 
 	/// Measures every probe in `directory/manifest.json`. Each row needs `file`, `regionWidth` (points) and `probes`.

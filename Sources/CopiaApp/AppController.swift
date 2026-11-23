@@ -68,6 +68,16 @@ public final class AppController {
 	let watcher: PasteboardWatcher
 	let previewer: Previewer
 	let paster: Paster
+	/// The pasteboard the watcher reads; its change count says whether the clipboard still holds what Copia knows.
+	private let clipboardSource: PasteboardSource
+	/// The stored clip Copia last wrote or captured (by key, so a reload can't lose it), with the change that put it there.
+	private var onClipboard: (change: Int, key: String, plain: Bool)?
+	/// The pasteboard change of Copia's own last write. A restore writes only while the pasteboard still has it.
+	private var ownWrite: Int?
+	/// The newest pasteboard change Copia has seen, from its own writes or the watcher.
+	private var lastChange = Int.min
+	/// Tests: runs after the store read, right before the pasteboard write.
+	var beforePasteboardWrite: () -> Void = {}
 	private let sources: SourceAppearance
 	private let observesWorkspace: Bool
 	private var observers: [NSObjectProtocol] = []
@@ -111,6 +121,7 @@ public final class AppController {
 		sources = observesWorkspace ? .shared : .fixtures
 		store = try ClipStore(directory: directory, files: storageFiles)
 		paster = Paster(pasteboard: writerBoard)
+		clipboardSource = pasteboard
 		if observesWorkspace {
 			watcher = PasteboardWatcher(source: pasteboard, ignoredApps: Set(prefs.ignoredApps))
 		} else {
@@ -203,8 +214,17 @@ public final class AppController {
 			let close = model.closeCount
 			do {
 				let items = try await store.items(for: key)
-				guard model.closeCount == close else { throw CancellationError() }
-				try paster.write(items, plain: plain)
+				// Checked after the read: a write whose card, presentation or browse moved on meanwhile is dropped.
+				guard model.closeCount == close, model.writeIsCurrent() else { throw CancellationError() }
+				beforePasteboardWrite()
+				// ⎋'s restore: Paster checks right before clearing that no copy was made elsewhere since Copia's last write.
+				let expected: Int? = model.writeRequiresOwnership ? (ownWrite ?? .min) : nil
+				let change = try paster.write(items, plain: plain, expecting: expected)
+				ownWrite = change
+				lastChange = max(lastChange, change)
+				onClipboard = (change, key, plain)
+			} catch is CancellationError {
+				throw CancellationError()
 			} catch { await refreshStorageStatus(); throw actionError(error) }
 		}
 		model.actions.delete = { [weak self] ids in
@@ -255,13 +275,26 @@ public final class AppController {
 			guard let self, let keys = try? await store.search(query) else { return [] }
 			return Set(keys.map(ClipDraft.uuid(forKey:)))
 		}
+		watcher.onChange = { [weak self] change in
+			guard let self, change != ownWrite else { return }
+			// Copied elsewhere, captured or not: Copia no longer knows the clipboard until a capture says otherwise.
+			lastChange = max(lastChange, change)
+			onClipboard = nil
+			if model.cardsMounted { model.clipboardChanged(to: nil) }
+		}
 		watcher.onDraft = { [weak self] draft in
 			guard let self else { return }
+			let change = watcher.lastCaptureChange
 			Task {
 				guard self.model.storageStatus != .recoveryRequired else { return }
 				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
 				await self.reload()
+				// A newer change (Copia's own write, or another copy) since this one wins.
+				guard change >= self.lastChange else { return }
+				self.onClipboard = (change, result.clip.key, false)
+				// Copied elsewhere while the strip is open: the lens and ⎋ follow it.
+				if self.model.cardsMounted { self.model.clipboardChanged(to: self.clipboardCard()) }
 			}
 		}
 		previewer.onSaved = { [weak self] in Task { await self?.reload() } }
@@ -281,10 +314,17 @@ public final class AppController {
 
 	// MARK: Strip
 
+	/// The stored card the clipboard holds right now, if Copia knows it.
+	private func clipboardCard() -> ClipboardCard? {
+		guard let onClipboard, onClipboard.change == clipboardSource.changeCount,
+			let id = index.keys.first(where: { $0.value == onClipboard.key })?.key else { return nil }
+		return ClipboardCard(id: id, plain: onClipboard.plain)
+	}
+
 	public func toggleHistory(on chosenScreen: NSScreen? = nil) {
 		if panel.isVisible, model.cardsMounted { model.beginClose(); return }
 		guard let screen = chosenScreen ?? NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main else { return }
-		model.open()
+		model.open(clipboard: clipboardCard())
 		panel.show(on: screen, visibleFrame: visibleFrameOverride)
 		focus.focus()
 		DispatchQueue.main.async { [weak self] in self?.model.animateIn() }

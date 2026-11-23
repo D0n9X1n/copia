@@ -726,3 +726,213 @@ extension WindowTests.InputTests {
 		#expect(host.model.cardsMounted && !host.model.isClosing)
 	}
 }
+
+/// #26: arrows in Results move the lens and the clipboard follows; ⎋ restores; arrows in Search edit text.
+extension WindowTests.InputTests {
+	static let home = (String(UnicodeScalar(NSHomeFunctionKey)!), UInt16(115))
+	static let end = (String(UnicodeScalar(NSEndFunctionKey)!), UInt16(119))
+	static let escapeKey = ("\u{1b}", UInt16(53))
+	var settleMs: Int { Int(StripModel.browseSettle.components.attoseconds / 1_000_000_000_000_000) + 250 }
+
+	@Test func arrowKeysInResultsCopyWhereTheLensRestsAndKeepTheStripOpen() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == Fixtures.mixed[2].id)
+		#expect(host.log.entries == ["write \(Fixtures.mixed[2].id) plain=false"])
+		#expect(host.model.lensOnClipboard && host.model.cardsMounted)
+		host.key(Self.leftArrow.0, code: Self.leftArrow.1)
+		await host.settle(settleMs)
+		#expect(host.log.entries.last == "write \(Fixtures.mixed[1].id) plain=false")
+	}
+
+	@Test func homeAndEndJumpAndCopy() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		host.key(Self.end.0, code: Self.end.1)
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == Fixtures.mixed.last!.id)
+		host.key(Self.home.0, code: Self.home.1)
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == Fixtures.mixed[0].id)
+		#expect(host.log.entries == ["write \(Fixtures.mixed.last!.id) plain=false", "write \(Fixtures.mixed[0].id) plain=false"])
+	}
+
+	@Test func arrowKeysInSearchBrowseTheMatchesAndKeepTheQuery() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		host.key("r", code: 15); host.key("e", code: 14)
+		await host.settle()
+		try #require(host.model.intent == .search && host.model.query == "re")
+		let matches = host.model.visibleClips.map(\.id)
+		try #require(matches.count >= 3)
+		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+		host.key(Self.leftArrow.0, code: Self.leftArrow.1)
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == matches[1])
+		#expect(host.log.entries == ["write \(matches[1]) plain=false"])
+		#expect(host.model.lensOnClipboard)
+		host.key(Self.end.0, code: Self.end.1)
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == matches.last)
+		host.key(Self.home.0, code: Self.home.1)
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == matches[0])
+		#expect(host.log.entries == ["write \(matches[1]) plain=false", "write \(matches.last!) plain=false", "write \(matches[0]) plain=false"])
+		// Still searching: the query is intact and ⌫ edits it, never a card.
+		#expect(host.model.intent == .search && host.model.query == "re")
+		host.key("\u{7f}", code: 51)
+		await host.settle()
+		#expect(host.model.query == "r")
+		#expect(host.log.entries.count == 3 && host.model.clips.count == Fixtures.mixed.count)
+	}
+
+	@Test func modifiedArrowsInSearchStillEditTheText() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		host.key("a", code: 0); host.key("b", code: 11)
+		await host.settle()
+		let editor = try #require(host.panel.firstResponder as? NSTextView)
+		let selection = host.model.selectedID
+		let keys: [((String, UInt16), NSEvent.ModifierFlags)] = [(Self.leftArrow, .shift), (Self.leftArrow, .option), (Self.rightArrow, [.shift, .option])]
+		for (arrow, flags) in keys {
+			for type in [NSEvent.EventType.keyDown, .keyUp] {
+				let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags.union([.function, .numericPad]),
+					timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: host.panel.windowNumber, context: nil,
+					characters: arrow.0, charactersIgnoringModifiers: arrow.0, isARepeat: false, keyCode: arrow.1)!
+				host.panel.sendEvent(event)
+			}
+		}
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == selection && host.log.entries.isEmpty)
+		#expect(host.model.query == "ab" && editor.selectedRange().length > 0, "⇧⌥ arrows select text")
+	}
+
+	@Test func commandArrowsInSearchMoveTheCaretNotTheCards() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		host.key("a", code: 0); host.key("b", code: 11)
+		await host.settle()
+		let editor = try #require(host.panel.firstResponder as? NSTextView)
+		let selection = host.model.selectedID
+		for (arrow, caret) in [(Self.leftArrow, 0), (Self.rightArrow, 2)] {
+			for type in [NSEvent.EventType.keyDown, .keyUp] {
+				let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.command, .function, .numericPad],
+					timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: host.panel.windowNumber, context: nil,
+					characters: arrow.0, charactersIgnoringModifiers: arrow.0, isARepeat: false, keyCode: arrow.1)!
+				host.panel.sendEvent(event)
+			}
+			await host.settle()
+			#expect(editor.selectedRange() == NSRange(location: caret, length: 0))
+		}
+		await host.settle(settleMs)
+		#expect(host.model.selectedID == selection && host.log.entries.isEmpty && host.model.intent == .search)
+	}
+
+	@Test func losingKeyFocusKeepsTheCardTheUserArrowedTo() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		var closed = false
+		let observer = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: host.panel, queue: .main) { _ in
+			MainActor.assumeIsolated { closed = true; host.model.beginClose() }
+		}
+		defer { NotificationCenter.default.removeObserver(observer) }
+		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+		// Another window takes key before the lens rests, as clicking into an app or opening Settings does.
+		let other = NSWindow(contentRect: CGRect(x: -5000, y: -5000, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+		other.isReleasedWhenClosed = false
+		other.makeKeyAndOrderFront(nil)
+		defer { other.orderOut(nil) }
+		await host.settle(settleMs)
+		#expect(closed)
+		#expect(host.log.entries == ["write \(Fixtures.mixed[1].id) plain=false"])
+	}
+
+	@Test func escapeAfterArrowingRestoresTheOpenTimeCard() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle()
+		host.panel.hide(); host.model.beginClose(); await host.settle()
+		let a = Fixtures.mixed[0].id
+		host.model.open(clipboard: ClipboardCard(id: a)); host.panel.orderFrontRegardless(); host.panel.makeKey()
+		host.model.animateIn(); await host.settle(); host.focus.focus()
+		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+		await host.settle(settleMs)
+		#expect(host.model.restoreHint == .restore)
+		host.key(Self.escapeKey.0, code: Self.escapeKey.1)
+		await host.settle(settleMs)
+		#expect(host.log.entries == ["write \(Fixtures.mixed[1].id) plain=false", "write \(a) plain=false"])
+		#expect(host.model.selectedID == a && !host.model.cardsMounted)
+	}
+}
+
+/// #26 in the window: ⌘→ routing, the lens fill, and VoiceOver's "On clipboard".
+extension WindowTests.InputTests {
+	@Test func commandArrowsJumpThroughTheFieldEditorAndCopy() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		for (arrow, expected) in [(Self.rightArrow, Fixtures.mixed.last!.id), (Self.leftArrow, Fixtures.mixed[0].id)] {
+			for type in [NSEvent.EventType.keyDown, .keyUp] {
+				let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.command, .function, .numericPad],
+					timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: host.panel.windowNumber, context: nil,
+					characters: arrow.0, charactersIgnoringModifiers: arrow.0, isARepeat: false, keyCode: arrow.1)!
+				host.panel.sendEvent(event)
+			}
+			await host.settle(settleMs)
+			#expect(host.model.selectedID == expected)
+		}
+		#expect(host.log.entries == ["write \(Fixtures.mixed.last!.id) plain=false", "write \(Fixtures.mixed[0].id) plain=false"])
+	}
+
+	@Test func voiceOverHearsWhichCardIsOnTheClipboard() async throws {
+		let host = InputHost(); defer { host.close() }; await host.settle(); host.focus.focus()
+		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
+		await host.settle(settleMs)
+		let on = host.cards.filter { $0.valueDescription == "On clipboard" }
+		#expect(on.count == 1 && on.first?.label == CardAccessibility(clip: Fixtures.mixed[1], now: Fixtures.now).label)
+	}
+}
+
+extension WindowTests.LensTests {
+	@Test func theLensIsAccentOnTheClipboardCardAndGreyOtherwise() async throws {
+		let host = InputHost(); defer { host.close() }
+		host.panel.setFrameOrigin(try #require(NSScreen.main).visibleFrame.origin); host.panel.alphaValue = 1
+		host.model.beginClose(); await host.settle()
+		host.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[0].id)); host.panel.orderFrontRegardless(); host.model.animateIn()
+		await host.settle(400)
+		let v = host.panel.host
+		func ringRect(_ clip: Clip) throws -> CGRect {
+			let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: clip, now: Fixtures.now).label })
+			return CGRect(x: card.frame.midX - host.panel.frame.minX - Theme.cardSize.width / 2,
+				y: host.panel.frame.maxY - card.frame.midY - Theme.cardSize.height / 2,
+				width: Theme.cardSize.width, height: Theme.cardSize.height).insetBy(dx: -Theme.lensOutset, dy: -Theme.lensOutset)
+		}
+		/// The ring's weakest edge against its halo, its color in the middle of the top edge, and the card's own
+		/// surface in the empty middle of the footer.
+		func ring(_ clip: Clip) throws -> (contrast: Double, color: SIMD3<Double>, surface: SIMD3<Double>) {
+			let rep = try #require(v.bitmapImageRepForCachingDisplay(in: v.bounds))
+			v.cacheDisplay(in: v.bounds, to: rep)
+			let image = try #require(rep.cgImage), rect = try ringRect(clip), scale = CGFloat(image.width) / v.bounds.width
+			let contrast = ContrastCheck.lens(in: ContrastCheck.Bitmap(image), ring: rect, scale: scale)
+			func sample(_ x: CGFloat, _ y: CGFloat) throws -> SIMD3<Double> {
+				let c = try #require(rep.colorAt(x: Int(x * scale), y: Int(y * scale))?.usingColorSpace(.sRGB))
+				return SIMD3(c.redComponent, c.greenComponent, c.blueComponent)
+			}
+			let footer = rect.maxY - Theme.lensOutset - Theme.footerHeight / 2
+			return (contrast, try sample(rect.midX, rect.minY + 1.5), try sample(rect.midX + 20, footer))
+		}
+		var accent = SIMD3<Double>(0, 0, 0)
+		v.effectiveAppearance.performAsCurrentDrawingAppearance {
+			let c = NSColor.controlAccentColor.usingColorSpace(.sRGB)!
+			accent = SIMD3(c.redComponent, c.greenComponent, c.blueComponent)
+		}
+		func chroma(_ c: SIMD3<Double>) -> Double { c.max() - c.min() }
+		let copied = try ring(Fixtures.mixed[0])
+		#expect(copied.contrast > 2, "on the clipboard: an unbroken ring")
+		host.model.move(1); await host.settle(400)
+		#expect(!host.model.lensOnClipboard)
+		let selected = try ring(Fixtures.mixed[1])
+		#expect(selected.contrast > 2, "only selected: an unbroken ring too")
+		#expect(chroma(selected.color) < 0.06, "only selected: grey \(selected.color)")
+		// A grey (Graphite) accent can't be told apart by hue; the tint and the top-bar chip carry it then.
+		#expect(chroma(selected.surface) < 0.01, "only selected: the card keeps its plain surface \(selected.surface)")
+		if chroma(accent) > 0.3 {
+			#expect(chroma(copied.color) > 0.3, "on the clipboard: the accent \(copied.color)")
+			#expect(chroma(copied.surface) > 0.025, "on the clipboard: the card itself takes a light accent wash \(copied.surface)")
+		}
+	}
+}

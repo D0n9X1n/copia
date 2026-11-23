@@ -54,3 +54,14 @@ public enum Toast: Equatable, Sendable {
 		}
 	}
 }
+
+/// A card on the clipboard, and whether it was written as plain text.
+public struct ClipboardCard: Equatable, Sendable {
+	public var id: UUID
+	public var plain: Bool
+	public init(id: UUID, plain: Bool = false) { self.id = id; self.plain = plain }
+}
+
+/// The top-bar chip while browsing has changed the clipboard: ⎋ restores, the previous content was never saved, or (in
+/// a search, where ⎋ clears the query first) just the copy.
+public enum RestoreHint: Equatable, Sendable { case restore, unsaved, copied }

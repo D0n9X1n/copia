@@ -34,6 +34,8 @@ public final class GeneralPasteboard: PasteboardSource {
 @MainActor
 public final class PasteboardWatcher {
 	public var onDraft: (ClipDraft) -> Void = { _ in }
+	/// Every pasteboard change the watcher sees, kept or skipped, paused or not, before any read. Copia's own writes included.
+	public var onChange: (Int) -> Void = { _ in }
 	public var ignoredApps: Set<String>
 	public private(set) var paused = false
 	public private(set) var pollCount = 0
@@ -47,6 +49,8 @@ public final class PasteboardWatcher {
 	let frontmost: () -> String?
 	let appName: (String) -> String?
 	private var lastChange: Int
+	/// The pasteboard change of the copy handed to `onDraft`, set just before the call.
+	public private(set) var lastCaptureChange = 0
 	private var log: ActivationLog
 	private var timer: Timer?
 	private lazy var timerTarget = PollTarget(self)
@@ -125,6 +129,7 @@ public final class PasteboardWatcher {
 		// Every poll closes the window, so only apps in front since the previous poll can count as the source.
 		guard change != lastChange else { log.roll(at: pollTime); return }
 		lastChange = change
+		onChange(change)
 		let candidates = log.candidates(until: pollTime, currentFrontmost: frontmost())
 		guard !paused else { return }
 		let types = source.typeIdentifiers
@@ -140,6 +145,6 @@ public final class PasteboardWatcher {
 			sourceName: sourceID.flatMap(appName), copiedAt: now())
 		decision = Capture.decide(types: types, draft: draft, candidates: candidates, ignoredApps: ignoredApps)
 		lastDecision = decision
-		if decision == .keep { onDraft(draft) }
+		if decision == .keep { lastCaptureChange = change; onDraft(draft) }
 	}
 }
