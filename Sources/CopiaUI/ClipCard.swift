@@ -136,9 +136,9 @@ struct ClipCard: View {
 	let animator: Animator
 	/// Shows the footer pin button; a pinned card always shows its filled pin.
 	var showsPin = false
-	/// Toggles the pin. A reference, not a closure, so a clock tick that leaves the card's values alone does not re-evaluate it.
-	/// Nil keeps the static footer (design renders).
-	var pinTarget: StripModel?
+	/// Reserves the footer pin slot, so the strip's click gesture can toggle the pin there. False keeps the static
+	/// footer (design renders).
+	var pinControl = false
 
 	/// The pin button's hit area in card coordinates: the footer's trailing 24×24 slot. The strip is always laid out
 	/// left to right, so this is the right-hand end. The card's click gesture ignores presses that start on a visible pin.
@@ -222,9 +222,9 @@ struct ClipCard: View {
 					.background(Theme.field, in: .rect(cornerRadius: Theme.smallRadius, style: .continuous))
 					.transition(.opacity.combined(with: .scale(scale: 0.8)))
 			}
-			if let pinTarget {
+			if pinControl {
 				// The slot is reserved even when empty, so hovering never reflows the footer text.
-				PinButton(pinned: clip.isPinned, shown: clip.isPinned || showsPin, highContrast: highContrast, id: clip.id, target: pinTarget)
+				PinGlyph(pinned: clip.isPinned, shown: clip.isPinned || showsPin, highContrast: highContrast)
 			} else if clip.isPinned {
 				Image(systemName: "pin.fill").foregroundStyle(Theme.ink)
 			}
@@ -252,46 +252,33 @@ struct ClipCard: View {
 	}
 }
 
-/// The footer's pin toggle: filled when pinned, an outline on the hovered or primary card, otherwise an empty slot.
-private struct PinButton: View {
+/// The footer's pin: filled when pinned, an outline on the hovered or primary card, otherwise an empty slot.
+/// A plain image, not a Button: a Button mounted on the primary card added ~5 ms to every ⌘Y open.
+/// StripView's card gesture turns a click that starts and ends on it into a pin toggle.
+private struct PinGlyph: View {
 	let pinned: Bool
 	let shown: Bool
 	let highContrast: Bool
-	let id: UUID
-	let target: StripModel
 	@State private var hovering = false
 
 	var body: some View {
 		Group {
 			if shown {
-				Button { target.request { await target.togglePin(id) } } label: {
-					Image(systemName: pinned ? "pin.fill" : "pin")
-						.font(.system(size: 11, weight: .semibold))
-						.foregroundStyle(pinned || hovering ? Theme.ink : Theme.ink2(highContrast: highContrast))
-						.frame(width: ClipCard.pinSlot.width, height: ClipCard.pinSlot.height)
-						.contentShape(.rect)
-				}
-				.buttonStyle(PinButtonStyle(hovering: hovering))
-				.onHover { hovering = $0 }
-				.help(pinned ? "Unpin" : "Pin")
+				Image(systemName: pinned ? "pin.fill" : "pin")
+					.font(.system(size: 11, weight: .semibold))
+					.foregroundStyle(pinned || hovering ? Theme.ink : Theme.ink2(highContrast: highContrast))
+					.frame(width: ClipCard.pinSlot.width, height: ClipCard.pinSlot.height)
+					.background {
+						if hovering { RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous).fill(Theme.field) }
+					}
+					.contentShape(.rect)
+					.onHover { hovering = $0 }
+					.help(pinned ? "Unpin" : "Pin")
 			} else {
 				Color.clear.allowsHitTesting(false)
 			}
 		}
 		.frame(width: ClipCard.pinSlot.width, height: ClipCard.pinSlot.height)
-	}
-}
-
-private struct PinButtonStyle: ButtonStyle {
-	let hovering: Bool
-
-	func makeBody(configuration: Configuration) -> some View {
-		configuration.label.background {
-			let shape = RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
-			// Pressed doubles the hover fill.
-			if hovering || configuration.isPressed { shape.fill(Theme.field) }
-			if configuration.isPressed { shape.fill(Theme.field) }
-		}
 	}
 }
 

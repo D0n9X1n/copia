@@ -184,7 +184,7 @@ public struct StripView: View {
 		return ClipCard(clip: clip, tint: tint, icon: sources.icon(for: clip.sourceBundleID),
 			badge: model.badge(at: index), hovered: model.hoveredID == clip.id, selected: selected,
 			removing: model.removingIDs.contains(clip.id), age: ClipCard.relative(clip.timestamp, now: timestamp), highlight: model.query, thumbnails: thumbnails,
-			animator: model.animator, showsPin: showsPin, pinTarget: model)
+			animator: model.animator, showsPin: showsPin, pinControl: true)
 			.background {
 				if primary {
 					LensRing(removing: model.removingIDs.contains(clip.id)).matchedGeometryEffect(id: "lens", in: lensSpace)
@@ -208,8 +208,13 @@ public struct StripView: View {
 				}
 				.onEnded { value in
 					// A click copies on release; a drag (the panel tracks the whole press) or a release away from the card does not.
-					guard let panel = focus.field?.window as? StripPanel, let count = panel.primaryClickCount, cardOwnsPress(value.startLocation),
-						CGRect(origin: .zero, size: Theme.cardSize).contains(value.location) else { return }
+					guard let panel = focus.field?.window as? StripPanel, let count = panel.primaryClickCount else { return }
+					guard cardOwnsPress(value.startLocation) else {
+						// A click that starts and ends on the visible pin toggles it, without copying or selecting.
+						if ClipCard.pinSlot.contains(value.location) { model.request { await model.togglePin(clip.id) } }
+						return
+					}
+					guard CGRect(origin: .zero, size: Theme.cardSize).contains(value.location) else { return }
 					// It is a double-click only if the press before it was a click on this same card, not on a pin or another card.
 					let double = count >= 2 && press.lastClick.map { $0.0 == panel.pressNumber &- 1 && $0.1 == clip.id } == true
 					press.lastClick = (panel.pressNumber, clip.id)
