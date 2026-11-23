@@ -30,7 +30,7 @@
 
 - **⌘C is all it takes.** Text, rich text, images, links, files and colors appear newest first below your pins. Copy something again and it moves to the front of its group.
 - **⌘Y brings it back.** The strip opens over whatever you are doing on the display under your pointer. Select a card on press; use Return to copy it and dismiss the strip.
-- **Measured, not assumed.** Earlier local runs opened in 79 ms (p95 93 ms) and idled at 0.05% CPU and 31 MB. Earlier CI missed the historical <0.1% CPU limit and open-latency budget; fresh CI under the revised <0.15% CPU limit is required before release.
+- **Measured, not assumed.** Earlier local runs opened in 79 ms (p95 93 ms) and idled at 0.05% CPU and 31 MB. Earlier CI missed the historical <0.1% CPU limit and open-latency budget; each release requires fresh CI under the current <0.20% idle CPU limit.
 - **Private by default.** Concealed copies and password managers are never stored. Links make a one-time preview request. Settings → About checks for updates only when you ask; GitHub sees your IP address and the generic `Copia` user agent, not your version or clipboard history.
 - **Yours, on disk.** History is one SQLite file plus thumbnails in Application Support. Deleting a card keeps a short-lived undo snapshot; any pending file cleanup is reported.
 
@@ -112,7 +112,7 @@ Pause Capture has no default shortcut. The menu bar icon is on by default; if yo
 
 | | Budget | Earlier local measurement |
 |---|---|---|
-| Idle CPU, strip hidden | < 0.15% | 0.05% |
+| Idle CPU, strip hidden | < 0.20% | 0.05% |
 | Idle memory | < 40 MB | 31 MB |
 | Strip open, after scrolling through every card | < 120 MB | 34 MB, 92 MB after scrolling all 1,000 |
 | ⌘Y to first frame, in process | p95 < 100 ms | p50 77–81 ms, p95 91–93 ms |

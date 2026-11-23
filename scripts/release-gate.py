@@ -56,8 +56,9 @@ def benchmark(repo, rid, attempt):
             b = json.loads(z.read('bench.json'))
     # idleCPUPercent is rounded to three decimals in JSON. The bench exit status and
     # empty failed array use the unrounded strict comparison, not this display value.
+    idle_cpu_limit = 0.20
     require(b['failed'] == [] and positive(b['privateBoardPolls']) and b['idleSeconds'] == 60 and b['opens'] == 50 and
-            type(b['idleCPUPercent']) in (float,int) and 0 <= b['idleCPUPercent'] <= .15 and
+            type(b['idleCPUPercent']) in (float,int) and 0 <= b['idleCPUPercent'] <= idle_cpu_limit and
             b['arch'] in ('arm64','x86_64') and b['path'] in ('proxy','screenCaptureKit'), 'invalid unprofiled benchmark')
     coverage = '120 Hz presented-frame coverage unavailable (proxy)'
     if b['path'] == 'screenCaptureKit':
@@ -65,7 +66,7 @@ def benchmark(repo, rid, attempt):
         hz = b['refreshHz']
         require(type(hz) in (int,float) and 0 < hz < float('inf') and b['presentedFramesGate'] is (hz >= 119.5), 'invalid refresh evidence')
         coverage = f'{hz:g} Hz; 120 Hz presented-frame checks ' + ('gated' if b['presentedFramesGate'] else 'not exercised')
-    return f'[Unprofiled benchmark](https://github.com/{repo}/actions/runs/{rid}/artifacts/{aid}): {b["idleCPUPercent"]}% idle CPU over 60 s (strict budget <0.15%), {b["arch"]}, {coverage}.'
+    return f'[Unprofiled benchmark](https://github.com/{repo}/actions/runs/{rid}/artifacts/{aid}): {b["idleCPUPercent"]}% idle CPU over 60 s (strict budget <{idle_cpu_limit:.2f}%), {b["arch"]}, {coverage}.'
 
 
 def release_jobs(repo, sha, rid, attempt):

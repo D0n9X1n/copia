@@ -178,6 +178,14 @@ pages=data[key]; print(json.dumps(pages if '--slurp' in args and '--paginate' in
         self.report['path']='proxy';del self.report['refreshHz'],self.report['presentedFramesGate'];self.bench()
         self.assertIn('120 Hz presented-frame coverage unavailable (proxy)', self.gate(True))
 
+    def test_idle_cpu_uses_the_raw_verdict_at_the_rounded_budget(self):
+        for value, failures, ok in [(0.189, [], True), (0.200, [], True),
+                                    (0.200, ['idleCPUPercent < 0.2'], False), (0.201, [], False)]:
+            with self.subTest(displayed=value, failures=failures):
+                self.report.update(idleCPUPercent=value, failed=failures); self.bench()
+                text = self.gate(ok)
+                if ok: self.assertIn('strict budget <0.20%', text)
+
     def test_paused_polling_cannot_be_the_accepted_idle_sample(self):
         self.report['privateBoardPolls']=0;self.bench();self.gate(False)
 

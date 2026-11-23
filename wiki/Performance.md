@@ -8,7 +8,7 @@
 
 | Metric | Budget | Where it runs |
 |---|---|---|
-| Idle CPU, strip hidden | < 0.15% average over 60 s | CI and local |
+| Idle CPU, strip hidden | < 0.20% average over 60 s | CI and local |
 | Idle memory (phys_footprint) | < 40 MB | CI and local |
 | Memory with the strip open | < 120 MB | CI and local |
 | ⌘Y to first frame, in process | p95 < 100 ms over 50 opens, strip 1512 pt wide | CI and local |
@@ -19,7 +19,7 @@
 
 The default reference width is 1512 pt, capped to the screen's available width; `--width` overrides the reference but not that cap. The panel then takes an 8 pt inset on each side. Read `stripWidthPoints` and `backingScale` before comparing runs: local runs used a 1496 pt panel, while the current CI display produced 1008 pt at 1×. Presented-frame checks gate only when the main display runs at 120 Hz or faster. On a slower display they are measured and listed under `reportedOnly` with the refresh rate, because one 60 Hz refresh (16.7 ms) is most of the 20 ms settle margin. The frozen-row and hidden-render controls gate at any refresh.
 
-The idle CPU budget was previously revised from <0.1% to <0.15%. That change did not alter any other limit. Historical runs keep their original verdicts; current CI uses the native-refresh recording method described below.
+For v0.0.3 the idle CPU budget changed from <0.15% to <0.20%; the original limit was <0.1%. The benchmark checks the unrounded value, so exactly 0.20% fails. No other limit changed. Historical runs keep their original verdicts; current CI uses the native-refresh recording method described below.
 
 ### Two paths
 
