@@ -94,7 +94,8 @@ def release_scope(repo, tag, sha, commits, git):
         issue,events=relationship(repo,'issue',n)
         require(in_milestone(issue) and issue['state']=='CLOSED' and events,'open issue or incomplete closure metadata')
         when=lambda s: datetime.fromisoformat(s.replace('Z','+00:00'))
-        last=events[-1]; require(abs((when(last['createdAt'])-when(issue['closedAt'])).total_seconds())<=1,'stale closure event')
+        # GitHub stamps closedAt and the ClosedEvent separately; v0.0.4 saw them 2 s apart. A stale event is minutes off.
+        last=events[-1]; require(abs((when(last['createdAt'])-when(issue['closedAt'])).total_seconds())<=5,'stale closure event')
         closer=last['closer']; entry=f'- [#{n}]({url}/issues/{n}) — {markdown(issue["title"])}'
         if issue['stateReason']=='NOT_PLANNED': other.append(entry+' (not planned)'); continue
         require(issue['stateReason'] == 'COMPLETED', 'unknown issue closure reason')
