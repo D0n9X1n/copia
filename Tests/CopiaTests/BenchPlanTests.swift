@@ -3,13 +3,12 @@ import AppKit
 @testable import CopiaBench
 
 @Suite struct BenchPlanTests {
-	@Test @MainActor func idleCPUBudgetIsPointOneFivePercentWithoutChangingOtherLimits() {
-		let limit = Bench.Budgets.idleCPUPercent
-		#expect(limit == 0.15)
-		#expect(0.110 < limit)
-		#expect(0.149 < limit)
-		#expect(!(0.15 < limit))
-		#expect(!(0.151 < limit))
+	@Test @MainActor func idleCPUUsesTheStrictPointTwoPercentBudget() {
+		#expect(Bench.Budgets.idleCPUPercent == 0.20)
+		#expect(Bench.Budgets.acceptsIdleCPU(0.189))
+		#expect(Bench.Budgets.acceptsIdleCPU(0.1999))
+		#expect(!Bench.Budgets.acceptsIdleCPU(0.20))
+		#expect(!Bench.Budgets.acceptsIdleCPU(0.201))
 		#expect(Bench.Budgets.idleFootprintMB == 40)
 		#expect(Bench.Budgets.openFootprintMB == 120)
 		#expect(Bench.Budgets.openP95ms == 100)

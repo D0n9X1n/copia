@@ -50,14 +50,51 @@ extension WindowTests.SettingsWindowTests {
 		#expect(!model.paused)
 	}
 
-	@Test func toolbarTabsAreGeneralShortcutsPrivacyWithTheirSymbols() throws {
+	@Test func aboutShowsRunningVersionAndChecksOnlyFromItsButton() async throws {
+		AccessibilityNode.enableInProcess()
+		let model = ShellModel(version: "0.0.2"); var calls = 0
+		var pending: CheckedContinuation<String, any Error>?
+		model.latestVersion = {
+			calls += 1
+			if calls == 1 { return try await withCheckedThrowingContinuation { pending = $0 } }
+			return "0.0.10"
+		}
+		let window = SettingsView.makeSettingsWindow(model: model, initialTab: .about)
+		window.setFrameOrigin(CGPoint(x: -6000, y: -6000)); window.alphaValue = 0; window.orderFrontRegardless()
+		defer { pending?.resume(throwing: CancellationError()); window.orderOut(nil) }
+		let view = try #require(window.contentView)
+		func node(_ text: String) -> AccessibilityNode? {
+			view.layoutSubtreeIfNeeded()
+			return AccessibilityNode(view).all.first { $0.label == text || $0.value == text }
+		}
+		func press(_ label: String) throws {
+			let button = try #require(node(label)?.object), selector = NSSelectorFromString("accessibilityPerformPress")
+			try #require(button.responds(to: selector))
+			typealias Press = @convention(c) (AnyObject, Selector) -> Bool
+			_ = unsafeBitCast(button.method(for: selector), to: Press.self)(button, selector)
+		}
+		try #require(await eventually { node("Version 0.0.2") != nil })
+		#expect(calls == 0 && node("View Release") == nil)
+		try press("Check for Updates")
+		try #require(await eventually { pending != nil && node("Checking for updates…") != nil })
+		let busy = try #require(node("Check for Updates")?.object)
+		#expect((busy.value(forKey: "isAccessibilityEnabled") as? Bool) == false)
+		pending?.resume(throwing: URLError(.notConnectedToInternet)); pending = nil
+		try #require(await eventually { node("Couldn’t check for updates.") != nil && node("Try Again") != nil })
+		#expect(node("View Release") == nil)
+		try press("Try Again")
+		try #require(await eventually { node("Copia 0.0.10 is available.") != nil && node("View Release") != nil })
+		#expect(calls == 2 && model.updateStatus.releaseURL?.absoluteString == "https://github.com/D0n9X1n/copia/releases/tag/v0.0.10")
+	}
+
+	@Test func toolbarTabsIncludeAboutAfterPrivacy() throws {
 		_ = NSApplication.shared
 		let window = SettingsView.makeSettingsWindow(model: ShellModel(), initialTab: .privacy)
 		let tabs = try #require(window.contentViewController as? NSTabViewController)
 		#expect(tabs.tabStyle == .toolbar)
-		#expect(tabs.tabViewItems.map(\.label) == ["General", "Shortcuts", "Privacy"])
-		#expect(tabs.tabViewItems.map { ($0.identifier as? String).flatMap(SettingsTab.init(rawValue:)) } == [.general, .shortcuts, .privacy])
-		for (item, symbol) in zip(tabs.tabViewItems, ["gearshape", "keyboard", "hand.raised.fill"]) {
+		#expect(tabs.tabViewItems.map(\.label) == ["General", "Shortcuts", "Privacy", "About"])
+		#expect(tabs.tabViewItems.map { ($0.identifier as? String).flatMap(SettingsTab.init(rawValue:)) } == [.general, .shortcuts, .privacy, .about])
+		for (item, symbol) in zip(tabs.tabViewItems, ["gearshape", "keyboard", "hand.raised.fill", "info.circle"]) {
 			let expected = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.tiffRepresentation
 			#expect(item.image?.tiffRepresentation == expected, "\(item.label) should use \(symbol)")
 		}

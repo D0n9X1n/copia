@@ -6,7 +6,7 @@ import CopiaFixtures
 
 /// Holds each decode until the test grants a permit, so the race with `removeAll()` is deterministic.
 actor DecodeGate {
-	private var entered = 0
+	private(set) var entered = 0
 	private var permits = 0
 	private var waiting: [CheckedContinuation<Void, Never>] = []
 	private var watchers: [(count: Int, resume: CheckedContinuation<Void, Never>)] = []
@@ -32,6 +32,41 @@ actor DecodeGate {
 
 @MainActor
 @Suite struct ThumbnailCacheTests {
+	@Test func cancelledFirstConsumerDoesNotBlockOtherURLsOrCancelTheSharedImage() async throws {
+		let held = URL(fileURLWithPath: "/fixture/held-preview"), independent = URL(fileURLWithPath: "/fixture/other-preview")
+		let pixels = try #require(CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 16,
+			space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage())
+		let gate = DecodeGate()
+		let cache = ThumbnailCache { url in
+			if url == held { await gate.enter() }
+			return pixels
+		}
+		let first = Task { await cache.load(held) }
+		await gate.untilEntered(1)
+		first.cancel()
+		let survivor = Task { await cache.load(held) }, other = Task { await cache.load(independent) }
+		let finishedIndependently = await eventually { cache.cached(independent) != nil }
+		#expect(finishedIndependently && cache.cached(held) == nil)
+		await gate.release(); await gate.release()
+		_ = await first.value
+		let delivered = await survivor.value, otherImage = await other.value
+		#expect(delivered != nil && delivered === cache.cached(held))
+		#expect(otherImage != nil && otherImage === cache.cached(independent))
+		#expect(await gate.entered == 1)
+		#expect(cache.decodeCount == 2)
+	}
+
+	@Test func failedDecodeCanBeRequestedAgain() async {
+		let gate = DecodeGate(), url = URL(fileURLWithPath: "/fixture/retry-thumbnail")
+		let cache = ThumbnailCache { _ in await gate.enter(); return nil }
+		await gate.release()
+		#expect(await cache.load(url) == nil)
+		await gate.release()
+		#expect(await cache.load(url) == nil)
+		#expect(await gate.entered == 2)
+		#expect(cache.entryCount == 0)
+	}
+
 	@Test func aDecodeThatLandsAfterRemoveAllDoesNotRepopulate() async throws {
 		let dir = FileManager.default.temporaryDirectory.appendingPathComponent("copia-thumb-\(UUID().uuidString)")
 		defer { try? FileManager.default.removeItem(at: dir) }
@@ -45,14 +80,19 @@ actor DecodeGate {
 		let stale = Task { await cache.load(url) }
 		await gate.untilEntered(1)
 		cache.removeAll()
+		let fresh = Task { await cache.load(url) }
+		let newGenerationStarted = await eventually { await gate.entered >= 2 }
 		await gate.release()
 		#expect(await stale.value == nil)
 		#expect(cache.cached(url) == nil)
 		#expect(cache.entryCount == 0)
 
-		// A load that starts after the purge caches normally. The permit is granted up front so a cache hit cannot hang.
-		await gate.release()
-		#expect(await cache.load(url) != nil)
-		#expect(cache.cached(url) != nil)
+		let joined = Task { @MainActor in await cache.load(url) }
+		await Task.yield()
+		await gate.release(); await gate.release()
+		let newImage = await fresh.value, joinedImage = await joined.value
+		#expect(newGenerationStarted && newImage != nil && newImage === joinedImage)
+		#expect(await gate.entered == 2)
+		#expect(cache.decodeCount == 1 && cache.cached(url) === newImage)
 	}
 }

@@ -183,6 +183,98 @@ extension WindowTests.StripViewTests {
 		#expect(host.isOnScreen(selected))
 	}
 
+	@Test func responsiveScrollingPreparesOnlyMountedCardContent() async throws {
+		let host = InputHost(clips: Array(Fixtures.tenThousand.prefix(100))); defer { host.close() }; await host.settle()
+		func findRow(_ view: NSView) -> NSScrollView? {
+			if let scroll = view as? NSScrollView, !(scroll.documentView is NSTextView) { return scroll }
+			return view.subviews.lazy.compactMap { findRow($0) }.first
+		}
+		let row = try #require(findRow(host.panel.host)), document = try #require(row.documentView)
+		let cards = try #require(document.subviews.first)
+		#expect(type(of: document).isCompatibleWithResponsiveScrolling)
+		#expect(type(of: row).isCompatibleWithResponsiveScrolling)
+		for slot in [0, 60, 99] {
+			let target = min(PanelLayout.cardMinX(index: slot), document.bounds.width - row.contentView.bounds.width)
+			row.contentView.scroll(to: CGPoint(x: target, y: 0)); row.reflectScrolledClipView(row.contentView); await host.settle()
+			let viewport = document.bounds.intersection(row.contentView.bounds)
+			try #require(!viewport.isEmpty)
+			let left = slot == 0 ? document.bounds.minX : cards.frame.minX
+			let right = slot == 99 ? document.bounds.maxX : cards.frame.maxX
+			let backed = CGRect(x: left, y: cards.frame.minY, width: right - left, height: cards.frame.height)
+			#expect(document.preparedContentRect.contains(viewport))
+			document.prepareContent(in: document.bounds)
+			let prepared = document.preparedContentRect
+			#expect(prepared == backed && prepared.contains(viewport))
+			#expect(prepared.width < 30 * (Theme.cardSize.width + Theme.cardGap))
+			let distant = CGRect(x: slot == 0 ? document.bounds.maxX - 32 : 1, y: 1, width: 16, height: 16)
+			try #require(!distant.intersects(cards.frame))
+			document.prepareContent(in: distant)
+			let after = document.preparedContentRect
+			#expect(after.contains(viewport) && backed.contains(after) && !after.intersects(distant))
+			let x = viewport.maxX + 20 < backed.maxX ? viewport.maxX + 2 : viewport.minX - 18
+			let ahead = CGRect(x: x, y: viewport.midY, width: 16, height: 16)
+			try #require(backed.contains(ahead) && !viewport.intersects(ahead))
+			document.prepareContent(in: ahead)
+			let partial = document.preparedContentRect
+			#expect(partial.contains(viewport) && partial.contains(ahead) && backed.contains(partial))
+		}
+		host.model.applySnapshot(Array(host.model.clips.prefix(5))); await host.settle()
+		let shrunk = document.preparedContentRect
+		let viewportAfterShrink = document.bounds.intersection(row.contentView.bounds)
+		try #require(!viewportAfterShrink.isEmpty)
+		#expect(shrunk.contains(viewportAfterShrink) && document.bounds.contains(shrunk))
+		#expect(document.bounds.width == PanelLayout.contentWidth(count: 5))
+	}
+
+	@Test(arguments: [false, true]) func prependingWhileScrolledKeepsTheVisibleClipsInFlightPreview(reduced: Bool) async throws {
+		actor Loads {
+			var count = 0
+			var waiting: [CheckedContinuation<CGImage?, Never>] = []
+			func start() async -> CGImage? {
+				count += 1
+				return await withCheckedContinuation { waiting.append($0) }
+			}
+			func finish(with image: CGImage) { waiting.forEach { $0.resume(returning: image) }; waiting.removeAll() }
+		}
+		let ctx = try #require(CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+			space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+		ctx.setFillColor(CGColor(srgbRed: 0, green: 1, blue: 0, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+		let preview = try #require(ctx.makeImage())
+		let loads = Loads(), cache = ThumbnailCache { _ in await loads.start() }, index = 9
+		var clips = Array(Fixtures.tenThousand.prefix(24)); clips[index].kind = .image; clips[index].preview = .ready(URL(fileURLWithPath: "/fixture/page-boundary-preview"))
+		let host = StripHost(clips: clips, width: 900, thumbnails: cache, overrides: .init(reduceMotion: reduced)); defer { host.close() }
+		await host.settle(); host.model.select(clips[index].id)
+		let ready = await eventually {
+			await loads.count > 0 && host.card(containing: "History item 10").map(host.isOnScreen) == true
+		}
+		let original = await loads.count
+		host.model.applySnapshot([Fixtures.extremes[0]] + clips); await host.settle(200)
+		let inserted = await loads.count, same = host.card(containing: "History item 10").map(host.isOnScreen)
+		host.model.applySnapshot(clips); await host.settle(200)
+		func centerGreenDominance() throws -> CGFloat {
+			let node = try #require(host.card(containing: "History item 10")), view = try #require(host.window.contentView)
+			let center = view.convert(host.window.convertPoint(fromScreen: CGPoint(x: node.frame.midX, y: node.frame.midY)), from: nil)
+			try #require(view.bounds.contains(center))
+			let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds)); view.cacheDisplay(in: view.bounds, to: bitmap)
+			let x = Int(center.x * CGFloat(bitmap.pixelsWide) / view.bounds.width), y = Int(center.y * CGFloat(bitmap.pixelsHigh) / view.bounds.height)
+			let color = try #require(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+			return color.greenComponent - max(color.redComponent, color.blueComponent)
+		}
+		let restored = await loads.count, placeholder = Result { try centerGreenDominance() }
+		await loads.finish(with: preview)
+		let beforeImage = try placeholder.get()
+		try #require(await eventually { host.requests.contains(.loading) })
+		await host.settle()
+		let afterImage = try centerGreenDominance()
+		#expect(afterImage > 0.25 && afterImage - beforeImage > 0.25)
+
+		#expect(ready)
+		#expect(original == 1)
+		#expect(inserted == original)
+		#expect(restored == original)
+		#expect(same == true && host.model.selectedID == clips[index].id)
+	}
+
 	@Test func frontDeleteKeepsTheTrailingCardMountedAcrossReflowWithoutScrolling() async throws {
 		actor Decodes {
 			var calls: [URL: Int] = [:]

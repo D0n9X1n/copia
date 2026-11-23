@@ -47,7 +47,8 @@ pages=data[key]; print(json.dumps(pages if '--slurp' in args and '--paginate' in
                             {'total_count':2,'workflow_runs':[record]}]
             self.data[f'actions/runs/{i}']=[record.copy()]
             self.jobs[file]=f'actions/runs/{i}/attempts/2/jobs?per_page=100'
-            self.data[self.jobs[file]]=[{'total_count':1,'jobs':[dict(id=1000+i,name=job,status='completed',conclusion='success',run_id=i,run_attempt=2,head_sha=self.sha)]}]
+            names=[job,'intel'] if file=='ci.yml' else [job]
+            self.data[self.jobs[file]]=[{'total_count':len(names),'jobs':[dict(id=1000+10*i+n,name=name,status='completed',conclusion='success',run_id=i,run_attempt=2,head_sha=self.sha) for n,name in enumerate(names)]}]
         self.data[f'commits/{self.sha}/pulls?per_page=100']=[[dict(number=PR)]]
         milestone=dict(number=1,title=TAG); self.data['milestones?state=all&per_page=100']=[[milestone]]
         self.data['issues?state=open&per_page=100']=[[dict(number=88,pull_request={})],[]]
@@ -89,8 +90,10 @@ pages=data[key]; print(json.dumps(pages if '--slurp' in args and '--paginate' in
         for n in (2,3): self.assertIn(f'/issues/{n})',resolved)
         for n in range(4,12): self.assertNotIn(f'/issues/{n})',resolved)
         for s in ('# Copia v0.0.2','## Downloads','## Changes since v0.0.1','## Verification',self.sha,
-                  '/issues/4)', '/issues/5)', '0.123%', '60 Hz','/actions/runs/101','/actions/runs/102','/job/1101','/pull/12',
-                  '/releases/download/v0.0.2/Copia-0.0.2.zip)', '/releases/download/v0.0.2/Copia-0.0.2.zip.sha256)'):
+                  '/issues/4)', '/issues/5)', '0.123%', '60 Hz','/actions/runs/101','/actions/runs/102','/job/2010','/job/2011','/job/2020','/pull/12',
+                  '/releases/download/v0.0.2/Copia-0.0.2-arm64.zip)', '/releases/download/v0.0.2/Copia-0.0.2-arm64.zip.sha256)',
+                  '/releases/download/v0.0.2/Copia-0.0.2-x86_64.zip)', '/releases/download/v0.0.2/Copia-0.0.2-x86_64.zip.sha256)',
+                  'Apple silicon', 'Intel'):
             self.assertIn(s,text)
 
     def test_newer_main_attempt_or_missing_required_job_blocks(self):
@@ -101,8 +104,11 @@ pages=data[key]; print(json.dumps(pages if '--slurp' in args and '--paginate' in
                 with self.subTest(workflow=f,field=field): self.gate(False)
                 r[field]=old
             latest=self.data[f"actions/runs/{r['id']}"][0];latest['run_attempt']+=1;self.gate(False);latest['run_attempt']-=1
-            jobs=self.data[self.jobs[f]][0]['jobs'];old=jobs[0]['conclusion'];jobs[0]['conclusion']='skipped';self.gate(False);jobs[0]['conclusion']=old
-            jobs[0]['name']='unrelated'; self.gate(False);jobs[0]['name']='build-test-bench' if f=='ci.yml' else 'publish'
+            jobs=self.data[self.jobs[f]][0]['jobs']
+            for job in jobs:
+                with self.subTest(workflow=f,job=job['name']):
+                    old=job['conclusion'];job['conclusion']='skipped';self.gate(False);job['conclusion']=old
+                    name=job['name'];job['name']='unrelated';self.gate(False);job['name']=name
 
     def test_release_requires_real_merge_and_every_linked_issue_in_milestone(self):
         for key,field,val in [('pullRequest12','merged',False),('pullRequest12','mergeCommit',{'oid':self.base}),
@@ -172,6 +178,14 @@ pages=data[key]; print(json.dumps(pages if '--slurp' in args and '--paginate' in
         self.report['path']='proxy';del self.report['refreshHz'],self.report['presentedFramesGate'];self.bench()
         self.assertIn('120 Hz presented-frame coverage unavailable (proxy)', self.gate(True))
 
+    def test_idle_cpu_uses_the_raw_verdict_at_the_rounded_budget(self):
+        for value, failures, ok in [(0.189, [], True), (0.200, [], True),
+                                    (0.200, ['idleCPUPercent < 0.2'], False), (0.201, [], False)]:
+            with self.subTest(displayed=value, failures=failures):
+                self.report.update(idleCPUPercent=value, failed=failures); self.bench()
+                text = self.gate(ok)
+                if ok: self.assertIn('strict budget <0.20%', text)
+
     def test_paused_polling_cannot_be_the_accepted_idle_sample(self):
         self.report['privateBoardPolls']=0;self.bench();self.gate(False)
 
@@ -180,24 +194,67 @@ pages=data[key]; print(json.dumps(pages if '--slurp' in args and '--paginate' in
         self.git('tag','-d','v0.0.1');self.gate(False);self.git('tag','v0.0.1',self.base)
         self.git('branch','-m','off-main');self.git('branch','main',self.base);self.gate(False)
 
-    def test_final_notes_link_to_the_actual_release_jobs(self):
+    def publishing_fixture(self):
         jobs=[dict(id=200+i,run_id=900,run_attempt=1,head_sha=self.sha,name=name,
-                   status='in_progress' if i==2 else 'completed',conclusion=None if i==2 else 'success')
-              for i,name in enumerate(('validate','package','publish'))]
-        self.data['actions/runs/900/attempts/1/jobs?per_page=100']=[dict(total_count=3,jobs=jobs)]
+                   status='in_progress' if name=='publish' else 'completed',conclusion=None if name=='publish' else 'success')
+              for i,name in enumerate(('validate','package','intel','publish'))]
+        self.data['actions/runs/900/attempts/1/jobs?per_page=100']=[dict(total_count=4,jobs=jobs)]
         smoke=self.root/'smoke.json'
         smoke.write_text(json.dumps(dict(schema=4,settingsFirstAction=True,displays=1,cycles=10,samples=[{}]*10,violations=[])))
-        coverage=subprocess.check_output([sys.executable,'-I',SCRIPTS/'package-proof.py',smoke,'arm64','27.2','27.2',
-                                          'Xcode 27.2','Swift 6.4'],text=True).strip()
-        digest=hashlib.sha256(b'fixture asset bytes').hexdigest()
-        self.env.update(COVERAGE=coverage, REVIEWED_ZIP=digest)
+        def proof(*args): return subprocess.check_output([sys.executable,'-I',SCRIPTS/'package-proof.py',*map(str,args)],text=True).strip()
+        ver=TAG[1:]
+        self.lines=dict(TOOLCHAIN=proof('toolchain','27.2','Xcode 27.2\nBuild version 27B52','Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9)\nTarget: arm64-apple-macosx27.0'),
+                        COVERAGE_ARM64=proof('runtime',smoke,f'Copia-{ver}-arm64.zip','arm64','27.2'),
+                        COVERAGE_X86_64=proof('runtime',smoke,f'Copia-{ver}-x86_64.zip','x86_64','26.6.1'),
+                        REVIEWED_ARM64=hashlib.sha256(b'arm64 bytes').hexdigest(),
+                        REVIEWED_X86_64=hashlib.sha256(b'x86_64 bytes').hexdigest())
+        self.env.update(self.lines); self.smoke=smoke; self.proof=proof
+        return jobs
+
+    def test_final_notes_link_to_the_actual_release_jobs_and_both_archives(self):
+        jobs=self.publishing_fixture()
         final=self.gate(True,'--publishing')
         for j in jobs: self.assertIn('/job/'+str(j['id']),final)
         lines=final.split('## Verification')[1].splitlines()
-        self.assertIn('- '+coverage,lines);self.assertIn(f'- ZIP SHA-256 (`Copia-{TAG[1:]}.zip`): `{digest}`',lines)
-        for key in ('COVERAGE','REVIEWED_ZIP'):
-            old=self.env.pop(key);self.gate(False,'--publishing');self.env[key]=old
-        jobs[1]['conclusion']='skipped';self.gate(False,'--publishing')
+        for key in ('TOOLCHAIN','COVERAGE_ARM64','COVERAGE_X86_64'): self.assertIn('- '+self.lines[key],lines)
+        self.assertIn('- Rosetta: not tested on these signed release archives.',lines)
+        for arch,key in (('arm64','REVIEWED_ARM64'),('x86_64','REVIEWED_X86_64')):
+            self.assertIn(f'- ZIP SHA-256 (`Copia-{TAG[1:]}-{arch}.zip`): `{self.lines[key]}`',lines)
+        self.assertIn('native Intel x86_64 on macOS 26', final.split('## Downloads')[1].split('## ')[0])
+        for key in self.lines:
+            with self.subTest(missing=key):
+                old=self.env.pop(key);self.gate(False,'--publishing');self.env[key]=old
+        for job in jobs[:3]:
+            with self.subTest(job=job['name']):
+                job['conclusion']='skipped';self.gate(False,'--publishing');job['conclusion']='success'
+        intel=jobs.pop(2);self.gate(False,'--publishing');jobs.insert(2,intel)
+        jobs[3].update(status='completed',conclusion='success');self.gate(False,'--publishing')
+
+    def test_publishing_evidence_must_name_the_right_archive_architecture_and_os(self):
+        self.publishing_fixture(); ver=TAG[1:]
+        arm,intel=self.lines['COVERAGE_ARM64'],self.lines['COVERAGE_X86_64']
+        wrong={'COVERAGE_X86_64':[arm, self.proof('runtime',self.smoke,f'Copia-{ver}-x86_64.zip','x86_64','27.2'),
+                                  intel.replace(ver,'9.9.9'), intel.replace('native x86_64','translated (Rosetta) x86_64'),
+                                  intel+' extra', ''],
+               'COVERAGE_ARM64':[intel, arm.replace('-arm64.zip','-x86_64.zip'), arm.replace(ver,'9.9.9'), ''],
+               'REVIEWED_ARM64':[self.lines['REVIEWED_X86_64'], 'f'*63, 'F'*64],
+               'REVIEWED_X86_64':[self.lines['REVIEWED_ARM64'], ''],
+               'TOOLCHAIN':['Xcode 27.2', 'Built with Xcode 27.2',
+                            'Built with Xcode ., Build version A; Apple Swift version unknown; macOS SDK ..',
+                            self.lines['TOOLCHAIN'].replace('swiftlang-','swiftlang-\r'),
+                            self.lines['TOOLCHAIN'].replace('swiftlang-','swiftlang-\t'), self.lines['TOOLCHAIN']+'\nsecond line',
+                            self.lines['TOOLCHAIN'].replace('; macOS SDK 27.2.',''),
+                            self.lines['TOOLCHAIN'].replace('Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9); ',''),
+                            self.lines['TOOLCHAIN'].replace(', Build version 27B52','')]}
+        wrong['COVERAGE_X86_64']+=[intel.replace('macOS 26.6.1','macOS 26'), intel.replace('macOS 26.6.1','macOS 26.x'),
+                                   intel.replace(f'Copia-{ver}-','Copia-0x0y2-'), intel.replace('passed 10 cycles','passed 1 cycles'),
+                                   intel.replace('macOS 26: tested','macOS 26: not tested')]
+        wrong['COVERAGE_ARM64']+=[arm.replace('passed 10 cycles','passed 7 cycles'), arm.replace('macOS 26: not tested','macOS 26: tested')]
+        for key, values in wrong.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.env[key]=value; self.gate(False,'--publishing'); self.env[key]=self.lines[key]
+        self.gate(True,'--publishing')
 
     def test_external_and_listed_closing_references_cannot_escape_milestone(self):
         for body in ('Fixes #2, #80', 'Resolves fixture/other#2', 'Closes fixture/Copia#81'):

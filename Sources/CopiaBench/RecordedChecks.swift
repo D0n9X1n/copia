@@ -106,50 +106,76 @@ final class RecordedRun {
 		}?.time
 	}
 
+	enum PointerFailure: String { case panelChanged, targetAlreadySelected, targetUnavailable, eventUnavailable, targetChanged, ringNotPresented }
+
 	struct PointerSample {
 		let dispatch: Double?
-		let commit: Double
+		let commit: Double?
 		let presented: Double?
+		var failure: PointerFailure? = nil
+
+		static func rejected(_ failure: PointerFailure) -> Self { .init(dispatch: nil, commit: nil, presented: nil, failure: failure) }
 	}
 
 	nonisolated static let pointerSlots = [1, 0, 2, 1, 0]
 
+	nonisolated static func pointerPressFailure(samePresentation: Bool, targetAlreadySelected: Bool) -> PointerFailure? {
+		guard samePresentation else { return .panelChanged }
+		return targetAlreadySelected ? .targetAlreadySelected : nil
+	}
+
 	nonisolated static func pointerSnapPasses(_ samples: [PointerSample]) -> Bool {
-		guard samples.count == pointerSlots.count, samples.allSatisfy({ $0.dispatch != nil }) else { return false }
+		guard samples.count == pointerSlots.count, samples.allSatisfy({ $0.failure == nil && $0.dispatch != nil }) else { return false }
 		let presented = samples.compactMap(\.presented).sorted()
 		return presented.count == samples.count && presented[presented.count / 2] <= 0.1
 	}
 
 	func pointerSelections() async -> [PointerSample] {
 		await prepare(reduced: false)
-		let panel = controller.panel, model = controller.model
+		let panel = controller.panel, model = controller.model, closeCount = model.closeCount
 		controller.toggleHistory()
 		try? await Task.sleep(for: .milliseconds(700))
+		func active() -> Bool { panel.isVisible && panel.isKeyWindow && model.cardsMounted && !model.isClosing && model.closeCount == closeCount }
 		var samples: [PointerSample] = []
-		for slot in Self.pointerSlots {
+		for (index, slot) in Self.pointerSlots.enumerated() {
 			let left = Self.slotX(slot)
-			guard left + Int(Theme.cardSize.width) <= recorder.width, model.visibleClips.indices.contains(slot) else { continue }
+			guard active() else { samples.append(.rejected(.panelChanged)); continue }
+			guard left + Int(Theme.cardSize.width) <= recorder.width, model.visibleClips.indices.contains(slot) else {
+				samples.append(.rejected(.targetUnavailable)); continue
+			}
 			let expected = model.visibleClips[slot].id
+			func sameTarget() -> Bool { model.visibleClips.indices.contains(slot) && model.visibleClips[slot].id == expected }
 			let point = CGPoint(x: CGFloat(left) + Theme.cardSize.width / 2,
 				y: Theme.panelHeight - CGFloat(Self.cardTop) - Theme.cardSize.height / 2)
 			func event(_ type: NSEvent.EventType) -> NSEvent? {
 				NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-					windowNumber: panel.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
+					windowNumber: panel.windowNumber, context: nil, eventNumber: index + 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
 			}
-			guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { continue }
 			recorder.begin(.planes)
 			try? await Task.sleep(for: .milliseconds(180))
+			if let reason = Self.pointerPressFailure(samePresentation: active(), targetAlreadySelected: model.selectedID == expected) {
+				_ = recorder.endPlanes(); samples.append(.rejected(reason)); continue
+			}
+			guard sameTarget() else { _ = recorder.endPlanes(); samples.append(.rejected(.targetChanged)); continue }
+			guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else {
+				_ = recorder.endPlanes(); samples.append(.rejected(.eventUnavailable)); continue
+			}
 			let start = HostClock.now
 			panel.sendEvent(down)
-			let dispatch = model.selectedID == expected ? HostClock.now - start : nil
+			let selectedOnDown = model.selectedID == expected, dispatch = HostClock.now - start
+			guard active() else { _ = recorder.endPlanes(); samples.append(.rejected(.panelChanged)); continue }
 			panel.host.layoutSubtreeIfNeeded()
 			CATransaction.flush()
 			let commit = HostClock.now - start
+			guard active() else { _ = recorder.endPlanes(); samples.append(.rejected(.panelChanged)); continue }
 			panel.sendEvent(up)
 			try? await Task.sleep(for: .milliseconds(650))
+			let frames = recorder.endPlanes()
+			guard active() else { samples.append(.rejected(.panelChanged)); continue }
+			guard selectedOnDown, sameTarget(), model.selectedID == expected else { samples.append(.rejected(.targetChanged)); continue }
 			let columns = (left + 42)..<(left + Int(Theme.cardSize.width) - 42)
-			let shown = Self.firstRingFrame(recorder.endPlanes(), after: start, rows: Self.ringRows, columns: columns)
-			samples.append(PointerSample(dispatch: dispatch, commit: commit, presented: shown.map { $0 - start }))
+			let shown = Self.firstRingFrame(frames, after: start, rows: Self.ringRows, columns: columns)
+			samples.append(PointerSample(dispatch: dispatch, commit: commit, presented: shown.map { $0 - start }, failure: shown == nil ? .ringNotPresented : nil))
 		}
 		await hide()
 		return samples

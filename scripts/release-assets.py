@@ -1,4 +1,4 @@
-"""Verify the two public assets. Extract only regular files and directories, never run them."""
+"""Verify the four public assets: one ZIP and checksum per architecture. Extract only regular files and directories, never run them."""
 import hashlib
 import json
 import os
@@ -23,10 +23,16 @@ def require(ok, message):
         raise ValueError(message)
 
 
+ARCHS = ('arm64', 'x86_64')
+
+
 def names(version):
     require(re.fullmatch(STABLE, version), 'invalid version')
-    name = f'Copia-{version}.zip'
-    return name, name + '.sha256'
+    return {arch: (f'Copia-{version}-{arch}.zip', f'Copia-{version}-{arch}.zip.sha256') for arch in ARCHS}
+
+
+def all_names(version):
+    return {name for pair in names(version).values() for name in pair}
 
 
 def sha(path):
@@ -38,14 +44,17 @@ def sha(path):
 
 
 def assets(directory, version):
-    name, sidecar = names(version)
-    require({p.name for p in directory.iterdir()} == {name, sidecar}, 'unexpected release asset set')
+    require({p.name for p in directory.iterdir()} == all_names(version), 'unexpected release asset set')
     for path in directory.iterdir():
         require(stat.S_ISREG(path.lstat().st_mode), 'not a regular release asset')
-    archive = directory/name
-    require((directory/sidecar).stat().st_size < 256 and
-            (directory/sidecar).read_bytes() == f'{sha(archive)}  {name}\n'.encode(), 'checksum mismatch')
-    return archive
+    archives = {}
+    for arch, (name, sidecar) in names(version).items():
+        archive = directory/name
+        require((directory/sidecar).stat().st_size < 256 and
+                (directory/sidecar).read_bytes() == f'{sha(archive)}  {name}\n'.encode(), f'{arch} checksum mismatch')
+        archives[arch] = archive
+    require(len({sha(a) for a in archives.values()}) == len(ARCHS), 'architecture downloads are identical')
+    return archives
 
 
 def unpack(path, dest, allowed, app=False):
@@ -120,14 +129,22 @@ def metadata(path, info, app):
 
 def receive(outer, digest, reviewed, version, dest):
     require(re.fullmatch('[0-9a-f]{64}', digest) and sha(outer) == digest, 'immutable artifact digest mismatch')
-    unpack(outer, dest, names(version))
-    require(sha(assets(dest, version)) == reviewed, 'ZIP differs from the reviewed package')
+    unpack(outer, dest, all_names(version))
+    for arch, archive in assets(dest, version).items():
+        require(sha(archive) == reviewed[arch], f'{arch} ZIP differs from the reviewed package')
 
 
 def verify(directory, version, dest, mode):
     require(mode in ('signed', 'unsigned'), 'invalid verification mode')
-    unpack(assets(directory, version), dest, {'Copia.app'}, app=True)
-    app = dest/'Copia.app'; contents = app/'Contents'; binary = contents/'MacOS/Copia'
+    archives = assets(directory, version)
+    dest.mkdir(mode=0o700)  # Must be a new directory, never a previous extraction.
+    for arch, archive in archives.items():
+        unpack(archive, dest/arch, {'Copia.app'}, app=True)
+        verify_app(dest/arch/'Copia.app', arch, version, mode)
+
+
+def verify_app(app, arch, version, mode):
+    contents = app/'Contents'; binary = contents/'MacOS/Copia'
     expected = dict(CFBundleVersion=version, CFBundleShortVersionString=version,
                     LSMinimumSystemVersion='26.0', CFBundleIdentifier='app.copia.Copia', CFBundleExecutable='Copia',
                     CFBundlePackageType='APPL', CFBundleIconFile='AppIcon', CFBundleIconName='AppIcon', LSUIElement=True)
@@ -139,21 +156,20 @@ def verify(directory, version, dest, mode):
         p = contents/'Resources'/resource
         require(p.is_file() and p.stat().st_size > 0, f'missing archived resource: {resource}')
     require(binary.is_file() and os.access(binary, os.X_OK), 'missing archived executable or execute bit')
-    subprocess.run([SCRIPTS/'check-archs.sh', binary], check=True)
+    subprocess.run([SCRIPTS/'check-archs.sh', binary, arch], check=True)
     if mode == 'signed':
         subprocess.run(['codesign', '--verify', '--all-architectures', '--deep', '--strict', '-R',
                         '=anchor apple generic and identifier "app.copia.Copia" and certificate leaf[subject.OU] = "AV5CFZA3T3"', app], check=True)
-        for arch in ('arm64', 'x86_64'):
-            desc = subprocess.run(['codesign', '-dvvv', '--architecture', arch, app], capture_output=True, text=True, check=True).stderr.splitlines()
-            require('Identifier=app.copia.Copia' in desc and 'TeamIdentifier=AV5CFZA3T3' in desc and
-                    next((s for s in desc if s.startswith('Authority=')), '').startswith('Authority=Apple Development: ') and
-                    any(re.fullmatch(r'Timestamp=.*\d.*', s) for s in desc), f'unexpected {arch} signing identity or timestamp')
+        desc = subprocess.run(['codesign', '-dvvv', '--architecture', arch, app], capture_output=True, text=True, check=True).stderr.splitlines()
+        require('Identifier=app.copia.Copia' in desc and 'TeamIdentifier=AV5CFZA3T3' in desc and
+                next((s for s in desc if s.startswith('Authority=')), '').startswith('Authority=Apple Development: ') and
+                any(re.fullmatch(r'Timestamp=.*\d.*', s) for s in desc), f'unexpected {arch} signing identity or timestamp')
 
 
 if __name__ == '__main__':
     if sys.argv[1] == 'receive':
-        _, _, path, digest, reviewed, ver, dest = sys.argv
-        receive(Path(path), digest, reviewed, ver, Path(dest))
+        _, _, path, digest, arm, intel, ver, dest = sys.argv
+        receive(Path(path), digest, dict(zip(ARCHS, (arm, intel))), ver, Path(dest))
     elif sys.argv[1] == 'verify':
         _, _, directory, ver, dest, mode = sys.argv
         verify(Path(directory), ver, Path(dest), mode)
@@ -161,8 +177,8 @@ if __name__ == '__main__':
         _, _, response, directory, ver = sys.argv
         directory = Path(directory); assets(directory, ver)
         draft = json.loads(Path(response).read_text()); rows = draft['assets']
-        require(draft['isDraft'] is True and draft['tagName'] == 'v'+ver and len(rows) == 2 and
-                {a['name'] for a in rows} == set(names(ver)), 'unexpected draft or remote assets')
+        require(draft['isDraft'] is True and draft['tagName'] == 'v'+ver and len(rows) == 4 and
+                {a['name'] for a in rows} == all_names(ver), 'unexpected draft or remote assets')
         for a in rows:
             require(a['state'].lower() == 'uploaded' and a['digest'] == 'sha256:'+sha(directory/a['name']),
                     'remote draft asset changed')

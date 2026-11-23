@@ -11,6 +11,7 @@ public final class ThumbnailCache {
 
 	private let cache = NSCache<NSURL, NSImage>()
 	private var keys = Set<URL>()
+	private var pending: [URL: Task<NSImage?, Never>] = [:]
 	private let decoder: @Sendable (URL) async -> CGImage?
 	/// Bumped by `removeAll()`; a decode started before the purge is dropped when it lands.
 	private var generation = 0
@@ -37,10 +38,28 @@ public final class ThumbnailCache {
 	/// Decodes on a background thread so opening the strip never waits for images.
 	public func load(_ url: URL) async -> NSImage? {
 		if let hit = cached(url) { return hit }
-		let (decoder, started) = (decoder, generation)
-		let cg = await Task.detached(priority: .userInitiated) { await decoder(url) }.value
-		guard let cg, started == generation else { return nil }
-		return cached(url) ?? store(cg, for: url)
+		let started = generation
+		let work: Task<NSImage?, Never>
+		if let existing = pending[url] {
+			work = existing
+		} else {
+			let decoder = self.decoder
+			work = Task.detached(priority: .userInitiated) { [weak self] in
+				guard !Task.isCancelled else { return nil }
+				let image = await decoder(url)
+				return await self?.finish(image, for: url, generation: started)
+			}
+			pending[url] = work
+		}
+		let image = await work.value
+		return generation == started ? image : nil
+	}
+
+	private func finish(_ image: CGImage?, for url: URL, generation started: Int) -> NSImage? {
+		guard generation == started else { return nil }
+		pending.removeValue(forKey: url)
+		guard let image else { return nil }
+		return cached(url) ?? store(image, for: url)
 	}
 
 	private func store(_ cg: CGImage, for url: URL) -> NSImage {
@@ -63,6 +82,8 @@ public final class ThumbnailCache {
 
 	public func removeAll() {
 		generation += 1
+		for work in pending.values { work.cancel() }
+		pending.removeAll()
 		cache.removeAllObjects()
 		keys.removeAll()
 	}

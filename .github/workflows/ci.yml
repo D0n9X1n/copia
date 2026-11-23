@@ -16,6 +16,11 @@ jobs:
   build-test-bench:
     runs-on: xcode-27
     timeout-minutes: 40
+    outputs:
+      artifact-id: ${{ steps.packages.outputs.artifact-id }}
+      artifact-digest: ${{ steps.packages.outputs.artifact-digest }}
+      zip-sha-arm64: ${{ steps.bundle.outputs.zip-sha-arm64 }}
+      zip-sha-x86_64: ${{ steps.bundle.outputs.zip-sha-x86_64 }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
@@ -58,10 +63,25 @@ jobs:
             --output cpu-profile.trace --target-stdout profile-output.log \
             --launch -- "$BIN" --no-sck --idle 60 --opens 1 --json profile-bench.json
 
-      - name: App bundle (unsigned)
+      - name: App bundles (unsigned, one per architecture)
+        id: bundle
         run: |
+          native=$(scripts/prove-package.sh --native-arch); test "$native" = arm64
           scripts/build-app.sh --unsigned
-          scripts/prove-package.sh unsigned "$RUNNER_TEMP/package-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          work="$RUNNER_TEMP/package-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'PACKAGES=%s\n' "$work/assets" >> "$GITHUB_ENV"
+          scripts/prove-package.sh unsigned "$work"
+
+      # The native Intel job receives exactly these verified bytes, by artifact ID and digest.
+      - name: Upload verified unsigned packages
+        id: packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-packages-${{ github.run_attempt }}
+          path: ${{ env.PACKAGES }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: Upload benchmark
         if: always() && steps.benchmark.outcome != 'skipped'
@@ -82,3 +102,38 @@ jobs:
             profile-bench.json
           if-no-files-found: ignore
           retention-days: 7
+
+  intel:
+    needs: build-test-bench
+    runs-on: macos-26-intel
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require native Intel on macOS 26
+        run: |
+          native=$(scripts/prove-package.sh --native-arch); test "$native" = x86_64
+          os=$(sw_vers -productVersion); [[ "$os" =~ ^26\.[0-9]+(\.[0-9]+)?$ ]]
+
+      - name: Receive the verified unsigned packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build-test-bench.outputs.artifact-id }}
+          DIGEST: ${{ needs.build-test-bench.outputs.artifact-digest }}
+          ARM: ${{ needs.build-test-bench.outputs.zip-sha-arm64 }}
+          INTEL: ${{ needs.build-test-bench.outputs.zip-sha-x86_64 }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          version=$(python3 -I scripts/version.py VERSION)
+          work=$(mktemp -d "$RUNNER_TEMP/copia-intel.XXXXXX"); mkdir "$work/download"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$work/download/transport.zip"
+          python3 -I scripts/release-assets.py receive "$work/download/transport.zip" "$DIGEST" "$ARM" "$INTEL" "$version" "$work/assets"
+          printf 'WORK=%s\n' "$work" >> "$GITHUB_ENV"
+
+      - name: Native Intel packaged self-test
+        run: scripts/prove-package.sh unsigned "$WORK/proof" "$WORK/assets"

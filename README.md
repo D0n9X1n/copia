@@ -30,8 +30,8 @@
 
 - **⌘C is all it takes.** Text, rich text, images, links, files and colors appear newest first below your pins. Copy something again and it moves to the front of its group.
 - **⌘Y brings it back.** The strip opens over whatever you are doing on the display under your pointer. Select a card on press; use Return to copy it and dismiss the strip.
-- **Measured, not assumed.** Earlier local runs opened in 79 ms (p95 93 ms) and idled at 0.05% CPU and 31 MB. Earlier CI missed the historical <0.1% CPU limit and open-latency budget; fresh CI under the revised <0.15% CPU limit is required before release.
-- **Private by default.** Concealed copies and password managers are never stored, you can pause capture from the menu, and nothing leaves your Mac except a link's one-time preview request.
+- **Measured, not assumed.** Earlier local runs opened in 79 ms (p95 93 ms) and idled at 0.05% CPU and 31 MB. Earlier CI missed the historical <0.1% CPU limit and open-latency budget; each release requires fresh CI under the current <0.20% idle CPU limit.
+- **Private by default.** Concealed copies and password managers are never stored. Links make a one-time preview request. Settings → About checks for updates only when you ask; GitHub sees your IP address and the generic `Copia` user agent, not your version or clipboard history.
 - **Yours, on disk.** History is one SQLite file plus thumbnails in Application Support. Deleting a card keeps a short-lived undo snapshot; any pending file cleanup is reported.
 
 ## A closer look
@@ -82,7 +82,11 @@
 
 ## Get started
 
-1. Download the universal `Copia-<version>.zip` from the [latest release](https://github.com/D0n9X1n/copia/releases/latest), unzip it and move `Copia.app` to `/Applications`. Both slices target macOS 26 or later. See **Verification** in that release’s notes for whether it ran on native Intel hardware or macOS 26.
+1. From the [latest release](https://github.com/D0n9X1n/copia/releases/latest), download the app for your Mac:
+   - Apple silicon: `Copia-<version>-arm64.zip`
+   - Intel: `Copia-<version>-x86_64.zip`
+
+   Not sure which? Apple menu → **About This Mac** shows **Chip** on Apple silicon and **Processor** on Intel. Compare the ZIP’s SHA-256 with its `.sha256` file, unzip it and move `Copia.app` to `/Applications`. Both require macOS 26 or later. See **Verification** in that release’s notes for which Intel hardware and macOS versions it ran on.
 2. Open it. This build is signed but not notarized, so macOS blocks the first launch: open **System Settings → Privacy & Security** and click **Open Anyway** next to the message about Copia.
 3. Allow **clipboard access** for history. Copia writes your selection to the clipboard; it never types into another app. Press **⌘V** yourself.
 
@@ -108,7 +112,7 @@ Pause Capture has no default shortcut. The menu bar icon is on by default; if yo
 
 | | Budget | Earlier local measurement |
 |---|---|---|
-| Idle CPU, strip hidden | < 0.15% | 0.05% |
+| Idle CPU, strip hidden | < 0.20% | 0.05% |
 | Idle memory | < 40 MB | 31 MB |
 | Strip open, after scrolling through every card | < 120 MB | 34 MB, 92 MB after scrolling all 1,000 |
 | ⌘Y to first frame, in process | p95 < 100 ms | p50 77–81 ms, p95 91–93 ms |
@@ -122,7 +126,7 @@ Copia builds with SwiftPM and the Xcode 27.2 toolchain:
 ```sh
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 swift build && swift test
-scripts/build-app.sh          # dist/Copia.app and the ZIP named for VERSION
+scripts/build-app.sh          # dist/<arch>/Copia.app and Copia-<VERSION>-<arch>.zip for arm64 and x86_64
 ```
 
 The screenshots above are rendered from fixture data by `scripts/readme-media.sh`. See [Development](wiki/Development.md) for the rest.

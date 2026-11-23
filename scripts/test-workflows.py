@@ -32,6 +32,22 @@ class Workflows(unittest.TestCase):
         self.assertNotRegex(bench[0],r'continue-on-error|\|\||until |for |while ')
         self.assertIn('prove-package.sh unsigned',text); self.assertRegex(text,r'(?s)name: bench-.*?if-no-files-found: error')
 
+    def test_ci_smokes_each_architecture_natively_from_digest_bound_bytes(self):
+        stages=jobs((WORKFLOWS/'ci.yml').read_text()); build=stages['build-test-bench']; intel=stages['intel']
+        self.assertIn('    runs-on: xcode-27\n',build); self.assertIn('    runs-on: macos-26-intel\n',intel)
+        self.assertRegex(build,r'native=\$\(scripts/prove-package\.sh --native-arch\); test "\$native" = arm64')
+        self.assertRegex(intel,r'native=\$\(scripts/prove-package\.sh --native-arch\); test "\$native" = x86_64')
+        self.assertIn('os=$(sw_vers -productVersion); [[ "$os" =~ ^26\\.[0-9]+(\\.[0-9]+)?$ ]]',intel)
+        self.assertIn('    needs: build-test-bench\n',intel)
+        for key in ('artifact-id','artifact-digest','zip-sha-arm64','zip-sha-x86_64'): self.assertIn(key,build)
+        # The four verified files travel as one immutable artifact, received by ID and digest, never by name.
+        self.assertRegex(build,r'(?s)name: unsigned-packages-\$\{\{ github\.run_attempt \}\}.*?compression-level: 0')
+        self.assertNotIn('download-artifact',intel)
+        self.assertRegex(intel,r'(?s)actions/artifacts/\$ARTIFACT_ID/zip.*?release-assets\.py receive .*?prove-package\.sh unsigned "\$WORK/proof" "\$WORK/assets"')
+        self.assertRegex(intel,r'    permissions:\n      actions: read\n      contents: read\n')
+        for forbidden in ('secrets.','environment:','swift build','build-app.sh','continue-on-error','contents: write'):
+            self.assertNotIn(forbidden,intel)
+
     def test_every_main_wiki_push_checks_its_own_sha_before_mirroring(self):
         wiki = (WORKFLOWS/'publish-wiki.yml').read_text()
         self.assertNotIn('concurrency:',wiki)  # A pending run in a shared group can be dropped.
@@ -48,8 +64,9 @@ class Workflows(unittest.TestCase):
         release=jobs((WORKFLOWS/'release.yml').read_text())['publish']
         draft,final=release.split('gh release create',1)
         for phase in (draft,final):
-            self.assertIn('needs.package.outputs.coverage',phase)
-            self.assertIn('needs.package.outputs.zip-sha',phase)
+            for output in ('needs.package.outputs.coverage','needs.package.outputs.toolchain','needs.intel.outputs.coverage',
+                           'needs.package.outputs.zip-sha-arm64','needs.package.outputs.zip-sha-x86_64'):
+                self.assertIn(output,phase)
         self.assertIn('--publishing > "$WORK/notes"',draft)
         self.assertIn('cmp "$WORK/notes" "$WORK/current"',final)
         self.assertEqual(final.count('--notes-file "$WORK/notes"'),2)
@@ -84,9 +101,25 @@ class Workflows(unittest.TestCase):
         [(publisher,publish)]=[(n,v) for n,v in j.items() if 'contents: write' in v]; self.assertNotEqual(signer,publisher)
         gate=re.search(r'needs: (\w+)',sign)[1]; self.assertIn('release-gate.py',j[gate]);self.assertIn('fetch-depth: 0',j[gate])
         self.assertIn('prove-package.sh signed',sign);self.assertIn('security delete-keychain',sign)
+        self.assertRegex(sign,r'native=\$\(scripts/prove-package\.sh --native-arch\); test "\$native" = arm64')
         self.assertNotRegex(publish,r'secrets\.|swift build|--selftest|build-app\.sh'); self.assertRegex(publish,'needs: .*'+signer)
         self.assertRegex(publish,r'(?s)release-assets\.py receive.*?gh release create.*?--draft.*?release-gate\.py.*?--draft=false')
+        self.assertRegex(publish,r'(?s)gh release create .*?gh release view .*?release-assets\.py draft "\$WORK/draft\.json" "\$WORK/assets" "\$VERSION".*?--draft=false')
+        for workflow in ('ci.yml','release.yml'):
+            text=(WORKFLOWS/workflow).read_text()
+            self.assertNotRegex(text,r'sw_vers -productVersion \|',workflow)
+            self.assertNotRegex(text,r'"\$\((?:xcrun|xcodebuild|swift) ',workflow)
         self.assertEqual([n for n,v in j.items() if 'secrets.SIGNING_' in v],[signer]); self.assertIn('artifact-digest',sign)
+        intel=j['intel']; self.assertIn('    runs-on: macos-26-intel\n',intel)
+        self.assertRegex(intel,r'needs: \[validate, package\]'); self.assertRegex(publish,r'needs: \[validate, package, intel\]')
+        self.assertRegex(intel,r'ref: \$\{\{ needs\.validate\.outputs\.sha \}\}')
+        self.assertRegex(intel,r'native=\$\(scripts/prove-package\.sh --native-arch\); test "\$native" = x86_64')
+        self.assertIn('os=$(sw_vers -productVersion); [[ "$os" =~ ^26\\.[0-9]+(\\.[0-9]+)?$ ]]',intel)
+        self.assertRegex(intel,r'(?s)release-assets\.py receive .*?prove-package\.sh signed "\$WORK/proof" "\$WORK/assets"')
+        for forbidden in ('secrets.','environment:','swift build','build-app.sh','contents: write','continue-on-error'):
+            self.assertNotIn(forbidden,intel)
+        for env in ('TOOLCHAIN','COVERAGE_ARM64','COVERAGE_X86_64','REVIEWED_ARM64','REVIEWED_X86_64'): self.assertIn(env+':',publish)
+        self.assertIn('needs.intel.outputs.coverage',publish)
         for action in re.findall(r'uses: (\S+)',text+(WORKFLOWS/'ci.yml').read_text()): self.assertRegex(action,r'@[0-9a-f]{40}$')
 
 

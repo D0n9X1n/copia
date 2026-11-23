@@ -4,7 +4,10 @@
 
 Copia 在 Mac 本地保存剪贴板历史。按 ⌘Y 选择卡片，再到目标应用按 ⌘V。选择卡片只会复制，不需要辅助功能权限。**请先阅读[用法](Usage-zh-CN)。**
 
-通用包的两个架构均以 macOS 26 为最低系统版本。该版本是否在 Intel 实机或 macOS 26 上运行过，请看[发布说明](https://github.com/D0n9X1n/copia/releases)中的 **Verification**。
+每个版本提供两个下载，均要求 macOS 26 或更高版本：Apple 芯片的 Mac 使用 `Copia-<版本号>-arm64.zip`。
+Intel 的 Mac 使用 `Copia-<版本号>-x86_64.zip`。
+
+每个应用只包含对应的架构。不确定？打开苹果菜单 → **关于本机**：显示 **芯片** 为 Apple 芯片，显示 **处理器** 为 Intel。解压前请用对应的 `.sha256` 文件核对 ZIP 的 SHA-256。该版本在哪些 Intel 实机和 macOS 版本上运行过，请看[发布说明](https://github.com/D0n9X1n/copia/releases)中的 **Verification**。
 
 ### 页面
 

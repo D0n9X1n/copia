@@ -1,4 +1,5 @@
 import AppKit
+import Accessibility
 import SwiftUI
 import KeyboardShortcuts
 import CopiaCore
@@ -36,10 +37,33 @@ public enum LoginStatus: Equatable, Sendable {
 	case disabled, enabled, requiresApproval, error(String)
 }
 
+public enum UpdateStatus: Equatable {
+	case idle, checking, current, available(String), failed
+
+	var message: String? {
+		switch self {
+		case .idle: nil
+		case .checking: "Checking for updates…"
+		case .current: "Copia is up to date."
+		case let .available(version): "Copia \(version) is available."
+		case .failed: "Couldn’t check for updates."
+		}
+	}
+
+	var releaseURL: URL? {
+		guard case let .available(version) = self else { return nil }
+		return URL(string: "https://github.com/D0n9X1n/copia/releases/tag/v\(version)")
+	}
+}
+
 /// Settings and onboarding state. The app injects the effects; the views only read and request.
 @MainActor
 @Observable
 public final class ShellModel {
+	public let version: String?
+	private let comparableVersion: ReleaseVersion?
+	public private(set) var updateStatus: UpdateStatus = .idle
+	@ObservationIgnored public var latestVersion: () async throws -> String = { throw URLError(.resourceUnavailable) }
 	public var login: LoginStatus = .disabled
 	public var retention: Retention = .month
 	public var ignoredApps: [String] = []
@@ -63,7 +87,23 @@ public final class ShellModel {
 	@ObservationIgnored public var finishOnboarding: () -> Void = {}
 	@ObservationIgnored private var eraseRequested = false
 
-	public init() {}
+	public init(version: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) {
+		self.version = version?.isEmpty == false ? version : nil
+		comparableVersion = version.flatMap(ReleaseVersion.init)
+	}
+
+	var canCheckForUpdates: Bool { comparableVersion != nil && updateStatus != .checking }
+
+	public func checkForUpdates() async {
+		guard let current = comparableVersion, updateStatus != .checking else { return }
+		updateStatus = .checking
+		do {
+			guard let latest = try await ReleaseVersion(latestVersion()) else { throw URLError(.cannotParseResponse) }
+			updateStatus = current < latest ? .available(latest.string) : .current
+		} catch {
+			updateStatus = .failed
+		}
+	}
 
 	public func requestErase() { eraseRequested = true; eraseConfirmation = true }
 	public func cancelErase() { eraseRequested = false; eraseConfirmation = false }
@@ -164,7 +204,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 // MARK: Settings
 
 public enum SettingsTab: String, CaseIterable, Identifiable {
-	case general = "General", shortcuts = "Shortcuts", privacy = "Privacy"
+	case general = "General", shortcuts = "Shortcuts", privacy = "Privacy", about = "About"
 	public var id: String { rawValue }
 	public var title: String { rawValue }
 	public var symbol: String {
@@ -172,11 +212,12 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
 		case .general: "gearshape"
 		case .shortcuts: "keyboard"
 		case .privacy: "hand.raised.fill"
+		case .about: "info.circle"
 		}
 	}
 }
 
-/// One Settings pane. `makeSettingsWindow` puts the three panes in the window's toolbar tabs.
+/// One Settings pane, hosted by the native toolbar tab controller.
 public struct SettingsView: View {
 	public static let width: CGFloat = 560
 	/// Each pane's height; the toolbar tabs sit above it.
@@ -198,6 +239,7 @@ public struct SettingsView: View {
 			case .general: general
 			case .shortcuts: shortcuts
 			case .privacy: privacy
+			case .about: about
 			}
 		}
 		.formStyle(.grouped)
@@ -245,6 +287,31 @@ public struct SettingsView: View {
 				Text("↩ or ⌘1–9 copies and closes history. Hold ⇧ to copy plain text. Press ⌘V where you want to paste. In results: ←/→ select, ⌘A selects all, ⌘C copies without closing, ⌫ deletes, and ⌘Z undoes. ⎋ clears search or closes history.")
 					.font(.callout).foregroundStyle(ShellTheme.secondary)
 			}
+		}
+	}
+
+	private var about: some View {
+		Form {
+			Section("Copia") {
+				if let version = model.version { Text("Version \(version)") } else { Text("Version unavailable") }
+			}
+			Section("Updates") {
+				Button(model.updateStatus == .failed ? "Try Again" : "Check for Updates") {
+					Task { await model.checkForUpdates() }
+				}.disabled(!model.canCheckForUpdates)
+				if let message = model.updateStatus.message {
+					HStack {
+						if model.updateStatus == .checking { ProgressView().controlSize(.small).accessibilityHidden(true) }
+						Text(message)
+					}
+				} else if !model.canCheckForUpdates {
+					Text("Open a release build of Copia.app to check for updates.")
+				}
+				if let url = model.updateStatus.releaseURL { Link("View Release", destination: url) }
+			}
+		}
+		.onChange(of: model.updateStatus) { _, status in
+			if let message = status.message { AccessibilityNotification.Announcement(message).post() }
 		}
 	}
 

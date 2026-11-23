@@ -28,6 +28,25 @@ private struct MountedCards<Card: View>: View {
 	}
 }
 
+private final class HistoryDocument: NSView {
+	let host = NSHostingView(rootView: AnyView(EmptyView()))
+
+	var backedRect: NSRect {
+		guard !host.frame.isEmpty, !bounds.isEmpty else { return .zero }
+		let left = host.frame.minX == Theme.rowPadding ? bounds.minX : host.frame.minX
+		let right = host.frame.maxX >= bounds.maxX - Theme.rowPadding ? bounds.maxX : host.frame.maxX
+		return NSRect(x: left, y: bounds.minY, width: max(0, right - left), height: bounds.height).intersection(bounds)
+	}
+
+	override func prepareContent(in rect: NSRect) {
+		// Only mounted cards and the empty end margins are ready for AppKit's scroll overdraw.
+		let backed = backedRect
+		let viewport = enclosingScrollView?.documentVisibleRect ?? visibleRect
+		let area = rect.intersection(backed).union(viewport.intersection(backed))
+		super.prepareContent(in: area.isNull ? .zero : area)
+	}
+}
+
 struct HistoryRow<Card: View>: NSViewRepresentable {
 	let clips: [Clip]
 	let position: HistoryRowPosition
@@ -49,8 +68,8 @@ struct HistoryRow<Card: View>: NSViewRepresentable {
 
 @MainActor
 final class HistoryScrollView<Card: View>: NSScrollView {
-	private let document = NSView()
-	private let host = NSHostingView(rootView: AnyView(EmptyView()))
+	private let document = HistoryDocument()
+	private var host: NSHostingView<AnyView> { document.host }
 	private var clips: [Clip] = []
 	private weak var model: StripModel?
 	private var reduced = false
@@ -84,8 +103,13 @@ final class HistoryScrollView<Card: View>: NSScrollView {
 			host.rootView = AnyView(MountedCards(model: model, slots: slots, reduced: reduced, card: card))
 		}
 		let size = CGSize(width: PanelLayout.contentWidth(count: clips.count), height: Theme.rowHeight)
-		if document.frame.size != size { document.setFrameSize(size) }
-		refresh()
+		if document.frame.size != size {
+			document.setFrameSize(size)
+			refresh()
+			document.preparedContentRect = document.backedRect
+		} else {
+			refresh()
+		}
 	}
 
 	override func viewDidMoveToWindow() {
@@ -130,5 +154,6 @@ final class HistoryScrollView<Card: View>: NSScrollView {
 		slots.range = mounted
 		let width = PanelLayout.contentWidth(count: mounted.count) - 2 * Theme.rowPadding
 		host.frame = CGRect(x: PanelLayout.cardMinX(index: mounted.lowerBound), y: 0, width: width, height: Theme.rowHeight)
+		document.preparedContentRect = document.backedRect
 	}
 }

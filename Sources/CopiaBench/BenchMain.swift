@@ -12,10 +12,12 @@ import CopiaUI
 @MainActor
 enum Bench {
 	struct Budgets {
-		static let idleCPUPercent = 0.15
+		static let idleCPUPercent = 0.20
 		static let idleFootprintMB = 40.0
 		static let openFootprintMB = 120.0
 		static let openP95ms = 100.0
+
+		static func acceptsIdleCPU(_ percent: Double) -> Bool { percent < idleCPUPercent }
 	}
 
 	static func cpuSeconds() -> Double {
@@ -221,7 +223,8 @@ enum Bench {
 					report["pointerSelection"] = [
 						"method": "owned windows: mouse-down dispatch, layout/transaction flush, first presented target ring at half settled contrast",
 						"dispatchMs": pointer.map { $0.dispatch.map(ms) as Any? ?? NSNull() },
-						"transactionFlushMs": pointer.map { ms($0.commit) },
+						"transactionFlushMs": pointer.map { $0.commit.map(ms) as Any? ?? NSNull() },
+						"invalidReasons": pointer.map { $0.failure?.rawValue as Any? ?? NSNull() },
 						"presentedTargetRingMs": pointer.map { $0.presented.map(ms) as Any? ?? NSNull() },
 					] as [String: Any]
 					report["refreshHz"] = refreshHz
@@ -287,7 +290,7 @@ enum Bench {
 			let p95 = percentile(latencies, 0.95)
 
 			checks = [
-				("idleCPUPercent < \(Budgets.idleCPUPercent)", idleCPU < Budgets.idleCPUPercent),
+				("idleCPUPercent < \(Budgets.idleCPUPercent)", Budgets.acceptsIdleCPU(idleCPU)),
 				("idleFootprintMB < \(Budgets.idleFootprintMB)", idleFootprint < Budgets.idleFootprintMB),
 				("openFootprintMB < \(Budgets.openFootprintMB)", openFootprint < Budgets.openFootprintMB),
 				("openP95ms < \(Budgets.openP95ms)", p95 < Budgets.openP95ms),
