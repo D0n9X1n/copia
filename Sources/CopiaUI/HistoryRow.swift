@@ -5,10 +5,20 @@ import CopiaCore
 @MainActor
 final class HistoryRowPosition {
 	weak var scroll: NSScrollView?
+	/// The opening whose settle already showed the scroll bar; a row that comes back in it (after a search) doesn't.
+	private var flashedOpening: Int?
 
-	/// Shows the scroll bar briefly, once laid out, when the cards overflow.
-	func flash() {
-		DispatchQueue.main.async { [weak self] in (self?.scroll as? HistoryScrollBase)?.flashIfOverflowing() }
+	/// Shows the scroll bar briefly, once laid out, when the cards overflow: once per opening, and only while `opening`
+	/// is still the current, settled one when the queued flash runs.
+	func flash(opening: Int, isCurrent: @escaping @MainActor () -> Bool) {
+		guard flashedOpening != opening else { return }
+		DispatchQueue.main.async { [weak self] in
+			MainActor.assumeIsolated {
+				guard let self, self.flashedOpening != opening, isCurrent() else { return }
+				self.flashedOpening = opening
+				(self.scroll as? HistoryScrollBase)?.flashIfOverflowing()
+			}
+		}
 	}
 }
 

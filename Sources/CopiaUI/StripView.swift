@@ -169,9 +169,18 @@ public struct StripView: View {
 			.onAppear {
 				scrollToSelection(animated: false)
 				// The scroll bar shows briefly once the open settles, without rebuilding the strip.
-				model.onOpenSettled = { [row] in row.flash() }
-				if model.isOpenSettled { row.flash() }
+				model.onOpenSettled = { [row, model] in flashRow(row, model: model) }
+				if model.isOpenSettled { flashRow(row, model: model) }
 			}
+		}
+	}
+
+	/// Flashes for the opening that settled, if it is still the current one when the flash runs.
+	private func flashRow(_ row: HistoryRowPosition, model: StripModel) {
+		let opening = model.presentationID
+		row.flash(opening: opening) { [weak model] in
+			guard let model else { return false }
+			return model.presentationID == opening && model.isOpenSettled
 		}
 	}
 

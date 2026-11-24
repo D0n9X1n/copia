@@ -724,6 +724,71 @@ extension WindowTests.InputTests {
 	/// A press in the band reaches the scroller, never a card. Driving the scroller's own tracking (a knob drag, a track
 	/// click) needs events posted from inside its nested loop, which stops the test runner's main run loop, so the drag
 	/// and the track click are checked by hand in the running app; StripPanel's press handling is unchanged.
+	@Test func theFlashIsOncePerOpeningEvenWhenTheRowComesBack() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		#expect(scroll.flashCount == 1)
+		// A search with no matches removes the row; clearing it brings a new row back in the same opening.
+		host.model.query = "zzzz-no-such-card"
+		await host.settle(400)
+		#expect(Self.historyScroll(in: host.panel.host) == nil, "no matches: no row")
+		host.model.query = ""
+		await host.settle(300)
+		let again = try #require(Self.historyScroll(in: host.panel.host))
+		#expect(again.flashCount == 0, "the opening already flashed")
+	}
+
+	@Test func aFlashQueuedByAnEarlierOpeningNeverReachesTheNextOne() async throws {
+		var held: [() -> Void] = []
+		let animator = Animator { event, change, completion in
+			change()
+			if event == .open { held.append(completion) } else { completion() }
+		}
+		let host = InputHost(clips: Array(Fixtures.tenThousand.prefix(100)), animator: animator)
+		defer { host.close() }
+		await host.settle()
+		// Opening A settles with its row on screen and queues a flash; B opens before the main queue drains.
+		held.removeFirst()()
+		host.model.beginClose(); host.model.open(); host.model.animateIn()
+		await host.settle()
+		let scroll = try #require(Self.historyScroll(in: host.panel.host))
+		#expect(scroll.flashCount == 0, "A's flash must not show during B's slide")
+		held.removeFirst()()
+		await host.settle()
+		#expect(scroll.flashCount == 1, "B flashes once it settles")
+	}
+
+	@Test func aNotchedWheelLeavesTheLineForTheNextTiltAsItWas() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		_ = center(scroll)
+		scroll.scrollWheel(with: try wheel(dy: -3, lines: true))
+		let start = center(scroll)
+		scroll.scrollWheel(with: try wheel(dy: 0, dx: -3, lines: true))
+		#expect(abs(scroll.contentView.bounds.minX - (start + 30)) < 1, "tilt after a notch keeps AppKit's 10 pt line")
+	}
+
+	@Test func turningSidewaysMovesEveryDeltaFieldAndIgnoresOtherEvents() throws {
+		let source = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: -3, wheel2: 0, wheel3: 0))
+		// Fields AppKit reads independently; the line delta is written first, as it recomputes the others.
+		source.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -2.75)
+		source.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -27)
+		let lines = source.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+		let fixed = source.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+		let points = source.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
+		let event = try #require(NSEvent(cgEvent: source))
+		let turned = try #require(HistoryScrollBase.sideways(event)?.cgEvent)
+		#expect(turned.getIntegerValueField(.scrollWheelEventDeltaAxis2) == lines)
+		#expect(turned.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2) == fixed)
+		#expect(turned.getIntegerValueField(.scrollWheelEventPointDeltaAxis2) == points)
+		#expect(turned.getIntegerValueField(.scrollWheelEventDeltaAxis1) == 0
+			&& turned.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) == 0
+			&& turned.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1) == 0)
+		let moved = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [], timestamp: 0,
+			windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
+		#expect(HistoryScrollBase.sideways(moved) == nil, "not a wheel")
+	}
+
 	@Test func aPressInTheBandReachesTheScrollerNotACard() async throws {
 		let (host, scroll) = try await scrollHost()
 		defer { host.close() }
