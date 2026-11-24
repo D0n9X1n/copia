@@ -169,14 +169,15 @@ public struct StripView: View {
 			.onAppear {
 				scrollToSelection(animated: false)
 				// The scroll bar shows briefly once the open settles, without rebuilding the strip.
-				model.onOpenSettled = { [row, model] in flashRow(row, model: model) }
-				if model.isOpenSettled { flashRow(row, model: model) }
+				// Weak: the model owns this closure, so a strong capture would keep it alive forever.
+				model.onOpenSettled = { [row, weak model] in if let model { Self.flashRow(row, model: model) } }
+				if model.isOpenSettled { Self.flashRow(row, model: model) }
 			}
 		}
 	}
 
 	/// Flashes for the opening that settled, if it is still the current one when the flash runs.
-	private func flashRow(_ row: HistoryRowPosition, model: StripModel) {
+	private static func flashRow(_ row: HistoryRowPosition, model: StripModel) {
 		let opening = model.presentationID
 		row.flash(opening: opening) { [weak model] in
 			guard let model else { return false }
