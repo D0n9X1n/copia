@@ -454,10 +454,10 @@ extension WindowTests.StripViewTests {
 		#expect(count.frame.height < 20, "the count stays on one line: \(count.frame)")
 		#expect(host.window.frame.contains(count.frame))
 		#expect(frame.maxX < count.frame.minX)
-		// The pill starts at the cards' 24 pt inset: the field sits 54 pt in (24 + 10 padding + glyph + 6), 4 pt right of
-		// where the old 20 pt inset put it.
+		// The pill starts at the cards' 24 pt inset: the field sits about 54 pt in (24 + 10 padding + glyph + 6; 53 at 1x,
+		// where the glyph rounds narrower). The old 20 pt inset put it 4 pt further left, at 49–50.
 		let fieldStart = frame.minX - host.window.frame.minX
-		#expect(abs(fieldStart - 54) < 1, "the field starts \(fieldStart) pt in")
+		#expect(fieldStart > 52 && fieldStart < 56, "the field starts \(fieldStart) pt in")
 		#expect(frame.width >= 160 - 30, "the pill never shrinks below 160 pt: field \(frame.width)")
 	}
 
