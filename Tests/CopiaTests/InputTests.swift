@@ -795,10 +795,13 @@ extension WindowTests.InputTests {
 		let (host, scroll) = try await scrollHost()
 		defer { host.close() }
 		let document = try #require(scroll.documentView)
-		for style in [NSScroller.Style.overlay, .legacy] {
+		// The overlay bar shown and faded out (CI's state), then the always-shown bar.
+		for (style, faded) in [(NSScroller.Style.overlay, false), (.overlay, true), (.legacy, false)] {
 			scroll.scrollerStyle = style
 			scroll.tile(); await host.settle()
 			let scroller = try #require(scroll.horizontalScroller)
+			scroller.isHidden = faded
+			defer { scroller.isHidden = false }
 			let content = try #require(host.panel.contentView)
 			for x in [scroller.bounds.minX + 4, scroller.bounds.midX, scroller.bounds.maxX - 4] {
 				let point = content.convert(scroller.convert(CGPoint(x: x, y: scroller.bounds.midY), to: nil), from: nil)
