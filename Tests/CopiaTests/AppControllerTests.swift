@@ -700,23 +700,46 @@ extension WindowTests.AppControllerTests {
 		#expect(await eventually { r.board.string(forType: .string) == "older" }, "the first arrow still copies")
 	}
 
-	@Test func escapeNeverPutsBackACardOverACopyItHadNotSavedWhenBrowsingBegan() async throws {
+	@Test func aCopyMadeJustBeforeOpeningIsRestoredWhenSavedBeforeTheArrowCopies() async throws {
 		let r = try AppRig(); await r.launch(); r.stop()
-		let model = r.controller.model, panel = r.controller.panel
+		let model = r.controller.model, panel = r.controller.panel, clock = ClockProbe()
 		panel.alphaValue = 0
+		model.clock = clock.clock
 		defer { model.beginClose(); panel.orderOut(nil) }
 		try await r.copy("oldest"); try await r.copy("older")
 		r.copyElsewhere("just copied")
-		// Opened before the next poll: Copia does not know the clipboard, so there is no card to put back.
 		r.controller.toggleHistory()
-		#expect(model.committed == nil)
+		#expect(model.committed == nil, "opened before the poll: unknown")
 		model.browse(1)
+		// The poll saves the copy before the lens rests: it is what the clipboard held before browsing changed it.
+		r.controller.watcher.tick()
+		try #require(await eventually { model.committed != nil && model.clips.first { $0.id == model.committed?.id }?.text == "just copied" })
+		clock.advance(by: StripModel.browseSettle)
 		try #require(await eventually { r.board.string(forType: .string) == "oldest" })
-		try #require(await eventually { model.clips.contains { $0.text == "just copied" } }, "the copy is saved to history")
+		#expect(model.restoreHint == .restore)
+		model.escape()
+		#expect(await eventually { r.board.string(forType: .string) == "just copied" })
+	}
+
+	@Test func theChipAlwaysMatchesWhatEscapeDoesForACopyMadeJustBeforeOpening() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel, clock = ClockProbe()
+		panel.alphaValue = 0
+		model.clock = clock.clock
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("oldest"); try await r.copy("older")
+		r.copyElsewhere("just copied")
+		r.controller.toggleHistory()
+		model.browse(1)
+		// The arrow's own check finds the copy and saves it while its write runs: either may finish first.
+		clock.advance(by: StripModel.browseSettle)
+		try #require(await eventually { r.board.string(forType: .string) == "oldest" })
+		try #require(await eventually { model.clips.contains { $0.text == "just copied" } })
+		try await Task.sleep(for: .milliseconds(100))
+		let hint = try #require(model.restoreHint)
 		model.escape()
 		try await Task.sleep(for: .milliseconds(300))
-		let board = r.board.string(forType: .string)
-		#expect(board == "oldest" || board == "just copied", "Esc puts back only what Copia had saved: \(board ?? "nil")")
+		#expect(r.board.string(forType: .string) == (hint == .restore ? "just copied" : "oldest"), "chip \(hint)")
 	}
 
 	@Test func escapeNeverRestoresOverACopyMadeWhileCaptureWasPaused() async throws {
