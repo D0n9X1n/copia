@@ -79,6 +79,8 @@ public final class AppController {
 	/// The pasteboard's change count when the strip last opened: a copy made before then is what it opened on, not a
 	/// copy made elsewhere during the presentation, so the first poll that sees it cancels nothing.
 	private var openChange: Int?
+	/// The newest change made elsewhere: a capture saved late still fills the restore point when nothing came after it.
+	private var lastForeignChange = Int.min
 	/// Tests: runs after the store read, right before the pasteboard write.
 	var beforePasteboardWrite: () -> Void = {}
 	private let sources: SourceAppearance
@@ -283,6 +285,7 @@ public final class AppController {
 		}
 		watcher.onChange = { [weak self] change in
 			guard let self, change != ownWrite else { return }
+			lastForeignChange = max(lastForeignChange, change)
 			// Copied elsewhere, captured or not: Copia no longer knows the clipboard until a capture says otherwise,
 			// and a browse, keep or restore not yet written is cancelled, even while the strip closes.
 			lastChange = max(lastChange, change)
@@ -297,6 +300,10 @@ public final class AppController {
 				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
 				await self.reload()
+				// Only Copia's own browse replaced it since: it is still what the clipboard held before that browse.
+				if change < self.lastChange, change == self.lastForeignChange, self.model.cardsMounted {
+					self.model.restorePointSaved(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key)))
+				}
 				// A newer change (Copia's own write, or another copy) since this one wins.
 				guard change >= self.lastChange else { return }
 				self.onClipboard = (change, result.clip.key, false)

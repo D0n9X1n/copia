@@ -139,8 +139,6 @@ struct ClipCard: View {
 	/// Reserves the footer pin slot, so the strip's click gesture can toggle the pin there. False keeps the static
 	/// footer (design renders).
 	var pinControl = false
-	/// The card is the one on the clipboard: a light accent wash under its content, beside the lens's accent ring.
-	var onClipboard = false
 
 	/// The pin button's hit area in card coordinates: the footer's trailing 24×24 slot. The strip is always laid out
 	/// left to right, so this is the right-hand end. The card's click gesture ignores presses that start on a visible pin.
@@ -164,13 +162,7 @@ struct ClipCard: View {
 			footer
 		}
 		.frame(width: Theme.cardSize.width, height: Theme.cardSize.height)
-		.background {
-			ZStack {
-				Theme.card
-				Color.accentColor.opacity(onClipboard ? Theme.cardWashOpacity : 0)
-					.animation(LensRing.fillIn(onClipboard: onClipboard, reduced: reduceMotion), value: onClipboard)
-			}
-		}
+		.background(Theme.card)
 		.clipShape(.rect(cornerRadius: Theme.cardRadius, style: .continuous))
 		.overlay {
 			RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)

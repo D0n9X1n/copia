@@ -20,7 +20,7 @@ struct Scene {
 	var midway: (@MainActor (StripModel) async -> Void)?
 	/// Lays every card out at once (CardSheet) instead of the strip.
 	var sheet = false
-	/// Opens as if the clipboard held something Copia didn't save, so the lens is grey.
+	/// Opens as if the clipboard held something Copia didn't save, so ⎋ can't restore it.
 	var unknownClipboard = false
 }
 
@@ -59,8 +59,6 @@ enum RenderRunner {
 			list.append(Scene(name: "07-reduce-transparency-\(mode)", dark: dark, overrides: CopiaOverrides(reduceTransparency: true)))
 			list.append(Scene(name: "07-increase-contrast-\(mode)", dark: dark, overrides: CopiaOverrides(highContrast: true)))
 			list.append(Scene(name: "08-hover-\(mode)", dark: dark, prepare: { m in m.hoveredID = m.clips[2].id }))
-			// Grey lens: selected, not on the clipboard.
-			list.append(Scene(name: "08-lens-hollow-\(mode)", dark: dark, unknownClipboard: true))
 			// Browsing: the clipboard followed the lens to the third card, and the chip beside Search offers ⎋.
 			list.append(Scene(name: "08-browsing-\(mode)", dark: dark, prepare: { m in
 				m.browse(2); try? await Task.sleep(for: .milliseconds(400))
@@ -256,7 +254,7 @@ enum RenderRunner {
 		panel.host.rootView = AnyView(root)
 		panel.setFrame(PanelLayout.windowFrame(in: visible), display: true)
 		panel.orderFrontRegardless()
-		// The usual case: the newest card is what the clipboard holds, so the lens is filled.
+		// The usual case: the newest card is what the clipboard holds.
 		model.open(clipboard: scene.unknownClipboard ? nil : model.clips.first.map { ClipboardCard(id: $0.id) })
 		model.animateIn()
 		await scene.prepare(model)

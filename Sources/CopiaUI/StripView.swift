@@ -192,11 +192,10 @@ public struct StripView: View {
 		return ClipCard(clip: clip, tint: tint, icon: sources.icon(for: clip.sourceBundleID),
 			badge: model.badge(at: index), hovered: model.hoveredID == clip.id, selected: selected,
 			removing: model.removingIDs.contains(clip.id), age: ClipCard.relative(clip.timestamp, now: timestamp), highlight: model.query, thumbnails: thumbnails,
-			animator: model.animator, showsPin: showsPin, pinControl: true, onClipboard: primary && model.lensOnClipboard)
+			animator: model.animator, showsPin: showsPin, pinControl: true)
 			.background {
 				if primary {
-					LensRing(removing: model.removingIDs.contains(clip.id), onClipboard: model.lensOnClipboard, highContrast: highContrast)
-						.animation(LensRing.fillIn(onClipboard: model.lensOnClipboard, reduced: reduceMotion), value: model.lensOnClipboard)
+					LensRing(removing: model.removingIDs.contains(clip.id))
 						.matchedGeometryEffect(id: "lens", in: lensSpace)
 						.allowsHitTesting(false)
 				}
@@ -308,41 +307,24 @@ private struct StripSlide<Content: View>: View {
 	}
 }
 
-/// The selection lens (brief): radius 21, 5 pt outside the card, behind it. An opaque halo band edges the ring outside
-/// and fills the gap inside it (tucking 1 pt under the card), so the ring reaches 3:1 on any glass.
-/// On the clipboard: a 3 pt accent stroke over a 12% accent fill, and the card itself takes a 6% accent wash
-/// (`ClipCard.onClipboard`). Selected but not on the clipboard: the same ring in a quiet grey, untinted, as macOS draws
-/// a selection that is not the active one. The lens fades with a deleting card,
-/// so no block shows.
+/// The selection lens (brief): radius 21, 5 pt outside the card, behind it: a 3 pt accent stroke over a 12% accent fill.
+/// An opaque halo band edges the ring outside and fills the gap inside it (tucking 1 pt under the card), so the ring
+/// reaches 3:1 on any glass. One ring for every selection; the lens fades with a deleting card, so no block shows.
 struct LensRing: View {
 	var removing = false
-	var onClipboard = true
-	var highContrast = false
 	static let fillOpacity = Theme.lensFillOpacity
 	static let band = Theme.lensHaloWidth + Theme.lensOutset + 1
-
-	/// Grey to accent fades in once the write lands; accent to grey is instant, so the lens never claims a copy early.
-	static func fillIn(onClipboard: Bool, reduced: Bool) -> Animation? {
-		guard onClipboard else { return nil }
-		return reduced ? .linear(duration: 0.12) : .easeOut(duration: 0.12)
-	}
 
 	var body: some View {
 		ZStack {
 			RoundedRectangle(cornerRadius: Theme.lensRadius + Theme.lensHaloWidth, style: .continuous)
 				.strokeBorder(Theme.lensHalo, lineWidth: Self.band)
 			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-				.strokeBorder(Theme.lensIdle(highContrast: highContrast), lineWidth: 3)
+				.fill(Color.accentColor.opacity(Self.fillOpacity))
 				.padding(Theme.lensHaloWidth)
-				.opacity(onClipboard ? 0 : 1)
-			ZStack {
-				RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-					.fill(Color.accentColor.opacity(Self.fillOpacity))
-				RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
-					.strokeBorder(Color.accentColor, lineWidth: 3)
-			}
-			.padding(Theme.lensHaloWidth)
-			.opacity(onClipboard ? 1 : 0)
+			RoundedRectangle(cornerRadius: Theme.lensRadius, style: .continuous)
+				.strokeBorder(Color.accentColor, lineWidth: 3)
+				.padding(Theme.lensHaloWidth)
 		}
 		.padding(-(Theme.lensOutset + Theme.lensHaloWidth))
 		.opacity(removing ? 0 : 1)

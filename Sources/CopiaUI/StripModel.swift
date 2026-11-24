@@ -23,7 +23,12 @@ public final class StripModel {
 			guard query != oldValue else { return }
 			searchRevision += 1
 			storeMatches = []
-			reconcileSelection(preferredIndex: 0)
+			if query.isEmpty, frozenIDs == nil {
+				// Search cleared: the lens goes back to the clipboard's card (or the newest), as when the strip opens.
+				selectedID = clipboard.flatMap { c in clips.contains { $0.id == c.id } ? c.id : nil } ?? newestID
+			} else {
+				reconcileSelection(preferredIndex: 0)
+			}
 			searchTask?.cancel()
 			searchTask = Task { [weak self] in
 				try? await Task.sleep(for: Self.searchDelay)
@@ -318,14 +323,21 @@ public final class StripModel {
 	/// The lens rests this long before the clipboard follows it.
 	public static let browseSettle: Duration = .milliseconds(150)
 
-	/// The lens is filled only on the card the clipboard holds.
+	private var newestID: UUID? { clips.max { $0.timestamp < $1.timestamp }?.id }
+
+	/// The lens is on the card the clipboard holds.
 	public var lensOnClipboard: Bool { selectedID != nil && clipboard?.id == selectedID }
 
 	/// Shown once a browse has changed the clipboard away from the restore point.
 	public var restoreHint: RestoreHint? {
 		guard let clipboard, clipboard != committed else { return nil }
 		guard query.isEmpty else { return .copied }
-		return committed.map { c in clips.contains { $0.id == c.id } } == true ? .restore : .unsaved
+		return committed.map(canRestore) == true ? .restore : .unsaved
+	}
+
+	/// The restore point is still a card Esc can put back: in history, and not on its way out.
+	private func canRestore(_ card: ClipboardCard) -> Bool {
+		clips.contains { $0.id == card.id } && !removingIDs.contains(card.id) && !pendingDelete.contains(card.id)
 	}
 
 	/// Takes the writer, or waits until the current holder hands it over. Pair every call with `releaseWriter()`.
@@ -421,6 +433,13 @@ public final class StripModel {
 		} catch {
 			showActionError(error, operation: "copy", close: close)
 		}
+	}
+
+	/// A copy made elsewhere was saved after a browse already replaced it, with nothing else copied since: it is what
+	/// the clipboard held before the browse, so it fills an empty restore point. The clipboard stays where it is.
+	public func restorePointSaved(_ card: ClipboardCard) {
+		guard cardsMounted, !isClosing, committed == nil, canRestore(card) else { return }
+		committed = card
 	}
 
 	/// The app saw the clipboard change without Copia: a copy made elsewhere, captured (`card`) or not (nil).
@@ -580,7 +599,7 @@ public final class StripModel {
 		query = ""
 		appeared = false
 		cardsMounted = true
-		selectedID = held?.id ?? clips.max { $0.timestamp < $1.timestamp }?.id
+		selectedID = held?.id ?? newestID
 	}
 
 	/// Called after the open animation, so the panel can refresh its shadow.
@@ -599,7 +618,7 @@ public final class StripModel {
 		let shown = presentation, browse = browseGeneration
 		if cancel {
 			// ⎋ puts back the last pick that landed. It runs after any write still in flight, and writes only if one changed it.
-			if let restore = committed, clips.contains(where: { $0.id == restore.id }) {
+			if let restore = committed, canRestore(restore) {
 				lensAfterClose = restore.id
 				Task { await self.writeAfterClose(restore, restoring: true, presentation: shown, browse: browse) }
 			}

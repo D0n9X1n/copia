@@ -78,8 +78,7 @@ extension WindowTests.LensTests {
 					let rect = CGRect(x: card.frame.midX - host.panel.frame.minX - Theme.cardSize.width / 2,
 						y: host.panel.frame.maxY - card.frame.midY - Theme.cardSize.height / 2,
 						width: Theme.cardSize.width, height: Theme.cardSize.height).insetBy(dx: -Theme.lensOutset, dy: -Theme.lensOutset)
-					// Ring presence: on press the lens is grey until the click's copy lands; either way the ring is there.
-					return ContrastCheck.lens(in: bitmap, ring: rect, scale: CGFloat(image.width) / v.bounds.width, percentile: 0.5)
+					return ContrastCheck.lens(in: bitmap, ring: rect, scale: CGFloat(image.width) / v.bounds.width)
 				}
 			}
 			host.model.selectAllResults(); await host.settle()

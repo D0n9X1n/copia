@@ -95,21 +95,6 @@ import AppKit
 		#expect(Theme.contrast(pink, Theme.lensGap(accent: pink, halo: halo)) >= 3)
 	}
 
-	@Test func theOnClipboardWashKeepsCardTextAt4_5To1ForEveryMacAccent() {
-		// macOS accent colors, light and dark variants: blue, purple, pink, red, orange, yellow, green, graphite.
-		let accents: [UInt32] = [0x007AFF, 0x0A84FF, 0xA550A7, 0xBF5AF2, 0xF74F9E, 0xFF375F, 0xFF5257, 0xFF453A,
-			0xF7821B, 0xFF9F0A, 0xFFC600, 0xFFD60A, 0x62BA46, 0x32D74B, 0x8C8C8C, 0x98989D]
-		for hex in accents {
-			for dark in [false, true] {
-				let washed = Theme.cardWash(accent: Theme.rgb(hex), dark: dark)
-				let ink2 = Theme.rgb(dark ? Theme.Hex.ink2Dark : Theme.Hex.ink2Light)
-				let ink = Theme.rgb(dark ? Theme.Hex.inkDark : Theme.Hex.inkLight)
-				#expect(Theme.contrast(ink2, washed) >= 4.5, "ink2 \(String(hex, radix: 16)) dark=\(dark)")
-				#expect(Theme.contrast(ink, washed) >= 7, "ink \(String(hex, radix: 16)) dark=\(dark)")
-			}
-		}
-	}
-
 	@Test func lensHaloKeepsTheRingAt3To1ForEveryAccent() {
 		// macOS accent colors (light, dark) plus a sweep of hues.
 		var accents: [UInt32] = [0x007AFF, 0x0A84FF, 0xA550A7, 0xBF5AF2, 0xF74F9E, 0xFF375F, 0xFF5257, 0xFF453A,
@@ -127,12 +112,6 @@ import AppKit
 				#expect(Theme.contrast(accent, halo) >= 3, "\(String(hex, radix: 16)) dark=\(dark)")
 				// Inside the ring the 12% accent fill tints the halo; the ring must keep 3:1 against that too.
 				#expect(Theme.contrast(accent, Theme.lensGap(accent: accent, halo: halo)) >= 3, "gap \(String(hex, radix: 16)) dark=\(dark)")
-				// Selected but not on the clipboard: the grey ring on the same halo.
-				for highContrast in [false, true] {
-					let grey = Theme.lensIdle(halo: halo, highContrast: highContrast)
-					#expect(Theme.contrast(grey, halo) >= 3, "idle \(String(hex, radix: 16)) dark=\(dark) hc=\(highContrast)")
-					#expect(grey.max() - grey.min() < 0.03, "idle is neutral")
-				}
 			}
 		}
 	}

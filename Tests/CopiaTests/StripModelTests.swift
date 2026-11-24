@@ -1423,3 +1423,61 @@ extension StripModelTests {
 		#expect(r.model.selectedID == c && r.model.lensOnClipboard)
 	}
 }
+
+/// Keep it simple: one red lens, and clearing Search puts the lens back on the clipboard's card.
+extension StripModelTests {
+	@Test func clearingTheSearchPutsTheLensBackOnTheClipboardsCard() async {
+		let r = StripRig(), c = Fixtures.mixed[2].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: c))
+		r.model.query = "release notes"
+		#expect(r.model.selectedID == Fixtures.mixed[0].id)
+		r.model.query = ""
+		#expect(r.model.selectedID == c && r.model.lensOnClipboard)
+		await r.settle()
+		#expect(r.writes.isEmpty, "clearing the search only moves the lens")
+	}
+
+	@Test func clearingTheSearchAfterArrowingKeepsTheLensOnTheCopiedMatch() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		r.model.query = "the"
+		r.model.browse(1)
+		await r.settle()
+		let copied = r.model.selectedID
+		r.model.query = ""
+		#expect(r.model.selectedID == copied && r.model.lensOnClipboard)
+		#expect(r.model.restoreHint == .restore, "Esc still puts back the card at open")
+	}
+
+	@Test func clearingTheSearchWithAnUnknownClipboardGoesToTheNewestCard() {
+		let r = StripRig()
+		r.model.query = "ROADMAP"
+		r.model.query = ""
+		#expect(r.model.selectedID == Fixtures.mixed[0].id)
+	}
+
+	@Test func theChipNeverOffersToRestoreACardBeingDeleted() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.model.restoreHint == .restore)
+		await r.model.delete(ids: [a])
+		#expect(r.model.restoreHint == .unsaved)
+		r.log.removeAll()
+		r.model.escape()
+		await r.settle()
+		#expect(r.writes.isEmpty)
+	}
+
+	@Test func aCopySavedLateBecomesTheRestorePointWithoutMovingTheClipboard() async {
+		let r = StripRig(), b = Fixtures.mixed[1].id, x = Fixtures.mixed[3].id
+		r.model.browse(1)
+		await r.settle()
+		r.model.restorePointSaved(ClipboardCard(id: x))
+		#expect(r.model.committed == ClipboardCard(id: x) && r.model.clipboard == ClipboardCard(id: b))
+		#expect(r.model.restoreHint == .restore && r.model.lensOnClipboard)
+		r.model.restorePointSaved(ClipboardCard(id: Fixtures.mixed[5].id))
+		#expect(r.model.committed == ClipboardCard(id: x), "only fills an empty restore point")
+	}
+}

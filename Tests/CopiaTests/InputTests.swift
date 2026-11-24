@@ -763,6 +763,8 @@ extension WindowTests.InputTests {
 		host.key("r", code: 15); host.key("e", code: 14)
 		await host.settle()
 		try #require(host.model.intent == .search && host.model.query == "re")
+		let editor = try #require(host.panel.firstResponder as? NSTextView)
+		let caret = editor.selectedRange()
 		let matches = host.model.visibleClips.map(\.id)
 		try #require(matches.count >= 3)
 		host.key(Self.rightArrow.0, code: Self.rightArrow.1)
@@ -770,6 +772,8 @@ extension WindowTests.InputTests {
 		host.key(Self.leftArrow.0, code: Self.leftArrow.1)
 		await host.settle(settleMs)
 		#expect(host.model.selectedID == matches[1])
+		// Arrows only move the selection: the text and the caret stay put.
+		#expect(editor.string == "re" && editor.selectedRange() == caret)
 		#expect(host.log.entries == ["write \(matches[1]) plain=false"])
 		#expect(host.model.lensOnClipboard)
 		host.key(Self.end.0, code: Self.end.1)
@@ -885,34 +889,24 @@ extension WindowTests.InputTests {
 		let on = host.cards.filter { $0.valueDescription == "On clipboard" }
 		#expect(on.count == 1 && on.first?.label == CardAccessibility(clip: Fixtures.mixed[1], now: Fixtures.now).label)
 	}
-
-	@Test func theLensTurnsAccentOver120msLinearUnderReduceMotion() {
-		#expect(LensRing.fillIn(onClipboard: true, reduced: true) == .linear(duration: 0.12))
-		#expect(LensRing.fillIn(onClipboard: true, reduced: false) == .easeOut(duration: 0.12))
-		#expect(LensRing.fillIn(onClipboard: false, reduced: true) == nil)
-	}
 }
 
 extension WindowTests.LensTests {
-	@Test func theLensIsAccentOnTheClipboardCardAndGreyOtherwise() async throws {
+	@Test func theLensIsOneAccentRingWhereverItIs() async throws {
 		let host = InputHost(); defer { host.close() }
 		host.panel.setFrameOrigin(try #require(NSScreen.main).visibleFrame.origin); host.panel.alphaValue = 1
 		host.model.beginClose(); await host.settle()
 		host.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[0].id)); host.panel.orderFrontRegardless(); host.model.animateIn()
 		await host.settle(400)
 		let v = host.panel.host
-		func ringRect(_ clip: Clip) throws -> CGRect {
+		func ring(_ clip: Clip) throws -> (contrast: Double, color: SIMD3<Double>, surface: SIMD3<Double>) {
 			let card = try #require(host.cards.first { $0.label == CardAccessibility(clip: clip, now: Fixtures.now).label })
-			return CGRect(x: card.frame.midX - host.panel.frame.minX - Theme.cardSize.width / 2,
+			let rect = CGRect(x: card.frame.midX - host.panel.frame.minX - Theme.cardSize.width / 2,
 				y: host.panel.frame.maxY - card.frame.midY - Theme.cardSize.height / 2,
 				width: Theme.cardSize.width, height: Theme.cardSize.height).insetBy(dx: -Theme.lensOutset, dy: -Theme.lensOutset)
-		}
-		/// The ring's weakest edge against its halo, its color in the middle of the top edge, and the card's own
-		/// surface in the empty middle of the footer.
-		func ring(_ clip: Clip) throws -> (contrast: Double, color: SIMD3<Double>, surface: SIMD3<Double>) {
 			let rep = try #require(v.bitmapImageRepForCachingDisplay(in: v.bounds))
 			v.cacheDisplay(in: v.bounds, to: rep)
-			let image = try #require(rep.cgImage), rect = try ringRect(clip), scale = CGFloat(image.width) / v.bounds.width
+			let image = try #require(rep.cgImage), scale = CGFloat(image.width) / v.bounds.width
 			let contrast = ContrastCheck.lens(in: ContrastCheck.Bitmap(image), ring: rect, scale: scale)
 			func sample(_ x: CGFloat, _ y: CGFloat) throws -> SIMD3<Double> {
 				let c = try #require(rep.colorAt(x: Int(x * scale), y: Int(y * scale))?.usingColorSpace(.sRGB))
@@ -928,17 +922,13 @@ extension WindowTests.LensTests {
 		}
 		func chroma(_ c: SIMD3<Double>) -> Double { c.max() - c.min() }
 		let copied = try ring(Fixtures.mixed[0])
-		#expect(copied.contrast > 2, "on the clipboard: an unbroken ring")
 		host.model.move(1); await host.settle(400)
 		#expect(!host.model.lensOnClipboard)
 		let selected = try ring(Fixtures.mixed[1])
-		#expect(selected.contrast > 2, "only selected: an unbroken ring too")
-		#expect(chroma(selected.color) < 0.06, "only selected: grey \(selected.color)")
-		// A grey (Graphite) accent can't be told apart by hue; the tint and the top-bar chip carry it then.
-		#expect(chroma(selected.surface) < 0.01, "only selected: the card keeps its plain surface \(selected.surface)")
-		if chroma(accent) > 0.3 {
-			#expect(chroma(copied.color) > 0.3, "on the clipboard: the accent \(copied.color)")
-			#expect(chroma(copied.surface) > 0.025, "on the clipboard: the card itself takes a light accent wash \(copied.surface)")
+		for (name, lens) in [("on the clipboard", copied), ("only selected", selected)] {
+			#expect(lens.contrast > 2, "\(name): an unbroken ring")
+			#expect(chroma(lens.surface) < 0.01, "\(name): the card keeps its plain surface \(lens.surface)")
+			if chroma(accent) > 0.3 { #expect(chroma(lens.color) > 0.3, "\(name): the accent ring \(lens.color)") }
 		}
 	}
 }
