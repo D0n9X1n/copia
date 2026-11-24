@@ -20,6 +20,8 @@ struct Scene {
 	var midway: (@MainActor (StripModel) async -> Void)?
 	/// Lays every card out at once (CardSheet) instead of the strip.
 	var sheet = false
+	/// Opens as if the clipboard held something Copia didn't save, so ⎋ can't restore it.
+	var unknownClipboard = false
 }
 
 /// Renders each strip state as a real window over a fixed wallpaper and captures it with `screencapture`.
@@ -57,6 +59,18 @@ enum RenderRunner {
 			list.append(Scene(name: "07-reduce-transparency-\(mode)", dark: dark, overrides: CopiaOverrides(reduceTransparency: true)))
 			list.append(Scene(name: "07-increase-contrast-\(mode)", dark: dark, overrides: CopiaOverrides(highContrast: true)))
 			list.append(Scene(name: "08-hover-\(mode)", dark: dark, prepare: { m in m.hoveredID = m.clips[2].id }))
+			// Browsing: the clipboard followed the lens to the third card, and the chip beside Search offers ⎋.
+			list.append(Scene(name: "08-browsing-\(mode)", dark: dark, prepare: { m in
+				m.browse(2); try? await Task.sleep(for: .milliseconds(400))
+			}))
+			list.append(Scene(name: "08-browsing-unsaved-\(mode)", dark: dark, prepare: { m in
+				m.browse(2); try? await Task.sleep(for: .milliseconds(400))
+			}, unknownClipboard: true))
+			// Browsing a search: the chip only confirms the copy, as ⎋ clears the query first.
+			list.append(Scene(name: "08-browsing-search-\(mode)", dark: dark, prepare: { m in
+				m.query = "e"; try? await Task.sleep(for: .milliseconds(100))
+				m.browse(1); try? await Task.sleep(for: .milliseconds(400))
+			}))
 			// The footer pin: filled on a pinned card, an outline on the primary and hovered cards, an empty slot elsewhere.
 			list.append(Scene(name: "08-pins-\(mode)", dark: dark, clips: { mixed, _ in
 				var c = mixed; c[0].isPinned = true; return c
@@ -77,7 +91,7 @@ enum RenderRunner {
 
 	/// Puts the strip back in its hidden state, lets it draw there, then opens it again.
 	static func replayOpen(_ model: StripModel) async {
-		model.open()
+		model.open(clipboard: model.clips.first.map { ClipboardCard(id: $0.id) })
 		try? await Task.sleep(for: .milliseconds(300))
 		model.animateIn()
 	}
@@ -240,7 +254,8 @@ enum RenderRunner {
 		panel.host.rootView = AnyView(root)
 		panel.setFrame(PanelLayout.windowFrame(in: visible), display: true)
 		panel.orderFrontRegardless()
-		model.open()
+		// The usual case: the newest card is what the clipboard holds.
+		model.open(clipboard: scene.unknownClipboard ? nil : model.clips.first.map { ClipboardCard(id: $0.id) })
 		model.animateIn()
 		await scene.prepare(model)
 		try await waitForPreviews(Array(model.visibleClips.prefix(12)), in: thumbnails)

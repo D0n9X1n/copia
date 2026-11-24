@@ -94,7 +94,8 @@ Then copy something and press <kbd>⌘Y</kbd>.
 
 | Key | In the strip |
 |---|---|
-| <kbd>←</kbd> <kbd>→</kbd> | Select the previous or next card |
+| <kbd>←</kbd> <kbd>→</kbd> | Select the previous or next card, also while searching; the clipboard follows |
+| <kbd>⌘←</kbd> <kbd>⌘→</kbd> · Home End | Jump to the first or last card; the clipboard follows |
 | Click | Select and copy the card; the strip stays open |
 | <kbd>↩</kbd> or double-click | Copy the selected or pointed card and close |
 | <kbd>⇧</kbd><kbd>↩</kbd> | Copy as plain text and close |
@@ -103,7 +104,8 @@ Then copy something and press <kbd>⌘Y</kbd>.
 | <kbd>⌫</kbd> · <kbd>⌘Z</kbd> | Delete selected results · undo the batch |
 | <kbd>⌘A</kbd> · <kbd>⌘P</kbd> | Freeze the current filtered selection · pin/unpin the primary card (or click a card’s pin button) |
 | Type · <kbd>Tab</kbd> or <kbd>↓</kbd> | Edit Search · return to Results after composing |
-| <kbd>⎋</kbd> | Clear the search, then close |
+| <kbd>⌘Y</kbd> · click your app | Close and keep the selected card |
+| <kbd>⎋</kbd> | Clear the search; otherwise close and put back the previous clipboard |
 
 Pause Capture has no default shortcut. The menu bar icon is on by default; if you hide it, use the strip’s gear or reopen Copia to reach Settings. See [Usage](wiki/Usage.md) for everything else.
 

@@ -21,6 +21,8 @@ public struct AccessibilityNode {
 	public var role: String? { read("accessibilityRole") as? String }
 	public var label: String { (read("accessibilityLabel") as? String) ?? "" }
 	public var value: String { (read("accessibilityValue") as? String) ?? "" }
+	/// What VoiceOver reads after the label; SwiftUI's `accessibilityValue` lands here on a combined element.
+	public var valueDescription: String { (read("accessibilityValueDescription") as? String) ?? "" }
 	public var isSelected: Bool { (read("isAccessibilitySelected") as? Bool) ?? false }
 	/// Screen coordinates, bottom-left origin.
 	public var frame: CGRect { (read("accessibilityFrame") as? NSValue)?.rectValue ?? .zero }

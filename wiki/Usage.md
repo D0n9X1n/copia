@@ -22,20 +22,23 @@ Allow clipboard access so Copia can save new copies. Accessibility is not a prer
 - **⌘C** anywhere: the item appears below your pins. Copying something again moves it to the front of its pinned or unpinned group.
 - **⌘Y**: open or close the strip on the display under the pointer. Change this shortcut in Settings → Shortcuts.
 
-The strip opens in **Results**. Click a card to select it and copy it at once; the strip stays open, so you can click another card instead. Double-click copies the pointed card and closes the strip, writing the clipboard once. Return or ⌘1–9 copies and closes; add Shift for plain text. Press ⌘V in the destination when ready.
+The strip opens in **Results**, with the selection on the card your clipboard holds. The clipboard follows the selection: ← and → move it, also while you type a search, and the card is copied once it rests; a held arrow leaves the clipboard on the card where you stop. Browsing never overwrites something copied in another app that Copia has not seen yet. Clearing the search puts the selection back on the card your clipboard holds.
+
+Click a card to select and copy it; the strip stays open. Double-click, Return or ⌘1–9 copies and closes; add Shift for plain text. ⌘Y or clicking back into your app also closes and keeps the selected card. **Esc** cancels: after arrowing, it puts back what the clipboard held before (your last pick that reached the clipboard, or the card at open) and closes. Esc never overwrites something you copied in another app meanwhile, and Copia can't put back content it hasn't saved by the time the clipboard changes, such as a concealed password or something copied a moment before opening; the chip tells you which. While you browse, a **Copied** chip pops up beside Search, with **esc** to restore the previous clipboard or a note that it can't be restored. While the search has text the chip shows only **Copied**, because Esc clears the search first. Press ⌘V in the destination when ready.
 
 | Key in Results | Action |
 |---|---|
-| ← / → | Select the previous or next card |
+| ← / → | Select the previous or next card; the clipboard follows (also in Search) |
+| ⌘← ⌘→ · Home End | Jump to the first or last card; the clipboard follows (Home and End also in Search) |
 | ⌘C | Copy the primary card without closing |
 | ⌘A | Select the matches visible now; later matches do not join this selection |
 | ⌫ · ⌘Z | Delete selected cards as a batch · undo the whole batch |
 | ⌘P | Pin or unpin the primary card; pinned cards sort first and do not age out |
 | Pin button | Pin or unpin that card without copying it; it appears on the hovered and selected cards and stays on pinned ones |
 | Type or click Search | Edit the query |
-| ⎋ | Clear the search, then close |
+| ⎋ | Clear the search; otherwise close and put back the previous clipboard |
 
-In **Search**, arrows, Delete, ⌘A, ⌘C and Undo operate on text, not cards. Input methods keep control while composing. Finish composition, then press Tab or ↓ to return to Results without clearing the filter. Right-click actions target the pointed card. Hold ⌘ to see numbered shortcuts.
+In **Search**, ← → and Home End still browse the matching cards, and the query stays as typed. ⌘ ⌥ ⇧ arrows, Delete, ⌘A, ⌘C and Undo operate on text, not cards. Input methods keep control while composing. Finish composition, then press Tab or ↓ to return to Results without clearing the filter. Right-click actions target the pointed card. Hold ⌘ to see numbered shortcuts.
 
 ### What is kept
 

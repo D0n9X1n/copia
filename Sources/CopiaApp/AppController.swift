@@ -68,6 +68,23 @@ public final class AppController {
 	let watcher: PasteboardWatcher
 	let previewer: Previewer
 	let paster: Paster
+	/// The pasteboard the watcher reads; its change count says whether the clipboard still holds what Copia knows.
+	private let clipboardSource: PasteboardSource
+	/// The stored clip Copia last wrote or captured (by key, so a reload can't lose it), with the change that put it there.
+	private var onClipboard: (change: Int, key: String, plain: Bool)?
+	/// The pasteboard change of Copia's own last write. A restore writes only while the pasteboard still has it.
+	private var ownWrite: Int?
+	/// The newest pasteboard change Copia has seen, from its own writes or the watcher.
+	private var lastChange = Int.min
+	/// The pasteboard's change count when the strip last opened: a copy made before then is what it opened on, not a
+	/// copy made elsewhere during the presentation, so the first poll that sees it cancels nothing.
+	private var openChange: Int?
+	/// The newest change made elsewhere: a capture saved late still fills the restore point when nothing came after it.
+	private var lastForeignChange = Int.min
+	/// Tests: runs after the store read, right before the pasteboard write.
+	var beforePasteboardWrite: () -> Void = {}
+	/// Tests: runs after a capture is saved, before history reloads, so a test can hold a capture mid-flight.
+	var afterCaptureSaved: () async -> Void = {}
 	private let sources: SourceAppearance
 	private let observesWorkspace: Bool
 	private var observers: [NSObjectProtocol] = []
@@ -111,6 +128,7 @@ public final class AppController {
 		sources = observesWorkspace ? .shared : .fixtures
 		store = try ClipStore(directory: directory, files: storageFiles)
 		paster = Paster(pasteboard: writerBoard)
+		clipboardSource = pasteboard
 		if observesWorkspace {
 			watcher = PasteboardWatcher(source: pasteboard, ignoredApps: Set(prefs.ignoredApps))
 		} else {
@@ -198,13 +216,25 @@ public final class AppController {
 			Task { await self.store.invalidateGroup(token); await self.refreshStorageStatus() }
 		}
 		model.actions.openSettings = { [weak self] in self?.openSettings() }
+		model.syncClipboard = { [weak self] in self?.watcher.tick() }
 		model.actions.write = { [weak self] id, plain in
 			guard let self, let key = index.keys[id] else { throw StoreError.missingBlob }
 			let close = model.closeCount
 			do {
 				let items = try await store.items(for: key)
-				guard model.closeCount == close else { throw CancellationError() }
-				try paster.write(items, plain: plain)
+				// A copy made elsewhere during the read is seen (and saved) now, so it can cancel a browse, keep or restore.
+				watcher.tick()
+				// Checked after the read: a write whose card, presentation or browse moved on meanwhile is dropped.
+				guard model.closeCount == close, model.writeIsCurrent() else { throw CancellationError() }
+				// A browse, keep or restore: Paster checks right before clearing that the pasteboard is still what Copia last saw.
+				let expected: Int? = model.writeRequiresOwnership ? watcher.observedChange : nil
+				beforePasteboardWrite()
+				let change = try paster.write(items, plain: plain, expecting: expected)
+				ownWrite = change
+				lastChange = max(lastChange, change)
+				onClipboard = (change, key, plain)
+			} catch is CancellationError {
+				throw CancellationError()
 			} catch { await refreshStorageStatus(); throw actionError(error) }
 		}
 		model.actions.delete = { [weak self] ids in
@@ -255,13 +285,35 @@ public final class AppController {
 			guard let self, let keys = try? await store.search(query) else { return [] }
 			return Set(keys.map(ClipDraft.uuid(forKey:)))
 		}
+		watcher.onChange = { [weak self] change in
+			guard let self, change != ownWrite else { return }
+			lastForeignChange = max(lastForeignChange, change)
+			// Copied elsewhere, captured or not: Copia no longer knows the clipboard until a capture says otherwise,
+			// and a browse, keep or restore not yet written is cancelled, even while the strip closes.
+			lastChange = max(lastChange, change)
+			onClipboard = nil
+			if change != openChange { model.clipboardReplaced() } else if model.cardsMounted { model.clipboardChanged(to: nil) }
+		}
 		watcher.onDraft = { [weak self] draft in
 			guard let self else { return }
+			let change = watcher.lastCaptureChange, opening = model.cardsMounted ? model.presentationID : nil
 			Task {
 				guard self.model.storageStatus != .recoveryRequired else { return }
 				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
+				await self.afterCaptureSaved()
 				await self.reload()
+				// Only Copia's own browse replaced it since: it is still what the clipboard held before that browse.
+				// The opening it belongs to: the current one if the strip opened on exactly this copy, else the one it was seen in.
+				let observedIn = change == self.openChange && self.model.cardsMounted ? self.model.presentationID : opening
+				if change < self.lastChange, change == self.lastForeignChange, let observedIn {
+					self.model.restorePointSaved(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key)), observedIn: observedIn)
+				}
+				// A newer change (Copia's own write, or another copy) since this one wins.
+				guard change >= self.lastChange else { return }
+				self.onClipboard = (change, result.clip.key, false)
+				// Copied elsewhere while the strip is open: the lens and ⎋ follow it.
+				if self.model.cardsMounted { self.model.clipboardChanged(to: self.clipboardCard()) }
 			}
 		}
 		previewer.onSaved = { [weak self] in Task { await self?.reload() } }
@@ -281,10 +333,20 @@ public final class AppController {
 
 	// MARK: Strip
 
+	/// The stored card the clipboard holds right now, if Copia knows it.
+	/// Ids derive from keys, so a card just saved is known before a reload publishes it.
+	private func clipboardCard(change: Int? = nil) -> ClipboardCard? {
+		guard let onClipboard, onClipboard.change == change ?? clipboardSource.changeCount else { return nil }
+		return ClipboardCard(id: ClipDraft.uuid(forKey: onClipboard.key), plain: onClipboard.plain)
+	}
+
 	public func toggleHistory(on chosenScreen: NSScreen? = nil) {
 		if panel.isVisible, model.cardsMounted { model.beginClose(); return }
 		guard let screen = chosenScreen ?? NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main else { return }
-		model.open()
+		// One pasteboard read decides both where the lens opens and what the strip opened on.
+		let change = clipboardSource.changeCount
+		openChange = change
+		model.open(clipboard: clipboardCard(change: change))
 		panel.show(on: screen, visibleFrame: visibleFrameOverride)
 		focus.focus()
 		DispatchQueue.main.async { [weak self] in self?.model.animateIn() }

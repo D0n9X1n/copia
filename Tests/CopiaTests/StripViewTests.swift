@@ -416,3 +416,122 @@ extension WindowTests.StripViewTests {
 		#expect(Diagnostics.bodyEvaluations > before)
 	}
 }
+
+/// #26 review: the chip and the no-results keycap as VoiceOver and the layout see them.
+extension WindowTests.StripViewTests {
+	@Test func theCopiedChipAndTheNoResultsKeycapAreSpoken() async throws {
+		let host = StripHost(overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.actions.write = { _, _ in }
+		host.model.beginClose(); host.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[0].id)); host.model.animateIn()
+		host.model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		await host.settle()
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.restore) })
+		#expect(host.isOnScreen(chip))
+		#expect(chip.frame.minY >= host.window.frame.maxY - Theme.topBarHeight, "the chip sits in the top bar")
+		host.model.query = "zzzz-no-such-card"
+		await host.settle()
+		#expect(host.root.all.contains { $0.label == RestoreHintView.spoken(.copied) })
+		#expect(host.root.all.contains { $0.label == "Escape clears search" })
+	}
+
+	@Test func theTopBarStartsAtTheCardsInsetAndNeverWrapsTheCountInANarrowStrip() async throws {
+		let width = PanelLayout.contentWidth(count: 2)
+		let host = StripHost(clips: Array(Fixtures.mixed.prefix(2)), width: width, overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		host.model.query = "e"
+		await host.settle()
+		func searchField(in view: NSView) -> NSTextField? {
+			if let field = view as? NSTextField, field.accessibilityLabel() == "Search clipboard history" { return field }
+			return view.subviews.lazy.compactMap { searchField(in: $0) }.first
+		}
+		let field = try #require(host.window.contentView.flatMap { searchField(in: $0) })
+		let frame = host.window.convertToScreen(field.convert(field.bounds, to: nil))
+		let count = try #require(host.root.all.first { $0.label == "2 of 2" || $0.value == "2 of 2" })
+		#expect(count.frame.height < 20, "the count stays on one line: \(count.frame)")
+		#expect(host.window.frame.contains(count.frame))
+		#expect(frame.maxX < count.frame.minX)
+		// The pill starts at the cards' 24 pt inset: the field sits about 54 pt in (24 + 10 padding + glyph + 6; 53 at 1x,
+		// where the glyph rounds narrower). The old 20 pt inset put it 4 pt further left, at 49–50.
+		let fieldStart = frame.minX - host.window.frame.minX
+		#expect(fieldStart > 52 && fieldStart < 56, "the field starts \(fieldStart) pt in")
+		#expect(frame.width >= 160 - 30, "the pill never shrinks below 160 pt: field \(frame.width)")
+	}
+
+	@Test func theChipNeverPushesTheCountOutOfTheBar() async throws {
+		let host = StripHost(width: 1008, overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.actions.write = { _, _ in }
+		host.model.storageStatus = .cleanupPending
+		host.model.beginClose(); host.model.open(); host.model.animateIn()
+		host.model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		await host.settle()
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.unsaved) })
+		let count = try #require(host.root.all.first { $0.label == "9 items" || $0.value == "9 items" })
+		#expect(chip.frame.maxX <= count.frame.minX, "chip \(chip.frame) count \(count.frame)")
+		#expect(count.frame.height < 20 && host.window.frame.contains(count.frame), "count \(count.frame)")
+	}
+}
+
+/// #26 re-review: the keycaps are drawn, and the chip squeezes Search, not the count.
+extension WindowTests.StripViewTests {
+	@Test func theEscKeycapIsDrawnInTheChipAndTheNoResultsHint() async throws {
+		let host = StripHost(overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.actions.write = { _, _ in }
+		host.model.beginClose(); host.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[0].id)); host.model.animateIn()
+		host.model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		await host.settle()
+		func width(_ text: String, _ size: CGFloat, _ weight: NSFont.Weight = .regular) -> CGFloat {
+			(text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: weight)]).width
+		}
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.restore) })
+		// Check, "Copied", divider, "restores previous", padding and spacing: what is left is the 26 pt keycap.
+		let withoutKey = 8 + 14 + 8 + width("Copied", 12, .semibold) + 8 + 1 + 8 + width("restores previous", 12) + 12
+		#expect(chip.frame.width >= withoutKey + 26 - 2, "chip \(chip.frame.width) vs \(withoutKey) without the keycap")
+		host.model.query = "zzzz-no-such-card"
+		await host.settle()
+		let hint = try #require(host.root.all.first { $0.label == "Escape clears search" })
+		#expect(hint.frame.width >= width("clears search", 13) + 6 + 26 - 1, "no-results hint \(hint.frame.width)")
+	}
+
+	@Test func theChipSqueezesSearchNotTheCountInANarrowStrip() async throws {
+		let host = StripHost(clips: Array(Fixtures.mixed.prefix(2)), width: 600, overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.actions.write = { _, _ in }
+		host.model.beginClose(); host.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[0].id)); host.model.animateIn()
+		host.model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		await host.settle()
+		func searchField(in view: NSView) -> NSTextField? {
+			if let field = view as? NSTextField, field.accessibilityLabel() == "Search clipboard history" { return field }
+			return view.subviews.lazy.compactMap { searchField(in: $0) }.first
+		}
+		let field = try #require(host.window.contentView.flatMap { searchField(in: $0) })
+		let frame = host.window.convertToScreen(field.convert(field.bounds, to: nil))
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.restore) }).frame
+		let count = try #require(host.root.all.first { $0.label == "2 items" || $0.value == "2 items" }).frame
+		// The same strip without the chip: the field is wider, so the chip took its width from Search.
+		let wide = StripHost(clips: Array(Fixtures.mixed.prefix(2)), width: 600, overrides: CopiaOverrides(reduceMotion: true))
+		defer { wide.close() }
+		await wide.settle()
+		let full = try #require(wide.window.contentView.flatMap { searchField(in: $0) })
+		let fullWidth = full.bounds.width
+		#expect(frame.width < fullWidth - 10, "field \(frame.width) with the chip, \(fullWidth) without")
+		// The pill keeps at least 160 pt; its field is 40 pt narrower (10 + glyph + 6 leading, 10 trailing).
+		#expect(frame.width >= 160 - 40, "field \(frame.width)")
+		#expect(frame.maxX < chip.minX && chip.maxX < count.minX, "field \(frame) chip \(chip) count \(count)")
+		#expect(chip.height <= 30 && count.height < 20 && host.window.frame.contains(count))
+	}
+}

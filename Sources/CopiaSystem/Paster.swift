@@ -13,7 +13,10 @@ public final class Paster {
 	}
 
 	/// Prepare every item before clearing. Once cleared, the board cannot be restored if it rejects the write.
-	public func write(_ items: [PasteboardItemData], plain: Bool) throws {
+	/// With `expecting`, the write happens only while the pasteboard is still at that change count, checked right
+	/// before clearing, so a copy made elsewhere is never overwritten. Returns the change count of this write.
+	@discardableResult
+	public func write(_ items: [PasteboardItemData], plain: Bool, expecting change: Int? = nil) throws -> Int {
 		let source = Bundle.main.bundleIdentifier ?? "app.copia.Copia"
 		let objects: [NSPasteboardItem] = try items.compactMap { item in
 			var reps = item.representations
@@ -31,8 +34,10 @@ public final class Paster {
 			return out
 		}
 		guard !objects.isEmpty else { throw WriteError.noRepresentations }
-		pasteboard.clearContents()
+		if let change, pasteboard.changeCount != change { throw CancellationError() }
+		let written = pasteboard.clearContents()
 		guard writeObjects(objects) else { throw WriteError.rejected }
+		return written
 	}
 
 	private static func plainText(_ item: PasteboardItemData) -> String? {

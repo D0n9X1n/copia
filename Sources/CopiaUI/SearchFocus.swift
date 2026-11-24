@@ -158,13 +158,16 @@ struct SearchField: NSViewRepresentable {
 			guard !textView.hasMarkedText() else { return false }
 			let shift = (textView as? StripFieldEditor)?.keyModifiers.contains(.shift) ?? false
 			let results = model.intent == .results
+			// Plain ← → and Home End browse the cards in Search too; ⌘ ⌥ ⇧ arrows keep editing the query.
 			switch selector {
-			case #selector(NSResponder.moveLeft(_:)) where results: model.move(-1)
-			case #selector(NSResponder.moveRight(_:)) where results: model.move(1)
+			case #selector(NSResponder.moveLeft(_:)): model.browse(-1)
+			case #selector(NSResponder.moveRight(_:)): model.browse(1)
+			case #selector(NSResponder.scrollToBeginningOfDocument(_:)): model.browseToEnd(false)
+			case #selector(NSResponder.scrollToEndOfDocument(_:)): model.browseToEnd(true)
 			case #selector(NSResponder.moveToBeginningOfLine(_:)), #selector(NSResponder.moveToLeftEndOfLine(_:)):
-				guard results else { return false }; model.moveToEnd(false)
+				guard results else { return false }; model.browseToEnd(false)
 			case #selector(NSResponder.moveToEndOfLine(_:)), #selector(NSResponder.moveToRightEndOfLine(_:)):
-				guard results else { return false }; model.moveToEnd(true)
+				guard results else { return false }; model.browseToEnd(true)
 			case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
 				model.requestCopy(id: model.selectedID, plain: shift, dismiss: true)
 			case #selector(NSResponder.cancelOperation(_:)): model.escape()

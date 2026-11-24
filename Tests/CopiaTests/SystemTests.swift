@@ -22,6 +22,34 @@ final class FakePasteboard: PasteboardSource {
 }
 
 @MainActor
+@Suite struct PasterOwnershipTests {
+	@Test func aWriteExpectingAnOlderChangeLeavesANewerCopyAlone() throws {
+		let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+		let paster = Paster(pasteboard: board)
+		let item = PasteboardItemData([(PasteboardTypes.string, Data("copia".utf8))])
+		let mine = try paster.write([item], plain: false)
+		#expect(mine == board.changeCount && board.string(forType: .string) == "copia")
+		board.clearContents(); board.setString("theirs", forType: .string)
+		#expect(throws: CancellationError.self) { try paster.write([item], plain: false, expecting: mine) }
+		#expect(board.string(forType: .string) == "theirs")
+		let again = try paster.write([item], plain: false, expecting: board.changeCount)
+		#expect(again == board.changeCount && board.string(forType: .string) == "copia")
+	}
+
+	@Test func theWatcherReportsEveryChangeEvenSkippedOrPaused() {
+		let pb = FakePasteboard()
+		let w = PasteboardWatcher(source: pb, frontmost: { nil }, appName: { _ in nil })
+		var changes: [Int] = []
+		w.onChange = { changes.append($0) }
+		pb.copy("secret", extraTypes: ["org.nspasteboard.ConcealedType"]); w.tick()
+		w.setPaused(true)
+		pb.copy("while paused"); w.tick()
+		w.tick()
+		#expect(changes == [1, 2])
+	}
+}
+
+@MainActor
 @Suite struct WatcherTests {
 	func make(_ pb: FakePasteboard, front: @escaping () -> String? = { "com.apple.TextEdit" }) -> (PasteboardWatcher, () -> [ClipDraft]) {
 		var drafts: [ClipDraft] = []
@@ -144,6 +172,19 @@ final class FakePasteboard: PasteboardSource {
 		#expect(drafts().count == 1)
 		#expect(drafts().first.map(Capture.plainText) == "after resume")
 		#expect(pb.reads == 1)
+	}
+
+	@Test func resumingReportsACopyMadeWhilePausedWithoutCapturingIt() {
+		let pb = FakePasteboard()
+		let (w, drafts) = make(pb)
+		var changes: [Int] = []
+		w.onChange = { changes.append($0) }
+		w.setPaused(true)
+		pb.copy("while paused")
+		w.setPaused(false)
+		#expect(changes == [w.observedChange] && drafts().isEmpty && pb.reads == 0)
+		w.setPaused(true); w.setPaused(false)
+		#expect(changes.count == 1, "no copy, no report")
 	}
 
 	@Test func aCopyThatLandsDuringTheReadIsNotStoredUnderTheOldTypes() {

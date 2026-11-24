@@ -2,7 +2,7 @@ import Testing
 import AppKit
 import Synchronization
 import CopiaCore
-import CopiaUI
+@testable import CopiaUI
 @testable import CopiaApp
 @testable import CopiaStore
 @testable import CopiaSystem
@@ -55,7 +55,6 @@ final class AppRig {
 	private let ownsDirectory: Bool
 	let suite = "copia-tests-\(UUID().uuidString)"
 	let defaults: UserDefaults
-	let pasteboard = FakePasteboard()
 	let board = NSPasteboard.withUniqueName()
 	let login = FakeLogin()
 	let links = CountingLinks()
@@ -68,7 +67,8 @@ final class AppRig {
 		ownsDirectory = shared == nil
 		defaults = UserDefaults(suiteName: suite)!
 		weak var rig: AppRig?
-		controller = try AppController(directory: dir, defaults: defaults, pasteboard: pasteboard, writerBoard: board, login: login,
+		// One private board for capture and Copia's writes, as the live app uses the general pasteboard for both.
+		controller = try AppController(directory: dir, defaults: defaults, pasteboard: GeneralPasteboard(board), writerBoard: board, login: login,
 			permissions: { rig?.permissions ?? PermissionState(pasteboard: .unset) },
 			links: links, files: thumbs, storageFiles: storageFiles)
 		rig = self
@@ -83,6 +83,15 @@ final class AppRig {
 		let draft = ClipDraft(items: [PasteboardItemData([(PasteboardTypes.string, Data(text.utf8))])], copiedAt: .now)
 		try await controller.store.insert(draft)
 		await controller.reload()
+	}
+
+	/// Another app copies `text` to the board.
+	func copyElsewhere(_ text: String, extraTypes: [String] = []) {
+		board.clearContents()
+		let item = NSPasteboardItem()
+		item.setString(text, forType: .string)
+		for type in extraTypes { item.setData(Data(), forType: .init(type)) }
+		board.writeObjects([item])
 	}
 
 	func titles() -> [String] { controller.model.clips.map(\.text) }
@@ -510,7 +519,7 @@ extension WindowTests.AppControllerTests {
 		r.controller.shell.setShowMenuBarIcon(false)
 		#expect(!Preferences(defaults: r.defaults).showMenuBarIcon)
 		#expect(!r.controller.shell.showMenuBarIcon && !r.controller.watcher.paused)
-		r.pasteboard.copy("captured without a status icon")
+		r.copyElsewhere("captured without a status icon")
 		r.controller.watcher.tick()
 		#expect(await eventually { r.titles().contains("captured without a status icon") })
 		r.controller.shell.togglePause()
@@ -573,4 +582,246 @@ extension WindowTests.AppControllerTests {
 		r.controller.shell.setIgnoredApps(["com.example.Editor"])
 		#expect(r.controller.watcherIgnoredApps == ["com.example.Editor"])
 	}
+}
+
+/// #26 at the app level: what the clipboard holds decides where the lens opens, and ⎋ never overwrites a newer copy.
+extension WindowTests.AppControllerTests {
+	@Test func theLensOpensOnACapturedCopyAndOnTheNewestCardWhenTheClipboardIsUnknown() async throws {
+		let r = try AppRig(); await r.launch(); defer { r.stop() }
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("older")
+		r.copyElsewhere("captured")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "captured" })
+		try await r.copy("newest, not on the clipboard")
+		r.controller.toggleHistory()
+		#expect(model.clips.first { $0.id == model.selectedID }?.text == "captured")
+		#expect(model.lensOnClipboard)
+		model.beginClose(); try #require(await eventually { !model.cardsMounted })
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		r.controller.watcher.tick()
+		r.controller.toggleHistory()
+		#expect(model.clips.first { $0.id == model.selectedID }?.text == "newest, not on the clipboard")
+		#expect(!model.lensOnClipboard && model.clipboard == nil)
+	}
+
+	@Test func escapeNeverRestoresOverACopyMadeElsewhereDuringTheRestore() async throws {
+		let r = try AppRig(); await r.launch(); defer { r.stop() }
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		try #require(model.lensOnClipboard)
+		model.browse(1)
+		try #require(await eventually { r.board.string(forType: .string) == "second" })
+		// Another app copies after the restore has read its payload, before Copia touches the pasteboard.
+		r.controller.beforePasteboardWrite = { r.copyElsewhere("theirs") }
+		model.escape()
+		try await Task.sleep(for: .milliseconds(300))
+		#expect(r.board.string(forType: .string) == "theirs", "the restore must not overwrite the newer copy")
+	}
+
+	@Test func theLensReopensOnCopiasOwnLastWriteIncludingPlainText() async throws {
+		let r = try AppRig(); await r.launch(); defer { r.stop() }
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("one"); try await r.copy("two"); try await r.copy("three")
+		r.controller.toggleHistory()
+		let one = try #require(model.clips.first { $0.text == "one" }).id
+		await model.copy(id: one, plain: true, dismiss: true)
+		try #require(await eventually { !model.cardsMounted })
+		r.controller.watcher.tick()
+		r.controller.toggleHistory()
+		#expect(model.selectedID == one && model.lensOnClipboard)
+		#expect(model.clipboard == ClipboardCard(id: one, plain: true))
+	}
+
+	@Test func aConcealedCopyWhileTheStripIsOpenEndsTheRestorePoint() async throws {
+		let r = try AppRig(); await r.launch(); defer { r.stop() }
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		try #require(model.lensOnClipboard)
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		r.controller.watcher.tick()
+		#expect(!model.lensOnClipboard && model.committed == nil)
+		model.browse(1)
+		try #require(await eventually { r.board.string(forType: .string) == "second" })
+		#expect(model.restoreHint == .unsaved)
+		model.escape()
+		try await Task.sleep(for: .milliseconds(300))
+		#expect(r.board.string(forType: .string) == "second", "Copia never puts back a card over content it did not save")
+	}
+
+	@Test func aBrowseNeverOverwritesACopyMadeElsewhereBeforeTheNextPoll() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		try #require(model.lensOnClipboard)
+		// Another app copies a password; the half-second poll has not seen it yet.
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		model.browse(1)
+		try await Task.sleep(for: .milliseconds(400))
+		#expect(r.board.string(forType: .string) == "secret", "the browse must not overwrite a copy it has not seen")
+		#expect(model.committed == nil && !model.lensOnClipboard)
+		model.escape()
+		try await Task.sleep(for: .milliseconds(300))
+		#expect(r.board.string(forType: .string) == "secret")
+	}
+
+	@Test func aCopyMadeBeforeOpeningNeverCancelsTheFirstArrow() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("older"); try await r.copy("newest")
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		// Opened before the next poll: the strip opened on the secret, which Copia never saves.
+		r.controller.toggleHistory()
+		model.browse(1)
+		#expect(await eventually { r.board.string(forType: .string) == "older" }, "the first arrow still copies")
+	}
+
+	@Test func aCopyMadeJustBeforeOpeningIsRestoredWhenSavedBeforeTheArrowCopies() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel, clock = ClockProbe()
+		panel.alphaValue = 0
+		model.clock = clock.clock
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("oldest"); try await r.copy("older")
+		r.copyElsewhere("just copied")
+		r.controller.toggleHistory()
+		#expect(model.committed == nil, "opened before the poll: unknown")
+		model.browse(1)
+		// The poll saves the copy before the lens rests: it is what the clipboard held before browsing changed it.
+		r.controller.watcher.tick()
+		try #require(await eventually { model.committed != nil && model.clips.first { $0.id == model.committed?.id }?.text == "just copied" })
+		clock.advance(by: StripModel.browseSettle)
+		try #require(await eventually { r.board.string(forType: .string) == "oldest" })
+		#expect(model.restoreHint == .restore)
+		model.escape()
+		#expect(await eventually { r.board.string(forType: .string) == "just copied" })
+	}
+
+	@Test func theChipAlwaysMatchesWhatEscapeDoesForACopyMadeJustBeforeOpening() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel, clock = ClockProbe()
+		panel.alphaValue = 0
+		model.clock = clock.clock
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("oldest"); try await r.copy("older")
+		r.copyElsewhere("just copied")
+		r.controller.toggleHistory()
+		model.browse(1)
+		// The arrow's own check finds the copy and saves it while its write runs: either may finish first.
+		clock.advance(by: StripModel.browseSettle)
+		try #require(await eventually { r.board.string(forType: .string) == "oldest" })
+		try #require(await eventually { model.clips.contains { $0.text == "just copied" } })
+		try await Task.sleep(for: .milliseconds(100))
+		let hint = try #require(model.restoreHint)
+		model.escape()
+		try await Task.sleep(for: .milliseconds(300))
+		#expect(r.board.string(forType: .string) == (hint == .restore ? "just copied" : "oldest"), "chip \(hint)")
+	}
+
+	@Test func aCopySeenWhileHiddenAndSavedAfterTheArrowCopiesIsStillTheRestorePoint() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel, clock = ClockProbe(), gate = WriteGate()
+		panel.alphaValue = 0
+		model.clock = clock.clock
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("oldest"); try await r.copy("older")
+		// The poll sees and saves the copy while the strip is hidden; its callback is held before history reloads.
+		r.controller.afterCaptureSaved = { await withCheckedContinuation { gate.waiting.append($0) } }
+		r.copyElsewhere("just copied")
+		r.controller.watcher.tick()
+		try #require(await eventually { !gate.waiting.isEmpty })
+		r.controller.afterCaptureSaved = {}
+		// Opened on exactly that copy, before Copia knows its card.
+		r.controller.toggleHistory()
+		try #require(model.committed == nil)
+		model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		try #require(await eventually { r.board.string(forType: .string) == "oldest" })
+		gate.release()
+		try #require(await eventually { model.clips.contains { $0.text == "just copied" } && model.restoreHint == .restore },
+			"hint \(String(describing: model.restoreHint)) committed \(String(describing: model.committed))")
+		model.escape()
+		#expect(await eventually { r.board.string(forType: .string) == "just copied" })
+	}
+
+	@Test func escapeNeverRestoresOverACopyMadeWhileCaptureWasPaused() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		model.browse(1)
+		try #require(await eventually { r.board.string(forType: .string) == "second" })
+		r.controller.watcher.setPaused(true)
+		r.copyElsewhere("secret", extraTypes: ["org.nspasteboard.ConcealedType"])
+		r.controller.watcher.setPaused(false)
+		model.escape()
+		try await Task.sleep(for: .milliseconds(300))
+		#expect(r.board.string(forType: .string) == "secret")
+	}
+
+	@Test func aDoubleClickAfterAnUnseenCopyWritesTheCardAgain() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("one"); try await r.copy("two")
+		r.controller.toggleHistory()
+		let one = try #require(model.clips.first { $0.text == "one" }).id
+		await model.click(one, count: 1)
+		try #require(r.board.string(forType: .string) == "one")
+		r.copyElsewhere("theirs")
+		await model.click(one, count: 2)
+		#expect(r.board.string(forType: .string) == "one", "the closing click must put its card back")
+		#expect(await eventually { model.clips.contains { $0.text == "theirs" } }, "the unseen copy is saved first")
+	}
+
+	@Test func losingKeyFocusThroughTheAppKeepsTheArrowedCard() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		panel.makeKey()
+		try #require(await eventually { panel.isKeyWindow })
+		model.browse(1)
+		// Settings takes key before the lens rests, through the app's own observer.
+		r.controller.openSettings()
+		defer { r.controller.settings().orderOut(nil) }
+		try #require(await eventually { !model.cardsMounted })
+		#expect(await eventually { r.board.string(forType: .string) == "second" })
+	}
+
 }
