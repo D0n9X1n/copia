@@ -25,6 +25,8 @@ public final class StripModel {
 			storeMatches = []
 			if query.isEmpty, frozenIDs == nil {
 				// Search cleared: the lens goes back to the clipboard's card (or the newest), as when the strip opens.
+				// Look first, so a copy made elsewhere since the last poll is not mistaken for that card.
+				syncClipboard()
 				selectedID = clipboard.flatMap { c in clips.contains { $0.id == c.id } ? c.id : nil } ?? newestID
 			} else {
 				reconcileSelection(preferredIndex: 0)
@@ -73,7 +75,8 @@ public final class StripModel {
 	@ObservationIgnored private var cancelUndoDeadline: ToastClock.Cancel?
 	@ObservationIgnored private var busy = false
 	/// A reload can invalidate the store group before its token is delivered to the UI.
-	@ObservationIgnored private var pendingDelete: Set<UUID> = []
+	/// Observed: the chip stops offering to restore a card the moment its delete starts.
+	private var pendingDelete: Set<UUID> = []
 	@ObservationIgnored private var deleteConflicted = false
 	@ObservationIgnored private var presentation = 0
 	/// Changes as soon as close starts, so a pending delete cannot create undo in a later presentation.
@@ -437,8 +440,9 @@ public final class StripModel {
 
 	/// A copy made elsewhere was saved after a browse already replaced it, with nothing else copied since: it is what
 	/// the clipboard held before the browse, so it fills an empty restore point. The clipboard stays where it is.
+	/// The card may not be published yet (another reload can win); the chip and Esc offer it once it is.
 	public func restorePointSaved(_ card: ClipboardCard) {
-		guard cardsMounted, !isClosing, committed == nil, canRestore(card) else { return }
+		guard cardsMounted, !isClosing, committed == nil else { return }
 		committed = card
 	}
 

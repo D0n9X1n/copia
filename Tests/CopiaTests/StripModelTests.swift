@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import Observation
+import Synchronization
 import CopiaCore
 import CopiaFixtures
 @testable import CopiaUI
@@ -1479,5 +1481,50 @@ extension StripModelTests {
 		#expect(r.model.restoreHint == .restore && r.model.lensOnClipboard)
 		r.model.restorePointSaved(ClipboardCard(id: Fixtures.mixed[5].id))
 		#expect(r.model.committed == ClipboardCard(id: x), "only fills an empty restore point")
+	}
+}
+
+/// #26 review: the search reset checks the pasteboard, a late restore point waits for its card, and a pending delete
+/// shows on the chip at once.
+extension StripModelTests {
+	@Test func clearingTheSearchChecksThePasteboardBeforeChoosingTheCard() {
+		let r = StripRig(), c = Fixtures.mixed[2].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: c))
+		r.model.query = "release notes"
+		// Something was copied elsewhere since the last poll: the clipboard's card is no longer known.
+		r.model.syncClipboard = { [unowned r] in r.model.clipboardReplaced(); r.model.syncClipboard = {} }
+		r.model.query = ""
+		#expect(r.model.selectedID == Fixtures.mixed[0].id, "the newest card, not the stale clipboard card")
+	}
+
+	@Test func aRestorePointSavedBeforeItsCardIsPublishedShowsOnceItIs() async {
+		let r = StripRig(clips: Array(Fixtures.mixed.prefix(3))), x = Fixtures.mixed[5]
+		r.model.browse(1)
+		await r.settle()
+		r.model.restorePointSaved(ClipboardCard(id: x.id))
+		#expect(r.model.committed == ClipboardCard(id: x.id))
+		#expect(r.model.restoreHint == .unsaved, "not in history yet: Esc can't restore it")
+		r.model.applySnapshot([x] + Array(Fixtures.mixed.prefix(3)))
+		#expect(r.model.restoreHint == .restore)
+		r.log.removeAll()
+		r.model.escape()
+		await r.settle()
+		#expect(r.writes == ["write \(x.id) plain=false"])
+	}
+
+	@Test func theChipStopsOfferingARestoreAsSoonAsItsCardsDeleteStarts() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id, gate = WriteGate()
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		r.model.browse(1)
+		await r.settle()
+		let redraws = Mutex(0)
+		let tracking = withObservationTracking({ r.model.restoreHint }, onChange: { redraws.withLock { $0 += 1 } })
+		#expect(tracking == .restore)
+		r.model.actions.delete = { _ in await withCheckedContinuation { gate.waiting.append($0) }; return UUID() }
+		let deleting = Task { await r.model.delete(ids: [a]) }
+		for _ in 0..<1_000 where gate.waiting.isEmpty { await Task.yield() }
+		#expect(redraws.withLock { $0 } == 1, "the chip is told to redraw when the delete starts")
+		#expect(r.model.restoreHint == .unsaved)
+		gate.release(); await deleting.value
 	}
 }
