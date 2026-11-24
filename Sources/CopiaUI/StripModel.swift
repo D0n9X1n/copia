@@ -71,6 +71,9 @@ public final class StripModel {
 	public static let searchDelay: Duration = .milliseconds(120)
 	@ObservationIgnored private var undoEntry: (token: UUID, members: Set<UUID>, primary: UUID)?
 	@ObservationIgnored private var cancelToast: ToastClock.Cancel?
+	/// A pick just changed the clipboard: the chip confirms it until `cancelPickChip` fires.
+	private var pickConfirmed = false
+	@ObservationIgnored private var cancelPickChip: ToastClock.Cancel?
 	/// Undo lasts 3 s from the delete, whatever toast is shown meanwhile.
 	@ObservationIgnored private var cancelUndoDeadline: ToastClock.Cancel?
 	@ObservationIgnored private var busy = false
@@ -85,6 +88,8 @@ public final class StripModel {
 	public private(set) var closeCount = 0
 
 	public static let toastLifetime: Duration = .seconds(3)
+	/// How long the Copied chip stays after a click, ⌘C or menu Copy changed the clipboard.
+	public static let pickChipLifetime: Duration = .seconds(2)
 
 	public init(clips: [Clip], actions: StripActions = .fixtures, animator: Animator = .immediate, clock: ToastClock = .live) {
 		self.clips = clips
@@ -335,7 +340,7 @@ public final class StripModel {
 
 	/// Shown once a browse has changed the clipboard away from the restore point.
 	public var restoreHint: RestoreHint? {
-		guard let clipboard, clipboard != committed else { return nil }
+		guard let clipboard, clipboard != committed else { return pickConfirmed ? .copied : nil }
 		guard query.isEmpty else { return .copied }
 		return committed.map(canRestore) == true ? .restore : .unsaved
 	}
@@ -423,6 +428,8 @@ public final class StripModel {
 		current: (() -> Bool)? = nil) async {
 		let close = closeCount, generation = presentation
 		let card = ClipboardCard(id: id, plain: plain)
+		// What the clipboard held, as far as Copia knows; unknown counts as a change, since this write replaces it.
+		let before = clipboard
 		copiedID = nil
 		do {
 			// A browse never overwrites a copy made elsewhere; a pick does.
@@ -432,6 +439,7 @@ public final class StripModel {
 			if !plain { copiedID = id }
 			// A pick is the new ⎋ restore point; a browse is not.
 			if !browsing { committed = card }
+			if browsing { endPickChip() } else if before != card { confirmPick() }
 			guard dismiss else { return }
 			isClosingAfterCopy = true
 			beginClose()
@@ -453,6 +461,7 @@ public final class StripModel {
 	/// The card may be saved but not yet published by a reload; the lens, the chip and Esc treat it as on the clipboard
 	/// once it is.
 	public func clipboardChanged(to card: ClipboardCard?) {
+		endPickChip()
 		clipboard = card
 		committed = card
 		copiedID = nil
@@ -461,6 +470,7 @@ public final class StripModel {
 	/// The pasteboard changed without Copia, before any capture says what it holds. A browse not yet written is dropped,
 	/// and a close's keep or restore is cancelled, so neither overwrites the newer copy.
 	public func clipboardReplaced() {
+		endPickChip()
 		dropBrowse()
 		clipboard = nil
 		committed = nil
@@ -593,6 +603,7 @@ public final class StripModel {
 	public func open(clipboard known: ClipboardCard? = nil) {
 		presentation += 1
 		copiedID = nil
+		endPickChip()
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
 		// A card saved but not yet published is still the clipboard's card and the restore point; the chip and Esc offer
@@ -621,6 +632,7 @@ public final class StripModel {
 		guard cardsMounted, !isClosing else { return }
 		let cancel = cancelling, lit = selectedID, target = browseTarget
 		cancelling = false
+		endPickChip()
 		dropBrowse()
 		// A copy made elsewhere from here on cancels the keep or restore below.
 		let shown = presentation, browse = browseGeneration
@@ -660,6 +672,20 @@ public final class StripModel {
 	}
 
 	// MARK: Toasts
+
+	/// Shows the Copied chip for a pick that changed the clipboard, for `pickChipLifetime` after the latest one.
+	private func confirmPick() {
+		cancelPickChip?()
+		pickConfirmed = true
+		cancelPickChip = clock.after(Self.pickChipLifetime) { [weak self] in self?.endPickChip() }
+	}
+
+	private func endPickChip() {
+		cancelPickChip?()
+		cancelPickChip = nil
+		// Only when shown: opening must not invalidate the top bar for nothing.
+		if pickConfirmed { pickConfirmed = false }
+	}
 
 	private func showActionError(_ error: Error, operation: String, close: Int) {
 		guard close == closeCount || error as? StripActionError == .outcomeUnknown else { return }

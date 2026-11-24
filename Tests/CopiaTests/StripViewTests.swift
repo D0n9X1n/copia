@@ -535,3 +535,23 @@ extension WindowTests.StripViewTests {
 		#expect(chip.height <= 30 && count.height < 20 && host.window.frame.contains(count))
 	}
 }
+
+/// A click-copy shows the same Copied chip beside Search, without the esc keycap, then fades.
+extension WindowTests.StripViewTests {
+	@Test func aClickCopyShowsTheCopiedChipThenItFades() async throws {
+		let host = StripHost(overrides: CopiaOverrides(reduceMotion: true))
+		defer { host.close() }
+		let clock = ClockProbe()
+		host.model.clock = clock.clock
+		host.model.actions.write = { _, _ in }
+		host.model.beginClose(); host.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[0].id)); host.model.animateIn()
+		await host.model.click(Fixtures.mixed[1].id, count: 1)
+		await host.settle()
+		let chip = try #require(host.root.all.first { $0.label == RestoreHintView.spoken(.copied) })
+		#expect(host.isOnScreen(chip) && chip.frame.minY >= host.window.frame.maxY - Theme.topBarHeight)
+		#expect(!host.root.all.contains { $0.label == RestoreHintView.spoken(.restore) }, "no esc offer after a pick")
+		clock.advance(by: StripModel.pickChipLifetime)
+		await host.settle()
+		#expect(!host.root.all.contains { $0.label == RestoreHintView.spoken(.copied) })
+	}
+}

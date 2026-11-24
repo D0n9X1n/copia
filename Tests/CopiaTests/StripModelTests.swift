@@ -1577,3 +1577,85 @@ extension StripModelTests {
 		#expect(r.writes == ["write \(x.id) plain=false"])
 	}
 }
+
+/// Every copy in the open strip that changes the clipboard shows the Copied chip; a pick's chip fades after 2 s.
+extension StripModelTests {
+	@Test func clickingADifferentCardShowsCopiedThenFadesAfterTwoSeconds() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id, b = Fixtures.mixed[1].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		await r.model.click(b, count: 1)
+		#expect(r.model.restoreHint == .copied, "a click that changes the clipboard confirms it")
+		r.probe.advance(by: StripModel.pickChipLifetime - .milliseconds(1))
+		#expect(r.model.restoreHint == .copied)
+		r.probe.advance(by: .milliseconds(1))
+		#expect(r.model.restoreHint == nil)
+	}
+
+	@Test func eachNewPickRestartsTheTwoSeconds() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		r.probe.advance(by: .seconds(1.5))
+		await r.model.copy(id: Fixtures.mixed[2].id, plain: false, dismiss: false)
+		r.probe.advance(by: .seconds(1.5))
+		#expect(r.model.restoreHint == .copied, "the second copy restarted the 2 s")
+		r.probe.advance(by: .seconds(0.5))
+		#expect(r.model.restoreHint == nil)
+	}
+
+	@Test func aPickThatLeavesTheClipboardAsItWasShowsNothing() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		await r.model.click(a, count: 1)
+		#expect(r.model.restoreHint == nil, "the clipboard already held that card")
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		r.probe.advance(by: .seconds(1.5))
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		r.probe.advance(by: .seconds(0.5))
+		#expect(r.model.restoreHint == nil, "a click that changes nothing does not extend the chip")
+	}
+
+	@Test func commandCAfterArrowingToTheCardShowsNoPickChip() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id, b = Fixtures.mixed[1].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.model.restoreHint == .restore)
+		await r.model.copy(id: b, plain: false, dismiss: false)
+		#expect(r.model.restoreHint == nil, "B was already on the clipboard")
+	}
+
+	@Test func aPickOverAnUnknownClipboardShowsTheChip() async {
+		let r = StripRig()
+		#expect(r.model.clipboard == nil)
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		#expect(r.model.restoreHint == .copied)
+	}
+
+	@Test func aBrowseAfterAPickTakesOverTheChip() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		// A real click selects the card on press, then copies it.
+		r.model.selectOnPress(Fixtures.mixed[1].id)
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.model.restoreHint == .restore, "the browse can be undone, so its chip offers esc")
+		r.probe.advance(by: StripModel.pickChipLifetime)
+		#expect(r.model.restoreHint == .restore, "the pick's timer does not hide the browse chip")
+	}
+
+	@Test func aCopyElsewhereOpeningOrClosingClearsThePickChip() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		r.model.clipboardReplaced()
+		#expect(r.model.restoreHint == nil)
+		await r.model.click(Fixtures.mixed[2].id, count: 1)
+		r.model.clipboardChanged(to: ClipboardCard(id: Fixtures.mixed[4].id))
+		#expect(r.model.restoreHint == nil)
+		await r.model.click(Fixtures.mixed[3].id, count: 1)
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[3].id))
+		#expect(r.model.restoreHint == nil)
+	}
+}
