@@ -1655,8 +1655,38 @@ extension StripModelTests {
 		r.model.clipboardChanged(to: ClipboardCard(id: Fixtures.mixed[4].id))
 		#expect(r.model.restoreHint == nil)
 		await r.model.click(Fixtures.mixed[3].id, count: 1)
-		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[3].id))
-		#expect(r.model.restoreHint == nil)
+		r.model.beginClose()
+		#expect(r.model.restoreHint == nil, "close start clears the chip")
+		r.model.open(clipboard: ClipboardCard(id: a))
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		r.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[1].id))
+		#expect(r.model.restoreHint == nil, "opening clears the chip")
+	}
+
+	@Test func aPickBackOverACopyMadeElsewhereDuringTheWriteShowsTheChip() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		// The app polls the pasteboard during the write, as AppController's write does, and sees a copy made elsewhere.
+		let write = r.model.actions.write
+		r.model.actions.write = { [unowned r] id, plain in
+			r.model.clipboardChanged(to: ClipboardCard(id: Fixtures.mixed[4].id))
+			try await write(id, plain)
+		}
+		await r.model.click(a, count: 1)
+		#expect(r.model.restoreHint == .copied, "the pick replaced the copy made elsewhere")
+		#expect(r.announcements == ["Copied"])
+	}
+
+	/// The check bounces on each new card on the clipboard (`RestoreHintView.copied`), even while the chip stays up.
+	@Test func aSecondPickWhileTheChipShowsChangesTheBounceKey() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id, b = Fixtures.mixed[1].id, c = Fixtures.mixed[2].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		await r.model.click(b, count: 1)
+		#expect(r.model.clipboard?.id == b)
+		await r.model.click(c, count: 1)
+		#expect(r.model.restoreHint == .copied)
+		#expect(r.model.clipboard?.id == c)
+		#expect(r.announcements == ["Copied", "Copied"])
 	}
 
 	/// The chip appears without focus, so VoiceOver hears the copy too (WCAG 4.1.3 status messages).

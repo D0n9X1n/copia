@@ -409,18 +409,22 @@ public final class StripModel {
 	}
 
 	/// The caller holds the writer. `current` is checked again by the app right before the pasteboard write.
-	/// Returns whether the card landed; a stale write is dropped quietly, other failures throw.
-	private func land(_ card: ClipboardCard, ownership: Bool = false, current: @escaping () -> Bool) async throws -> Bool {
+	/// Returns whether the card landed, and what the clipboard held right before (nil: unknown); a stale write is
+	/// dropped quietly, other failures throw.
+	private func land(_ card: ClipboardCard, ownership: Bool = false,
+		current: @escaping () -> Bool) async throws -> (landed: Bool, replaced: ClipboardCard?) {
 		writeIsCurrent = current
 		writeRequiresOwnership = ownership
 		defer { writeIsCurrent = { true }; writeRequiresOwnership = false }
 		do {
 			try await actions.write(card.id, card.plain)
 		} catch is CancellationError {
-			return false
+			return (false, nil)
 		}
+		// Read after the write: the app may have seen a copy made elsewhere while it ran.
+		let replaced = clipboard
 		clipboard = card
-		return true
+		return (true, replaced)
 	}
 
 	/// A pick, or with `browsing` a browse. The caller holds the writer.
@@ -428,18 +432,18 @@ public final class StripModel {
 		current: (() -> Bool)? = nil) async {
 		let close = closeCount, generation = presentation
 		let card = ClipboardCard(id: id, plain: plain)
-		// What the clipboard held, as far as Copia knows; unknown counts as a change, since this write replaces it.
-		let before = clipboard
 		copiedID = nil
 		do {
 			// A browse never overwrites a copy made elsewhere; a pick does.
-			guard try await land(card, ownership: browsing, current: current ?? { [unowned self] in
+			let landing = try await land(card, ownership: browsing, current: current ?? { [unowned self] in
 				presentation == generation && closeCount == close
-			}), close == closeCount else { return }
+			})
+			guard landing.landed, close == closeCount else { return }
 			if !plain { copiedID = id }
 			// A pick is the new ⎋ restore point; a browse is not.
 			if !browsing { committed = card }
-			if browsing { endPickChip() } else if before != card, !dismiss { confirmPick() }
+			// Unknown counts as a change, since this write replaced it.
+			if browsing { endPickChip() } else if landing.replaced != card, !dismiss { confirmPick() }
 			guard dismiss else { return }
 			isClosingAfterCopy = true
 			beginClose()
@@ -552,7 +556,7 @@ public final class StripModel {
 			presentation == generation && storageStatus != .recoveryRequired && browse == browseGeneration
 		}
 		guard current(), clipboard != target else { return }
-		guard (try? await land(target, ownership: true, current: current)) == true else { return }
+		guard (try? await land(target, ownership: true, current: current))?.landed == true else { return }
 		if restoring { announce("Previous clipboard restored") }
 	}
 
