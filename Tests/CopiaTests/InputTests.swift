@@ -660,7 +660,10 @@ extension WindowTests.InputTests {
 			#expect(abs(clip.minY - Theme.bottomPadding) < 1 && abs(clip.height - Theme.rowHeight) < 1, "cards at \(clip)")
 			#expect(bar.minY >= -0.5 && bar.maxY <= Theme.scrollBand + 0.5, "bar at \(bar), in the band under the cards")
 			#expect(bar.height >= 12 && bar.height <= 16)
-			#expect(abs(bar.minX - Theme.rowPadding) < 1 && abs(host.panel.frame.width - bar.maxX - Theme.rowPadding) < 1)
+			// The drawn track, not the scroller's frame, lines up with the cards' 24 pt inset at both ends.
+			let track = scroller.convert(scroller.rect(for: .knobSlot), to: nil)
+			#expect(abs(track.minX - Theme.rowPadding) < 1 && abs(host.panel.frame.width - track.maxX - Theme.rowPadding) < 1,
+				"track at \(track)")
 		}
 	}
 

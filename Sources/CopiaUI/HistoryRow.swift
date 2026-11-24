@@ -44,8 +44,13 @@ class HistoryScrollBase: NSScrollView {
 		contentView.frame = CGRect(x: 0, y: isFlipped ? 0 : band, width: bounds.width, height: rows)
 		guard let scroller = horizontalScroller else { return }
 		let height = min(band, NSScroller.scrollerWidth(for: scroller.controlSize, scrollerStyle: scrollerStyle))
-		scroller.frame = CGRect(x: Theme.rowPadding, y: bandMinY + ((band - height) / 2).rounded(.down),
-			width: max(0, bounds.width - 2 * Theme.rowPadding), height: height)
+		let y = bandMinY + ((band - height) / 2).rounded(.down), width = max(0, bounds.width - 2 * Theme.rowPadding)
+		scroller.frame = CGRect(x: Theme.rowPadding, y: y, width: width, height: height)
+		// The visible track sits inside the scroller's frame; widen the frame so the track itself lines up with the cards.
+		let slot = scroller.rect(for: .knobSlot)
+		guard !slot.isEmpty else { return }
+		let leading = slot.minX, trailing = scroller.bounds.maxX - slot.maxX
+		scroller.frame = CGRect(x: Theme.rowPadding - leading, y: y, width: width + leading + trailing, height: height)
 	}
 
 	/// A mouse wheel turned up or down moves the row as it would move a page, so natural scrolling still applies; a

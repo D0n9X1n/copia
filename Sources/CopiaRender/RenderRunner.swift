@@ -157,7 +157,8 @@ enum RenderRunner {
 				scroll.scrollerStyle = style
 				scroll.tile()
 				scroll.flashScrollers()
-				try await Task.sleep(for: .milliseconds(120))
+				// Past the overlay's fade-in, so the capture shows the bar as it settles.
+				try await Task.sleep(for: .milliseconds(450))
 			}
 			if let midway = scene.midway {
 				model.animator = slowed(midwayDuration)
