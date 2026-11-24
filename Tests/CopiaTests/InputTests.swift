@@ -14,9 +14,11 @@ final class InputHost {
 	let focus: SearchFocus
 	let log = ActionLog()
 
-	init(clips: [Clip] = Fixtures.mixed, focus: SearchFocus = SearchFocus(), reduced: Bool = false, direction: LayoutDirection = .leftToRight) {
+	init(clips: [Clip] = Fixtures.mixed, focus: SearchFocus = SearchFocus(), reduced: Bool = false, direction: LayoutDirection = .leftToRight,
+		animator: Animator? = nil) {
 		self.focus = focus
 		model = StripModel(clips: clips)
+		if let animator { model.animator = animator }
 		AccessibilityNode.enableInProcess()
 		model.actions = log.actions()
 		panel.host.rootView = AnyView(StripView(model: model, focus: focus, thumbnails: ThumbnailCache(), now: { Fixtures.now }, sources: .fixtures)
@@ -534,6 +536,284 @@ extension WindowTests.InputTests {
 		let after = try #require(host.cards.first { $0.label == card.label }).frame.minX
 		#expect(after < before - 10)
 		#expect(host.model.selectedID == Fixtures.tenThousand[0].id && host.log.entries.isEmpty)
+	}
+
+	/// A mouse wheel only turns vertically: down (or toward you) moves to older cards, as a sideways swipe left does.
+	@Test func verticalMouseWheelScrollsTheRowWithoutActivatingACard() async throws {
+		let host = InputHost(clips: Array(Fixtures.tenThousand.prefix(100)))
+		defer { host.close() }
+		host.panel.setFrameOrigin(try #require(NSScreen.main).visibleFrame.origin)
+		host.panel.alphaValue = 1
+		await host.settle()
+		let card = try #require(host.cards.first { $0.label.hasSuffix("History item 3") })
+		let point = host.panel.convertPoint(fromScreen: CGPoint(x: card.frame.midX, y: card.frame.midY))
+		let mouse = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+			windowNumber: host.panel.windowNumber, context: nil, eventNumber: 1, clickCount: 0, pressure: 0))
+		let event = try #require(mouse.cgEvent)
+		event.type = .scrollWheel
+		// A notched wheel: line deltas on axis 1 only, no precise (trackpad) deltas.
+		event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -3)
+		event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -30)
+		event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -3)
+		event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 0)
+		let wheel = try #require(NSEvent(cgEvent: event)), before = card.frame.minX
+		try #require(!wheel.hasPreciseScrollingDeltas && wheel.scrollingDeltaY < 0 && wheel.scrollingDeltaX == 0)
+		let target = try #require(host.panel.contentView?.hitTest(point)), scroll = try #require(target.enclosingScrollView)
+		let offset = scroll.contentView.bounds.minX
+		try #require(wheel.windowNumber == host.panel.windowNumber)
+		NSApp.sendEvent(wheel); await host.settle()
+		#expect(scroll.contentView.bounds.minX > offset + 10, "wheel down moves to older cards")
+		let after = try #require(host.cards.first { $0.label == card.label }).frame.minX
+		#expect(after < before - 10)
+		#expect(host.model.selectedID == Fixtures.tenThousand[0].id && host.log.entries.isEmpty)
+	}
+}
+
+/// Issue #30: a plain mouse wheel scrolls the row, and a native scroll bar sits in the band below the cards.
+extension WindowTests.InputTests {
+	/// The panel on screen (AppKit does not scroll invisible windows), the row scrolled to its middle.
+	private func scrollHost(clips: Int = 100) async throws -> (InputHost, HistoryScrollBase) {
+		let host = InputHost(clips: Array(Fixtures.tenThousand.prefix(clips)))
+		host.panel.setFrameOrigin(try #require(NSScreen.main).visibleFrame.origin)
+		host.panel.alphaValue = 1
+		await host.settle()
+		let scroll = try #require(Self.historyScroll(in: host.panel.host))
+		return (host, scroll)
+	}
+
+	private static func historyScroll(in view: NSView) -> HistoryScrollBase? {
+		if let scroll = view as? HistoryScrollBase { return scroll }
+		for sub in view.subviews { if let found = historyScroll(in: sub) { return found } }
+		return nil
+	}
+
+	private func center(_ scroll: NSScrollView) -> CGFloat {
+		let mid = ((scroll.documentView?.frame.width ?? 0) - scroll.contentView.bounds.width) / 2
+		scroll.contentView.scroll(to: CGPoint(x: mid.rounded(), y: 0)); scroll.reflectScrolledClipView(scroll.contentView)
+		return scroll.contentView.bounds.minX
+	}
+
+	/// A wheel event; `lines` uses notched line units, otherwise precise pixels.
+	private func wheel(dy: Int32, dx: Int32 = 0, lines: Bool, phase: Int64 = 0, momentum: Int64 = 0, shift: Bool = false) throws -> NSEvent {
+		let event = try #require(CGEvent(scrollWheelEvent2Source: nil, units: lines ? .line : .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0))
+		if phase != 0 { event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase) }
+		if momentum != 0 { event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum) }
+		if shift { event.flags = .maskShift }
+		return try #require(NSEvent(cgEvent: event))
+	}
+
+	@Test func aNotchedWheelMovesAQuarterCardPerLineEitherWay() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		let step = (Theme.cardSize.width + Theme.cardGap) / 4
+		for (dy, sign) in [(Int32(-3), CGFloat(1)), (3, -1)] {
+			let start = center(scroll)
+			scroll.scrollWheel(with: try wheel(dy: dy, lines: true))
+			#expect(abs(scroll.contentView.bounds.minX - (start + sign * 3 * step)) < 1, "wheel \(dy) lines")
+		}
+		#expect(host.model.selectedID == Fixtures.tenThousand[0].id && host.log.entries.isEmpty)
+	}
+
+	/// Notched wheels only: a precise event sent straight to an on-screen scroll view starts AppKit's concurrent gesture
+	/// tracking, which stops the test runner's main run loop. Precise routing is checked in `onlyAPlainWheelIsTurnedSideways`.
+	@Test func shiftWheelAndTiltKeepAppKitsLine() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		let cases: [(String, NSEvent, CGFloat)] = [
+			("Shift+wheel: AppKit's 10 pt lines", try wheel(dy: 0, dx: -3, lines: true, shift: true), 30),
+			("horizontal tilt", try wheel(dy: 0, dx: -3, lines: true), 30),
+		]
+		for (name, event, moved) in cases {
+			let start = center(scroll)
+			scroll.scrollWheel(with: event)
+			#expect(abs(scroll.contentView.bounds.minX - (start + moved)) < 1, "\(name): moved \(scroll.contentView.bounds.minX - start)")
+		}
+	}
+
+	/// Gestures are only routed here, never scrolled: AppKit's gesture tracking stops the test runner's main run loop.
+	@Test func onlyAPlainWheelIsTurnedSideways() throws {
+		let lineDown = try #require(HistoryScrollBase.sideways(try wheel(dy: -3, lines: true)))
+		#expect(lineDown.scrollingDeltaX == -3 && lineDown.scrollingDeltaY == 0 && !lineDown.hasPreciseScrollingDeltas)
+		let preciseDown = try #require(HistoryScrollBase.sideways(try wheel(dy: -40, lines: false)))
+		#expect(preciseDown.scrollingDeltaX == -40 && preciseDown.scrollingDeltaY == 0 && preciseDown.hasPreciseScrollingDeltas,
+			"a precise wheel moves 1:1")
+		let untouched: [(String, NSEvent)] = [
+			("trackpad or Magic Mouse swipe", try wheel(dy: -40, lines: false, phase: 1)),
+			("momentum", try wheel(dy: -40, lines: false, momentum: 2)),
+			("Shift+wheel", try wheel(dy: -3, lines: true, shift: true)),
+			("tilt", try wheel(dy: 0, dx: -3, lines: true)),
+			("tied diagonal", try wheel(dy: -20, dx: -20, lines: false)),
+			("horizontal-dominant swipe", try wheel(dy: -10, dx: -30, lines: false)),
+		]
+		for (name, event) in untouched { #expect(HistoryScrollBase.sideways(event) == nil, "\(name)") }
+	}
+
+	@Test func theScrollBarSitsInTheBandBelowTheCardsInEitherStyle() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		let scroller = try #require(scroll.horizontalScroller)
+		for style in [NSScroller.Style.overlay, .legacy] {
+			scroll.scrollerStyle = style
+			scroll.tile(); await host.settle()
+			// Window coordinates (origin at the panel's bottom): the cards keep the 248 pt they had, 16 pt up; the bar is below.
+			let clip = scroll.convert(scroll.contentView.frame, to: nil), bar = scroller.convert(scroller.bounds, to: nil)
+			#expect(abs(clip.minY - Theme.bottomPadding) < 1 && abs(clip.height - Theme.rowHeight) < 1, "cards at \(clip)")
+			#expect(bar.minY >= -0.5 && bar.maxY <= Theme.scrollBand + 0.5, "bar at \(bar), in the band under the cards")
+			#expect(bar.height >= 12 && bar.height <= 16)
+			// The drawn track, not the scroller's frame, lines up with the cards' 24 pt inset at both ends.
+			let track = scroller.convert(scroller.rect(for: .knobSlot), to: nil)
+			#expect(abs(track.minX - Theme.rowPadding) < 1 && abs(host.panel.frame.width - track.maxX - Theme.rowPadding) < 1,
+				"track at \(track)")
+		}
+	}
+
+	@Test func aRowThatFitsHasNoUsableScrollBarAndIgnoresTheWheel() async throws {
+		let (host, scroll) = try await scrollHost(clips: 3)
+		defer { host.close() }
+		for style in [NSScroller.Style.overlay, .legacy] {
+			scroll.scrollerStyle = style
+			scroll.tile(); await host.settle()
+			let scroller = scroll.horizontalScroller
+			// Legacy autohides; an overlay knob is disabled, so nothing can be grabbed or shown.
+			#expect(scroller == nil || scroller!.isHidden || !scroller!.isEnabled, "no usable bar when the cards fit")
+			scroll.scrollWheel(with: try wheel(dy: -3, lines: true))
+			#expect(scroll.contentView.bounds.minX == 0)
+		}
+		#expect(scroll.flashCount == 0, "nothing to flash when the cards fit")
+	}
+
+	@Test func anOverflowingRowHasAnEnabledScrollBarInEitherStyle() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		for style in [NSScroller.Style.overlay, .legacy] {
+			scroll.scrollerStyle = style
+			scroll.tile(); await host.settle()
+			let scroller = try #require(scroll.horizontalScroller)
+			#expect(!scroller.isHidden && scroller.isEnabled && scroller.knobProportion < 0.2)
+		}
+	}
+
+	@Test func theFlashWaitsForTheOpenToSettleAndSkipsAnInterruptedOne() async throws {
+		var held: [() -> Void] = []
+		let animator = Animator { event, change, completion in
+			change()
+			if event == .open { held.append(completion) } else { completion() }
+		}
+		let host = InputHost(clips: Array(Fixtures.tenThousand.prefix(100)), animator: animator)
+		defer { host.close() }
+		await host.settle()
+		let scroll = try #require(Self.historyScroll(in: host.panel.host))
+		#expect(scroll.flashCount == 0, "no flash while the strip slides up")
+		held.removeFirst()()
+		await host.settle()
+		#expect(scroll.flashCount == 1, "one flash once the open settles")
+		// Opening B starts before A's completion arrives: A's late completion must not flash B.
+		host.model.beginClose(); host.model.open(); host.model.animateIn()
+		host.model.beginClose(); host.model.open(); host.model.animateIn()
+		await host.settle()
+		let now = try #require(Self.historyScroll(in: host.panel.host))
+		let before = now.flashCount
+		held.removeFirst()()
+		await host.settle()
+		#expect(now.flashCount == before, "a stale opening never flashes")
+		held.removeFirst()()
+		await host.settle()
+		#expect(now.flashCount == before + 1, "the current opening flashes once")
+	}
+
+	/// A press in the band reaches the scroller, never a card. Driving the scroller's own tracking (a knob drag, a track
+	/// click) needs events posted from inside its nested loop, which stops the test runner's main run loop, so the drag
+	/// and the track click are checked by hand in the running app; StripPanel's press handling is unchanged.
+	@Test func theFlashIsOncePerOpeningEvenWhenTheRowComesBack() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		#expect(scroll.flashCount == 1)
+		// A search with no matches removes the row; clearing it brings a new row back in the same opening.
+		host.model.query = "zzzz-no-such-card"
+		await host.settle(400)
+		#expect(Self.historyScroll(in: host.panel.host) == nil, "no matches: no row")
+		host.model.query = ""
+		await host.settle(300)
+		let again = try #require(Self.historyScroll(in: host.panel.host))
+		#expect(again.flashCount == 0, "the opening already flashed")
+	}
+
+	@Test func aFlashQueuedByAnEarlierOpeningNeverReachesTheNextOne() async throws {
+		var held: [() -> Void] = []
+		let animator = Animator { event, change, completion in
+			change()
+			if event == .open { held.append(completion) } else { completion() }
+		}
+		let host = InputHost(clips: Array(Fixtures.tenThousand.prefix(100)), animator: animator)
+		defer { host.close() }
+		await host.settle()
+		// Opening A settles with its row on screen and queues a flash; B opens before the main queue drains.
+		held.removeFirst()()
+		host.model.beginClose(); host.model.open(); host.model.animateIn()
+		await host.settle()
+		let scroll = try #require(Self.historyScroll(in: host.panel.host))
+		#expect(scroll.flashCount == 0, "A's flash must not show during B's slide")
+		held.removeFirst()()
+		await host.settle()
+		#expect(scroll.flashCount == 1, "B flashes once it settles")
+	}
+
+	@Test func aNotchedWheelLeavesTheLineForTheNextTiltAsItWas() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		_ = center(scroll)
+		scroll.scrollWheel(with: try wheel(dy: -3, lines: true))
+		let start = center(scroll)
+		scroll.scrollWheel(with: try wheel(dy: 0, dx: -3, lines: true))
+		#expect(abs(scroll.contentView.bounds.minX - (start + 30)) < 1, "tilt after a notch keeps AppKit's 10 pt line")
+	}
+
+	@Test func turningSidewaysMovesEveryDeltaFieldAndIgnoresOtherEvents() throws {
+		let source = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: -3, wheel2: 0, wheel3: 0))
+		// Fields AppKit reads independently; the line delta is written first, as it recomputes the others.
+		source.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -2.75)
+		source.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -27)
+		let lines = source.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+		let fixed = source.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+		let points = source.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
+		let event = try #require(NSEvent(cgEvent: source))
+		let turned = try #require(HistoryScrollBase.sideways(event)?.cgEvent)
+		#expect(turned.getIntegerValueField(.scrollWheelEventDeltaAxis2) == lines)
+		#expect(turned.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2) == fixed)
+		#expect(turned.getIntegerValueField(.scrollWheelEventPointDeltaAxis2) == points)
+		#expect(turned.getIntegerValueField(.scrollWheelEventDeltaAxis1) == 0
+			&& turned.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) == 0
+			&& turned.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1) == 0)
+		let moved = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [], timestamp: 0,
+			windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
+		#expect(HistoryScrollBase.sideways(moved) == nil, "not a wheel")
+	}
+
+	/// A press in the band never reaches a card. An always-shown bar takes it; a faded-out overlay bar isn't hit-testable
+	/// (as on CI), so the press reaches the scroll view around it, still outside the cards.
+	@Test func aPressInTheBandReachesTheScrollerNotACard() async throws {
+		let (host, scroll) = try await scrollHost()
+		defer { host.close() }
+		let document = try #require(scroll.documentView)
+		// The overlay bar shown and faded out (CI's state), then the always-shown bar.
+		for (style, faded) in [(NSScroller.Style.overlay, false), (.overlay, true), (.legacy, false)] {
+			scroll.scrollerStyle = style
+			scroll.tile(); await host.settle()
+			let scroller = try #require(scroll.horizontalScroller)
+			scroller.isHidden = faded
+			defer { scroller.isHidden = false }
+			let content = try #require(host.panel.contentView)
+			for x in [scroller.bounds.minX + 4, scroller.bounds.midX, scroller.bounds.maxX - 4] {
+				let point = content.convert(scroller.convert(CGPoint(x: x, y: scroller.bounds.midY), to: nil), from: nil)
+				let hit = try #require(content.hitTest(point))
+				#expect(!hit.isDescendant(of: document), "x \(x): a press in the band never reaches a card")
+				if style == .legacy {
+					#expect(hit === scroller, "x \(x): the always-shown bar takes the press")
+				} else {
+					#expect(hit === scroller || hit === scroll || hit === scroll.contentView, "x \(x): hit \(type(of: hit))")
+				}
+			}
+		}
 	}
 }
 

@@ -607,6 +607,7 @@ public final class StripModel {
 	public func open(clipboard known: ClipboardCard? = nil) {
 		presentation += 1
 		copiedID = nil
+		isOpenSettled = false
 		endPickChip()
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
@@ -627,15 +628,27 @@ public final class StripModel {
 
 	/// Called after the open animation, so the panel can refresh its shadow.
 	@ObservationIgnored public var onOpenFinish: () -> Void = {}
+	/// The current opening has finished sliding in. An interrupted or earlier opening never sets it. Not observed: the
+	/// open slide must not rebuild the strip; the row hears it through `onOpenSettled`.
+	@ObservationIgnored public private(set) var isOpenSettled = false
+	@ObservationIgnored public var onOpenSettled: () -> Void = {}
 
 	public func animateIn() {
-		animator.run(.open, { self.appeared = true }, { self.onOpenFinish() })
+		let opening = presentation
+		animator.run(.open, { self.appeared = true }, {
+			if self.presentation == opening, self.cardsMounted, !self.isClosing {
+				self.isOpenSettled = true
+				self.onOpenSettled()
+			}
+			self.onOpenFinish()
+		})
 	}
 
 	public func beginClose() {
 		guard cardsMounted, !isClosing else { return }
 		let cancel = cancelling, lit = selectedID, target = browseTarget
 		cancelling = false
+		isOpenSettled = false
 		endPickChip()
 		dropBrowse()
 		// A copy made elsewhere from here on cancels the keep or restore below.

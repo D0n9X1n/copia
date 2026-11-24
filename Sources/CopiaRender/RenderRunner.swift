@@ -22,6 +22,8 @@ struct Scene {
 	var sheet = false
 	/// Opens as if the clipboard held something Copia didn't save, so ⎋ can't restore it.
 	var unknownClipboard = false
+	/// Forces the history scroll bar's style and shows it for the capture (an overlay bar is flashed).
+	var scroller: NSScroller.Style?
 }
 
 /// Renders each strip state as a real window over a fixed wallpaper and captures it with `screencapture`.
@@ -81,6 +83,12 @@ enum RenderRunner {
 			list.append(Scene(name: "08-pins-\(mode)", dark: dark, clips: { mixed, _ in
 				var c = mixed; c[0].isPinned = true; return c
 			}, prepare: { m in m.hoveredID = m.clips[2].id }))
+			// A long history scrolled partway: the scroll bar in the band under the cards, in both system styles.
+			for (style, name) in [(NSScroller.Style.overlay, "overlay"), (.legacy, "always")] {
+				list.append(Scene(name: "08-scrollbar-\(name)-\(mode)", dark: dark,
+					clips: { mixed, _ in mixed + Array(Fixtures.tenThousand.prefix(40)) },
+					prepare: { m in m.select(m.clips[22].id) }, scroller: style))
+			}
 			list.append(Scene(name: "08-loading-\(mode)", dark: dark, clips: { mixed, _ in
 				var c = mixed; c[2].preview = .pending; c[3].preview = .pending; return c
 			}))
@@ -93,6 +101,12 @@ enum RenderRunner {
 				prepare: { m in m.select(m.clips[1].id) }, midway: { m in await m.deleteSelected() }))
 		}
 		return list
+	}
+
+	static func historyScroll(in view: NSView) -> NSScrollView? {
+		if let scroll = view as? NSScrollView { return scroll }
+		for sub in view.subviews { if let found = historyScroll(in: sub) { return found } }
+		return nil
 	}
 
 	/// Puts the strip back in its hidden state, lets it draw there, then opens it again.
@@ -139,6 +153,13 @@ enum RenderRunner {
 				continue
 			}
 			let model = try await showStrip(scene, clips: clips, in: visible, panel: panel)
+			if let style = scene.scroller, let scroll = historyScroll(in: panel.host) {
+				scroll.scrollerStyle = style
+				scroll.tile()
+				scroll.flashScrollers()
+				// Past the overlay's fade-in, so the capture shows the bar as it settles.
+				try await Task.sleep(for: .milliseconds(450))
+			}
 			if let midway = scene.midway {
 				model.animator = slowed(midwayDuration)
 				await midway(model)

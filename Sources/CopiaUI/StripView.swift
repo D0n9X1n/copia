@@ -74,8 +74,14 @@ public struct StripView: View {
 		let shape = RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous)
 		VStack(spacing: 0) {
 			topBar.frame(height: Theme.topBarHeight)
-			if model.cardsMounted { content.frame(height: Theme.rowHeight) } else { Color.clear.frame(height: Theme.rowHeight) }
-			Spacer(minLength: Theme.bottomPadding)
+			// The card row takes the bottom padding as the band its scroll bar sits in; the cards don't move.
+			let showsRow = model.cardsMounted && !model.visibleClips.isEmpty
+			if model.cardsMounted {
+				content.frame(height: Theme.rowHeight + (showsRow ? Theme.scrollBand : 0))
+			} else {
+				Color.clear.frame(height: Theme.rowHeight)
+			}
+			Spacer(minLength: showsRow ? 0 : Theme.bottomPadding)
 		}
 		.frame(maxWidth: .infinity)
 		.background {
@@ -160,7 +166,22 @@ public struct StripView: View {
 			.onChange(of: visible.firstIndex { $0.id == model.selectedID }) { _, _ in scrollToSelection(animated: true) }
 			.onChange(of: model.removingIDs) { _, removing in departed.formUnion(removing) }
 			.onChange(of: model.cardsMounted) { _, mounted in if !mounted { departed.removeAll() } }
-			.onAppear { scrollToSelection(animated: false) }
+			.onAppear {
+				scrollToSelection(animated: false)
+				// The scroll bar shows briefly once the open settles, without rebuilding the strip.
+				// Weak: the model owns this closure, so a strong capture would keep it alive forever.
+				model.onOpenSettled = { [row, weak model] in if let model { Self.flashRow(row, model: model) } }
+				if model.isOpenSettled { Self.flashRow(row, model: model) }
+			}
+		}
+	}
+
+	/// Flashes for the opening that settled, if it is still the current one when the flash runs.
+	private static func flashRow(_ row: HistoryRowPosition, model: StripModel) {
+		let opening = model.presentationID
+		row.flash(opening: opening) { [weak model] in
+			guard let model else { return false }
+			return model.presentationID == opening && model.isOpenSettled
 		}
 	}
 

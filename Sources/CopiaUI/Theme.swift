@@ -56,6 +56,10 @@ public enum Theme {
 	public static let cardGap: CGFloat = 16
 	public static let rowPadding: CGFloat = 24
 	public static let scrollMargin: CGFloat = 24
+	/// The band below the cards that holds the history scroll bar; it replaces the strip's bottom padding.
+	public static let scrollBand: CGFloat = 16
+	/// How far one notch of a plain mouse wheel moves the row: a quarter of a card.
+	public static let wheelStep: CGFloat = (cardSize.width + cardGap) / 4
 	public static let panelRadius: CGFloat = 28
 	public static let cardRadius: CGFloat = 16
 	public static let smallRadius: CGFloat = 8
