@@ -71,6 +71,9 @@ public final class StripModel {
 	public static let searchDelay: Duration = .milliseconds(120)
 	@ObservationIgnored private var undoEntry: (token: UUID, members: Set<UUID>, primary: UUID)?
 	@ObservationIgnored private var cancelToast: ToastClock.Cancel?
+	/// A pick just changed the clipboard: the chip confirms it until `cancelPickChip` fires.
+	private var pickConfirmed = false
+	@ObservationIgnored private var cancelPickChip: ToastClock.Cancel?
 	/// Undo lasts 3 s from the delete, whatever toast is shown meanwhile.
 	@ObservationIgnored private var cancelUndoDeadline: ToastClock.Cancel?
 	@ObservationIgnored private var busy = false
@@ -85,6 +88,8 @@ public final class StripModel {
 	public private(set) var closeCount = 0
 
 	public static let toastLifetime: Duration = .seconds(3)
+	/// How long the Copied chip stays after a click, ⌘C or menu Copy changed the clipboard.
+	public static let pickChipLifetime: Duration = .seconds(2)
 
 	public init(clips: [Clip], actions: StripActions = .fixtures, animator: Animator = .immediate, clock: ToastClock = .live) {
 		self.clips = clips
@@ -335,7 +340,7 @@ public final class StripModel {
 
 	/// Shown once a browse has changed the clipboard away from the restore point.
 	public var restoreHint: RestoreHint? {
-		guard let clipboard, clipboard != committed else { return nil }
+		guard let clipboard, clipboard != committed else { return pickConfirmed ? .copied : nil }
 		guard query.isEmpty else { return .copied }
 		return committed.map(canRestore) == true ? .restore : .unsaved
 	}
@@ -404,18 +409,22 @@ public final class StripModel {
 	}
 
 	/// The caller holds the writer. `current` is checked again by the app right before the pasteboard write.
-	/// Returns whether the card landed; a stale write is dropped quietly, other failures throw.
-	private func land(_ card: ClipboardCard, ownership: Bool = false, current: @escaping () -> Bool) async throws -> Bool {
+	/// Returns whether the card landed, and what the clipboard held right before (nil: unknown); a stale write is
+	/// dropped quietly, other failures throw.
+	private func land(_ card: ClipboardCard, ownership: Bool = false,
+		current: @escaping () -> Bool) async throws -> (landed: Bool, replaced: ClipboardCard?) {
 		writeIsCurrent = current
 		writeRequiresOwnership = ownership
 		defer { writeIsCurrent = { true }; writeRequiresOwnership = false }
 		do {
 			try await actions.write(card.id, card.plain)
 		} catch is CancellationError {
-			return false
+			return (false, nil)
 		}
+		// Read after the write: the app may have seen a copy made elsewhere while it ran.
+		let replaced = clipboard
 		clipboard = card
-		return true
+		return (true, replaced)
 	}
 
 	/// A pick, or with `browsing` a browse. The caller holds the writer.
@@ -426,12 +435,15 @@ public final class StripModel {
 		copiedID = nil
 		do {
 			// A browse never overwrites a copy made elsewhere; a pick does.
-			guard try await land(card, ownership: browsing, current: current ?? { [unowned self] in
+			let landing = try await land(card, ownership: browsing, current: current ?? { [unowned self] in
 				presentation == generation && closeCount == close
-			}), close == closeCount else { return }
+			})
+			guard landing.landed, close == closeCount else { return }
 			if !plain { copiedID = id }
 			// A pick is the new ⎋ restore point; a browse is not.
 			if !browsing { committed = card }
+			// Unknown counts as a change, since this write replaced it.
+			if browsing { endPickChip() } else if landing.replaced != card, !dismiss { confirmPick() }
 			guard dismiss else { return }
 			isClosingAfterCopy = true
 			beginClose()
@@ -453,6 +465,7 @@ public final class StripModel {
 	/// The card may be saved but not yet published by a reload; the lens, the chip and Esc treat it as on the clipboard
 	/// once it is.
 	public func clipboardChanged(to card: ClipboardCard?) {
+		endPickChip()
 		clipboard = card
 		committed = card
 		copiedID = nil
@@ -461,6 +474,7 @@ public final class StripModel {
 	/// The pasteboard changed without Copia, before any capture says what it holds. A browse not yet written is dropped,
 	/// and a close's keep or restore is cancelled, so neither overwrites the newer copy.
 	public func clipboardReplaced() {
+		endPickChip()
 		dropBrowse()
 		clipboard = nil
 		committed = nil
@@ -542,7 +556,7 @@ public final class StripModel {
 			presentation == generation && storageStatus != .recoveryRequired && browse == browseGeneration
 		}
 		guard current(), clipboard != target else { return }
-		guard (try? await land(target, ownership: true, current: current)) == true else { return }
+		guard (try? await land(target, ownership: true, current: current))?.landed == true else { return }
 		if restoring { announce("Previous clipboard restored") }
 	}
 
@@ -593,6 +607,7 @@ public final class StripModel {
 	public func open(clipboard known: ClipboardCard? = nil) {
 		presentation += 1
 		copiedID = nil
+		endPickChip()
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
 		// A card saved but not yet published is still the clipboard's card and the restore point; the chip and Esc offer
@@ -621,6 +636,7 @@ public final class StripModel {
 		guard cardsMounted, !isClosing else { return }
 		let cancel = cancelling, lit = selectedID, target = browseTarget
 		cancelling = false
+		endPickChip()
 		dropBrowse()
 		// A copy made elsewhere from here on cancels the keep or restore below.
 		let shown = presentation, browse = browseGeneration
@@ -660,6 +676,22 @@ public final class StripModel {
 	}
 
 	// MARK: Toasts
+
+	/// Shows the Copied chip for a pick that changed the clipboard, for `pickChipLifetime` after the latest one.
+	private func confirmPick() {
+		cancelPickChip?()
+		pickConfirmed = true
+		cancelPickChip = clock.after(Self.pickChipLifetime) { [weak self] in self?.endPickChip() }
+		// The chip appears without focus; VoiceOver hears it too.
+		announce("Copied")
+	}
+
+	private func endPickChip() {
+		cancelPickChip?()
+		cancelPickChip = nil
+		// Only when shown: opening must not invalidate the top bar for nothing.
+		if pickConfirmed { pickConfirmed = false }
+	}
 
 	private func showActionError(_ error: Error, operation: String, close: Int) {
 		guard close == closeCount || error as? StripActionError == .outcomeUnknown else { return }

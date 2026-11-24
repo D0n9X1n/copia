@@ -627,6 +627,25 @@ extension WindowTests.AppControllerTests {
 		#expect(r.board.string(forType: .string) == "theirs", "the restore must not overwrite the newer copy")
 	}
 
+	@Test func aPickOverACopyMadeElsewhereJustBeforeTheWriteShowsCopied() async throws {
+		let r = try AppRig(); await r.launch(); defer { r.stop() }
+		let model = r.controller.model, panel = r.controller.panel
+		panel.alphaValue = 0
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("second")
+		r.copyElsewhere("first")
+		r.controller.watcher.tick()
+		try #require(await eventually { model.clips.first?.text == "first" })
+		r.controller.toggleHistory()
+		try #require(model.lensOnClipboard && model.restoreHint == nil)
+		let first = try #require(model.clips.first { $0.text == "first" }).id
+		// Another app copies after the watcher's last poll, right before Copia's pick clears the pasteboard.
+		r.controller.beforePasteboardWrite = { r.copyElsewhere("theirs") }
+		await model.copy(id: first, plain: false, dismiss: false)
+		#expect(r.board.string(forType: .string) == "first", "a pick overwrites, as before")
+		#expect(model.restoreHint == .copied, "the pick changed the clipboard back from the unseen copy")
+	}
+
 	@Test func theLensReopensOnCopiasOwnLastWriteIncludingPlainText() async throws {
 		let r = try AppRig(); await r.launch(); defer { r.stop() }
 		let model = r.controller.model, panel = r.controller.panel
