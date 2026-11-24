@@ -439,7 +439,7 @@ public final class StripModel {
 			if !plain { copiedID = id }
 			// A pick is the new ⎋ restore point; a browse is not.
 			if !browsing { committed = card }
-			if browsing { endPickChip() } else if before != card { confirmPick() }
+			if browsing { endPickChip() } else if before != card, !dismiss { confirmPick() }
 			guard dismiss else { return }
 			isClosingAfterCopy = true
 			beginClose()
@@ -678,6 +678,8 @@ public final class StripModel {
 		cancelPickChip?()
 		pickConfirmed = true
 		cancelPickChip = clock.after(Self.pickChipLifetime) { [weak self] in self?.endPickChip() }
+		// The chip appears without focus; VoiceOver hears it too.
+		announce("Copied")
 	}
 
 	private func endPickChip() {

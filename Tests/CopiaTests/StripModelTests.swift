@@ -1658,4 +1658,16 @@ extension StripModelTests {
 		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: Fixtures.mixed[3].id))
 		#expect(r.model.restoreHint == nil)
 	}
+
+	/// The chip appears without focus, so VoiceOver hears the copy too (WCAG 4.1.3 status messages).
+	@Test func aPickThatChangesTheClipboardAnnouncesCopiedOnce() async {
+		let r = StripRig(), a = Fixtures.mixed[0].id
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: a))
+		await r.model.click(a, count: 1)
+		#expect(r.announcements.isEmpty, "the clipboard already held that card")
+		await r.model.click(Fixtures.mixed[1].id, count: 1)
+		#expect(r.announcements == ["Copied"])
+		await r.model.copy(id: Fixtures.mixed[2].id, plain: false, dismiss: true)
+		#expect(r.announcements == ["Copied"], "a pick that closes the strip shows and says nothing")
+	}
 }
