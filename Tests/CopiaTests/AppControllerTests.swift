@@ -742,6 +742,32 @@ extension WindowTests.AppControllerTests {
 		#expect(r.board.string(forType: .string) == (hint == .restore ? "just copied" : "oldest"), "chip \(hint)")
 	}
 
+	@Test func aCopySeenWhileHiddenAndSavedAfterTheArrowCopiesIsStillTheRestorePoint() async throws {
+		let r = try AppRig(); await r.launch(); r.stop()
+		let model = r.controller.model, panel = r.controller.panel, clock = ClockProbe(), gate = WriteGate()
+		panel.alphaValue = 0
+		model.clock = clock.clock
+		defer { model.beginClose(); panel.orderOut(nil) }
+		try await r.copy("oldest"); try await r.copy("older")
+		// The poll sees and saves the copy while the strip is hidden; its callback is held before history reloads.
+		r.controller.afterCaptureSaved = { await withCheckedContinuation { gate.waiting.append($0) } }
+		r.copyElsewhere("just copied")
+		r.controller.watcher.tick()
+		try #require(await eventually { !gate.waiting.isEmpty })
+		r.controller.afterCaptureSaved = {}
+		// Opened on exactly that copy, before Copia knows its card.
+		r.controller.toggleHistory()
+		try #require(model.committed == nil)
+		model.browse(1)
+		clock.advance(by: StripModel.browseSettle)
+		try #require(await eventually { r.board.string(forType: .string) == "oldest" })
+		gate.release()
+		try #require(await eventually { model.clips.contains { $0.text == "just copied" } && model.restoreHint == .restore },
+			"hint \(String(describing: model.restoreHint)) committed \(String(describing: model.committed))")
+		model.escape()
+		#expect(await eventually { r.board.string(forType: .string) == "just copied" })
+	}
+
 	@Test func escapeNeverRestoresOverACopyMadeWhileCaptureWasPaused() async throws {
 		let r = try AppRig(); await r.launch(); r.stop()
 		let model = r.controller.model, panel = r.controller.panel

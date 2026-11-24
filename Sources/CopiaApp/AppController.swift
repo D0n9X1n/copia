@@ -83,6 +83,8 @@ public final class AppController {
 	private var lastForeignChange = Int.min
 	/// Tests: runs after the store read, right before the pasteboard write.
 	var beforePasteboardWrite: () -> Void = {}
+	/// Tests: runs after a capture is saved, before history reloads, so a test can hold a capture mid-flight.
+	var afterCaptureSaved: () async -> Void = {}
 	private let sources: SourceAppearance
 	private let observesWorkspace: Bool
 	private var observers: [NSObjectProtocol] = []
@@ -299,6 +301,7 @@ public final class AppController {
 				guard self.model.storageStatus != .recoveryRequired else { return }
 				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
+				await self.afterCaptureSaved()
 				await self.reload()
 				// Only Copia's own browse replaced it since: it is still what the clipboard held before that browse.
 				// The opening it belongs to: the current one if the strip opened on exactly this copy, else the one it was seen in.
