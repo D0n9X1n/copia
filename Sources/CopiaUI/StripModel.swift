@@ -14,16 +14,16 @@ public final class StripModel {
 	var groupCount: Int? { frozenIDs?.count }
 	func isSelected(_ id: UUID) -> Bool { frozenIDs?.contains(id) ?? (selectedID == id) }
 	public private(set) var clips: [Clip]
-	public private(set) var selectedID: UUID?
+	public private(set) var selectedID: UUID? {
+		// Only an arrow keeps a browse: a press, filter, delete, undo or open that moves the lens off its card ends it.
+		didSet { if let target = browseTarget, selectedID != target { dropBrowse() } }
+	}
 	public var query = "" {
 		didSet {
 			guard query != oldValue else { return }
 			searchRevision += 1
 			storeMatches = []
 			reconcileSelection(preferredIndex: 0)
-			// The filter moved the lens off the card the user arrowed to: that browse is over, even if a later filter
-			// brings the card back.
-			if let target = browseTarget, selectedID != target { dropBrowse() }
 			searchTask?.cancel()
 			searchTask = Task { [weak self] in
 				try? await Task.sleep(for: Self.searchDelay)
@@ -303,11 +303,11 @@ public final class StripModel {
 	@ObservationIgnored private var settleTimer: ToastClock.Cancel?
 	/// Every move, pick, open and close bumps this, so a browse queued before it never writes.
 	@ObservationIgnored private var browseGeneration = 0
+	/// Counts arrow moves only, so a queued pick can tell whether an arrow came after it (picks bump browseGeneration too).
+	@ObservationIgnored private var arrowMoves = 0
 	@ObservationIgnored private var lensAfterClose: UUID?
 	@ObservationIgnored private var cancelling = false
-	/// A copy made elsewhere since the strip opened: the copy it opened on is no longer the restore point.
-	@ObservationIgnored private var replacedSinceOpen = false
-	/// The browse generation when a queued pick was requested; the pick only cancels a browse older than itself.
+	/// The arrow count when a queued pick was requested: an arrow pressed after it keeps its browse and the lens.
 	@TaskLocal static var pickRequestedAt: Int?
 	/// Asks the app to look at the pasteboard now, so a decision is never made on a copy the next poll would have reported.
 	@ObservationIgnored public var syncClipboard: () -> Void = {}
@@ -340,10 +340,10 @@ public final class StripModel {
 
 	/// Resolve targets synchronously, and never deliver a queued UI command into a later presentation.
 	func request(_ operation: @escaping @MainActor () async -> Void) {
-		let generation = presentation, close = closeCount, browse = browseGeneration
+		let generation = presentation, close = closeCount, arrows = arrowMoves
 		Task {
 			guard cardsMounted, !isClosing, presentation == generation, close == closeCount else { return }
-			await Self.$pickRequestedAt.withValue(browse) { await operation() }
+			await Self.$pickRequestedAt.withValue(arrows) { await operation() }
 		}
 	}
 
@@ -423,13 +423,6 @@ public final class StripModel {
 		}
 	}
 
-	/// The copy the strip opened on, which the app only learned about after opening, is now saved: it is the restore point
-	/// unless a pick or a copy made elsewhere has replaced it since.
-	public func openedOn(_ card: ClipboardCard) {
-		guard cardsMounted, !isClosing, committed == nil, !replacedSinceOpen, clips.contains(where: { $0.id == card.id }) else { return }
-		committed = card
-	}
-
 	/// The app saw the clipboard change without Copia: a copy made elsewhere, captured (`card`) or not (nil).
 	/// It is the clipboard now, and ⎋ keeps it.
 	public func clipboardChanged(to card: ClipboardCard?) {
@@ -442,7 +435,6 @@ public final class StripModel {
 	/// The pasteboard changed without Copia, before any capture says what it holds. A browse not yet written is dropped,
 	/// and a close's keep or restore is cancelled, so neither overwrites the newer copy.
 	public func clipboardReplaced() {
-		replacedSinceOpen = true
 		dropBrowse()
 		clipboard = nil
 		committed = nil
@@ -474,6 +466,7 @@ public final class StripModel {
 	private func follow(from before: UUID?) {
 		guard let id = selectedID, id != before, storageStatus != .recoveryRequired else { return }
 		browseGeneration += 1
+		arrowMoves += 1
 		browseTarget = id
 		armSettle()
 	}
@@ -492,7 +485,7 @@ public final class StripModel {
 	/// Cancels a browse not yet written. Picks, opens, closes and deleting its card call it. A queued pick cancels only
 	/// a browse from before it was requested; an arrow pressed after it still copies.
 	private func dropBrowse(olderThanPick: Bool = false) {
-		if olderThanPick, let requested = Self.pickRequestedAt, requested != browseGeneration { return }
+		if olderThanPick, let requested = Self.pickRequestedAt, requested != arrowMoves { return }
 		settleTimer?()
 		settleTimer = nil
 		browseTarget = nil
@@ -530,7 +523,7 @@ public final class StripModel {
 	public func perform(_ action: CardAction, id: UUID) async {
 		guard storageStatus != .recoveryRequired, visibleClips.contains(where: { $0.id == id }) else { return }
 		// A queued action keeps the lens where an arrow pressed after it put it.
-		if Self.pickRequestedAt.map({ $0 == browseGeneration }) ?? true { selectOnPress(id) }
+		if Self.pickRequestedAt.map({ $0 == arrowMoves }) ?? true { selectOnPress(id) }
 		switch action {
 		case .activate, .copyPlain, .copy: await copy(id: id, plain: action == .copyPlain, dismiss: action != .copy)
 		case .delete: await delete(ids: [id])
@@ -574,7 +567,6 @@ public final class StripModel {
 	public func open(clipboard known: ClipboardCard? = nil) {
 		presentation += 1
 		copiedID = nil
-		replacedSinceOpen = false
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
 		let held = known.flatMap { c in clips.contains { $0.id == c.id } ? c : nil }

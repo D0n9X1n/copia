@@ -1403,14 +1403,23 @@ extension StripModelTests {
 		#expect(r.model.selectedID == c && r.model.lensOnClipboard)
 	}
 
-	@Test func theCopyTheStripOpenedOnBecomesTheRestorePointOnceSaved() async {
-		let r = StripRig(), x = Fixtures.mixed[3].id
+	@Test func aPressThatReselectsTheArrowedCardNeverRevivesItsBrowse() async {
+		let r = StripRig(), b = Fixtures.mixed[1].id, c = Fixtures.mixed[2].id
 		r.model.browse(1)
+		r.model.selectOnPress(c)
 		await r.settle()
-		r.model.openedOn(ClipboardCard(id: x))
-		#expect(r.model.committed == ClipboardCard(id: x) && r.model.restoreHint == .restore)
-		r.model.clipboardReplaced()
-		r.model.openedOn(ClipboardCard(id: x))
-		#expect(r.model.committed == nil, "a copy made elsewhere since opening wins")
+		r.model.selectOnPress(b)
+		r.model.beginClose()
+		await r.settle()
+		#expect(r.writes.isEmpty, "a press is not an arrow, and a drag is not a pick")
+	}
+
+	@Test func twoQueuedMenuCopiesLeaveTheLensOnTheCardOnTheClipboard() async {
+		let r = StripRig(), b = Fixtures.mixed[1].id, c = Fixtures.mixed[2].id
+		r.model.request { await r.model.perform(.copy, id: b) }
+		r.model.request { await r.model.perform(.copy, id: c) }
+		for _ in 0..<300 { await Task.yield() }
+		#expect(r.writes == ["write \(b) plain=false", "write \(c) plain=false"])
+		#expect(r.model.selectedID == c && r.model.lensOnClipboard)
 	}
 }

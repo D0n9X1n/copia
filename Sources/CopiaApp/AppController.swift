@@ -297,8 +297,6 @@ public final class AppController {
 				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
 				await self.reload()
-				// The copy the strip opened on, saved only now: Esc can put it back.
-				if change == self.openChange { self.model.openedOn(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key))) }
 				// A newer change (Copia's own write, or another copy) since this one wins.
 				guard change >= self.lastChange else { return }
 				self.onClipboard = (change, result.clip.key, false)
