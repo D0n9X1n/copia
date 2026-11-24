@@ -5,6 +5,86 @@ import CopiaCore
 @MainActor
 final class HistoryRowPosition {
 	weak var scroll: NSScrollView?
+
+	/// Shows the scroll bar briefly, once laid out, when the cards overflow.
+	func flash() {
+		DispatchQueue.main.async { [weak self] in (self?.scroll as? HistoryScrollBase)?.flashIfOverflowing() }
+	}
+}
+
+/// The history row's scrolling: a plain mouse wheel moves it sideways, and a native scroll bar sits in the band below
+/// the cards. Everything else (trackpad, Magic Mouse, Shift+wheel, tilt) scrolls as AppKit does.
+@MainActor
+class HistoryScrollBase: NSScrollView {
+	/// Copia's own flashes of the scroll bar, for tests.
+	private(set) var flashCount = 0
+
+	override init(frame: NSRect) {
+		super.init(frame: frame)
+		drawsBackground = false
+		hasHorizontalScroller = true
+		hasVerticalScroller = false
+		autohidesScrollers = true
+		verticalScrollElasticity = .none
+		horizontalScroller?.controlSize = .small
+	}
+
+	@available(*, unavailable)
+	required init?(coder: NSCoder) { fatalError() }
+
+	/// The override only peeks at each event; gesture streams keep AppKit's responsive scrolling.
+	override class var isCompatibleWithResponsiveScrolling: Bool { true }
+
+	/// Cards keep the top 248 pt; the scroll bar sits in the band below them, lined up with the first card.
+	override func tile() {
+		super.tile()
+		let band = Theme.scrollBand, rows = max(0, bounds.height - band)
+		// The band is at the bottom of the view; a scroll view is flipped, so that's its larger y.
+		let bandMinY = isFlipped ? rows : 0
+		contentView.frame = CGRect(x: 0, y: isFlipped ? 0 : band, width: bounds.width, height: rows)
+		guard let scroller = horizontalScroller else { return }
+		let height = min(band, NSScroller.scrollerWidth(for: scroller.controlSize, scrollerStyle: scrollerStyle))
+		scroller.frame = CGRect(x: Theme.rowPadding, y: bandMinY + ((band - height) / 2).rounded(.down),
+			width: max(0, bounds.width - 2 * Theme.rowPadding), height: height)
+	}
+
+	/// A mouse wheel turned up or down moves the row as it would move a page, so natural scrolling still applies; a
+	/// notched line moves a quarter card, a precise delta moves 1:1.
+	override func scrollWheel(with event: NSEvent) {
+		guard let sideways = Self.sideways(event) else { return super.scrollWheel(with: event) }
+		guard !event.hasPreciseScrollingDeltas else { return super.scrollWheel(with: sideways) }
+		// Only this wheel gets the larger step; Shift+wheel and tilt keep AppKit's line.
+		let line = horizontalLineScroll
+		horizontalLineScroll = Theme.wheelStep
+		defer { horizontalLineScroll = line }
+		super.scrollWheel(with: sideways)
+	}
+
+	/// A mouse wheel turned up or down (no gesture phase, no Shift, mostly vertical) as the same event turned sideways;
+	/// nil for everything AppKit scrolls as it is: trackpad and Magic Mouse gestures, momentum, Shift+wheel, tilt.
+	static func sideways(_ event: NSEvent) -> NSEvent? {
+		guard event.type == .scrollWheel, event.phase.isEmpty, event.momentumPhase.isEmpty,
+			!event.modifierFlags.contains(.shift), abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX),
+			let source = event.cgEvent?.copy() else { return nil }
+		// Read every vertical delta first: setting the line delta recomputes the others on that axis.
+		let lines = source.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+		let points = source.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
+		let fixed = source.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+		source.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: lines)
+		source.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: 0)
+		source.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: fixed)
+		source.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: 0)
+		source.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: points)
+		source.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: 0)
+		return NSEvent(cgEvent: source)
+	}
+
+	/// Flashes the overlay scroll bar when the cards overflow; a legacy bar is always shown.
+	func flashIfOverflowing() {
+		guard let document = documentView, document.frame.width > contentView.bounds.width + 0.5 else { return }
+		flashCount += 1
+		flashScrollers()
+	}
 }
 
 @MainActor @Observable private final class MountedSlots {
@@ -67,7 +147,7 @@ struct HistoryRow<Card: View>: NSViewRepresentable {
 }
 
 @MainActor
-final class HistoryScrollView<Card: View>: NSScrollView {
+final class HistoryScrollView<Card: View>: HistoryScrollBase {
 	private let document = HistoryDocument()
 	private var host: NSHostingView<AnyView> { document.host }
 	private var clips: [Clip] = []
@@ -78,10 +158,6 @@ final class HistoryScrollView<Card: View>: NSScrollView {
 
 	override init(frame: NSRect) {
 		super.init(frame: frame)
-		drawsBackground = false
-		hasHorizontalScroller = false
-		hasVerticalScroller = false
-		verticalScrollElasticity = .none
 		document.wantsLayer = true
 		documentView = document
 		host.sizingOptions = []

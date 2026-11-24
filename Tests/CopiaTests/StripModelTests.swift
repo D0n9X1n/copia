@@ -1701,3 +1701,33 @@ extension StripModelTests {
 		#expect(r.announcements == ["Copied"], "a pick that closes the strip shows and says nothing")
 	}
 }
+
+/// The scroll bar flashes once an opening has settled; an interrupted opening never reports it.
+extension StripModelTests {
+	@Test func anUninterruptedOpenSettlesAndClosingOrReopeningClearsIt() {
+		let r = StripRig()
+		r.model.beginClose(); r.model.open()
+		#expect(!r.model.isOpenSettled)
+		r.model.animateIn()
+		#expect(r.model.isOpenSettled)
+		r.model.beginClose()
+		#expect(!r.model.isOpenSettled)
+	}
+
+	@Test func aStaleOpenCompletionNeverSettlesTheNextOpening() {
+		let model = StripModel(clips: Fixtures.mixed)
+		var held: [() -> Void] = []
+		model.animator = Animator { event, change, completion in
+			change()
+			if event == .open { held.append(completion) } else { completion() }
+		}
+		model.open(); model.animateIn()
+		model.beginClose(); model.open()
+		held.removeFirst()()
+		#expect(!model.isOpenSettled, "opening A finished after B started")
+		model.animateIn()
+		model.beginClose()
+		held.removeFirst()()
+		#expect(!model.isOpenSettled, "opening B finished while closing")
+	}
+}
