@@ -789,9 +789,12 @@ extension WindowTests.InputTests {
 		#expect(HistoryScrollBase.sideways(moved) == nil, "not a wheel")
 	}
 
+	/// A press in the band never reaches a card. An always-shown bar takes it; a faded-out overlay bar isn't hit-testable
+	/// (as on CI), so the press reaches the scroll view around it, still outside the cards.
 	@Test func aPressInTheBandReachesTheScrollerNotACard() async throws {
 		let (host, scroll) = try await scrollHost()
 		defer { host.close() }
+		let document = try #require(scroll.documentView)
 		for style in [NSScroller.Style.overlay, .legacy] {
 			scroll.scrollerStyle = style
 			scroll.tile(); await host.settle()
@@ -799,7 +802,13 @@ extension WindowTests.InputTests {
 			let content = try #require(host.panel.contentView)
 			for x in [scroller.bounds.minX + 4, scroller.bounds.midX, scroller.bounds.maxX - 4] {
 				let point = content.convert(scroller.convert(CGPoint(x: x, y: scroller.bounds.midY), to: nil), from: nil)
-				#expect(content.hitTest(point) === scroller, "x \(x) in the band hits the scroller")
+				let hit = try #require(content.hitTest(point))
+				#expect(!hit.isDescendant(of: document), "x \(x): a press in the band never reaches a card")
+				if style == .legacy {
+					#expect(hit === scroller, "x \(x): the always-shown bar takes the press")
+				} else {
+					#expect(hit === scroller || hit === scroll || hit === scroll.contentView, "x \(x): hit \(type(of: hit))")
+				}
 			}
 		}
 	}
