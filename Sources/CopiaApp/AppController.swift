@@ -301,8 +301,10 @@ public final class AppController {
 				if result.isNew { self.previewer.generate(for: result.clip) }
 				await self.reload()
 				// Only Copia's own browse replaced it since: it is still what the clipboard held before that browse.
-				if change < self.lastChange, change == self.lastForeignChange, let opening {
-					self.model.restorePointSaved(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key)), observedIn: opening)
+				// The opening it belongs to: the current one if the strip opened on exactly this copy, else the one it was seen in.
+				let observedIn = change == self.openChange && self.model.cardsMounted ? self.model.presentationID : opening
+				if change < self.lastChange, change == self.lastForeignChange, let observedIn {
+					self.model.restorePointSaved(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key)), observedIn: observedIn)
 				}
 				// A newer change (Copia's own write, or another copy) since this one wins.
 				guard change >= self.lastChange else { return }

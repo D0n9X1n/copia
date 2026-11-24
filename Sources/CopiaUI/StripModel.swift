@@ -595,9 +595,10 @@ public final class StripModel {
 		copiedID = nil
 		dropBrowse()
 		// The app reads the pasteboard; a close's write still queued is dropped, so this is what the clipboard holds.
-		let held = known.flatMap { c in clips.contains { $0.id == c.id } ? c : nil }
-		clipboard = held
-		committed = held
+		// A card saved but not yet published is still the clipboard's card and the restore point; the chip and Esc offer
+		// it once a reload shows it, and the lens starts on it only if it is shown now.
+		clipboard = known
+		committed = known
 		lensAfterClose = nil
 		intent = .results
 		frozenIDs = nil
@@ -606,7 +607,7 @@ public final class StripModel {
 		query = ""
 		appeared = false
 		cardsMounted = true
-		selectedID = held?.id ?? newestID
+		selectedID = known.flatMap { c in clips.contains { $0.id == c.id } ? c.id : nil } ?? newestID
 	}
 
 	/// Called after the open animation, so the panel can refresh its shadow.

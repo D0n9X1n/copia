@@ -1560,3 +1560,20 @@ extension StripModelTests {
 		#expect(r.writes.isEmpty)
 	}
 }
+
+extension StripModelTests {
+	@Test func openingOnACardSavedButNotYetShownKeepsItAsTheRestorePoint() async {
+		let r = StripRig(clips: Array(Fixtures.mixed.prefix(3))), x = Fixtures.mixed[5]
+		r.model.beginClose(); r.model.open(clipboard: ClipboardCard(id: x.id))
+		#expect(r.model.selectedID == Fixtures.mixed[0].id, "the lens starts on a card that is shown")
+		#expect(r.model.committed == ClipboardCard(id: x.id) && r.model.clipboard == ClipboardCard(id: x.id))
+		r.model.applySnapshot([x] + Array(Fixtures.mixed.prefix(3)))
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.model.restoreHint == .restore)
+		r.log.removeAll()
+		r.model.escape()
+		await r.settle()
+		#expect(r.writes == ["write \(x.id) plain=false"])
+	}
+}
