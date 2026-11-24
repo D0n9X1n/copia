@@ -230,6 +230,9 @@ public final class AppController {
 				let expected: Int? = model.writeRequiresOwnership ? watcher.observedChange : nil
 				beforePasteboardWrite()
 				let change = try paster.write(items, plain: plain, expecting: expected)
+				// More than our own clear since the last poll: a copy made elsewhere landed unseen, and this pick replaced
+				// it. Copia didn't know what the clipboard held, so the pick counts as a change (the Copied chip shows).
+				if change > watcher.observedChange + 1 { model.clipboardReplaced() }
 				ownWrite = change
 				lastChange = max(lastChange, change)
 				onClipboard = (change, key, plain)
