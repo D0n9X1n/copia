@@ -1476,10 +1476,10 @@ extension StripModelTests {
 		let r = StripRig(), b = Fixtures.mixed[1].id, x = Fixtures.mixed[3].id
 		r.model.browse(1)
 		await r.settle()
-		r.model.restorePointSaved(ClipboardCard(id: x))
+		r.model.restorePointSaved(ClipboardCard(id: x), observedIn: r.model.presentationID)
 		#expect(r.model.committed == ClipboardCard(id: x) && r.model.clipboard == ClipboardCard(id: b))
 		#expect(r.model.restoreHint == .restore && r.model.lensOnClipboard)
-		r.model.restorePointSaved(ClipboardCard(id: Fixtures.mixed[5].id))
+		r.model.restorePointSaved(ClipboardCard(id: Fixtures.mixed[5].id), observedIn: r.model.presentationID)
 		#expect(r.model.committed == ClipboardCard(id: x), "only fills an empty restore point")
 	}
 }
@@ -1501,7 +1501,7 @@ extension StripModelTests {
 		let r = StripRig(clips: Array(Fixtures.mixed.prefix(3))), x = Fixtures.mixed[5]
 		r.model.browse(1)
 		await r.settle()
-		r.model.restorePointSaved(ClipboardCard(id: x.id))
+		r.model.restorePointSaved(ClipboardCard(id: x.id), observedIn: r.model.presentationID)
 		#expect(r.model.committed == ClipboardCard(id: x.id))
 		#expect(r.model.restoreHint == .unsaved, "not in history yet: Esc can't restore it")
 		r.model.applySnapshot([x] + Array(Fixtures.mixed.prefix(3)))
@@ -1526,5 +1526,37 @@ extension StripModelTests {
 		#expect(redraws.withLock { $0 } == 1, "the chip is told to redraw when the delete starts")
 		#expect(r.model.restoreHint == .unsaved)
 		gate.release(); await deleting.value
+	}
+}
+
+/// #26 review: a capture is known once saved, and never reaches into a later opening.
+extension StripModelTests {
+	@Test func aCaptureSavedButNotYetPublishedIsTheClipboardsCardAndTheRestorePoint() async {
+		let r = StripRig(clips: Array(Fixtures.mixed.prefix(3))), x = Fixtures.mixed[5]
+		r.model.clipboardChanged(to: ClipboardCard(id: x.id))
+		#expect(r.model.committed == ClipboardCard(id: x.id) && r.model.clipboard == ClipboardCard(id: x.id))
+		r.model.browse(1)
+		await r.settle()
+		#expect(r.model.restoreHint == .unsaved, "not published yet")
+		r.model.applySnapshot([x] + Array(Fixtures.mixed.prefix(3)))
+		#expect(r.model.restoreHint == .restore)
+		r.log.removeAll()
+		r.model.escape()
+		await r.settle()
+		#expect(r.writes == ["write \(x.id) plain=false"])
+	}
+
+	@Test func aCaptureFromAnEarlierOpeningNeverBecomesTheRestorePoint() async {
+		let r = StripRig(), x = Fixtures.mixed[3].id
+		let earlier = r.model.presentationID
+		r.model.browse(1)
+		await r.settle()
+		r.model.beginClose(); r.model.open()
+		r.model.restorePointSaved(ClipboardCard(id: x), observedIn: earlier)
+		#expect(r.model.committed == nil)
+		r.log.removeAll()
+		r.model.escape()
+		await r.settle()
+		#expect(r.writes.isEmpty)
 	}
 }

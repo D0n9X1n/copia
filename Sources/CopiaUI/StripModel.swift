@@ -79,6 +79,8 @@ public final class StripModel {
 	private var pendingDelete: Set<UUID> = []
 	@ObservationIgnored private var deleteConflicted = false
 	@ObservationIgnored private var presentation = 0
+	/// Each opening's number, so a capture observed in one opening never fills the restore point of the next.
+	public var presentationID: Int { presentation }
 	/// Changes as soon as close starts, so a pending delete cannot create undo in a later presentation.
 	public private(set) var closeCount = 0
 
@@ -441,17 +443,18 @@ public final class StripModel {
 	/// A copy made elsewhere was saved after a browse already replaced it, with nothing else copied since: it is what
 	/// the clipboard held before the browse, so it fills an empty restore point. The clipboard stays where it is.
 	/// The card may not be published yet (another reload can win); the chip and Esc offer it once it is.
-	public func restorePointSaved(_ card: ClipboardCard) {
-		guard cardsMounted, !isClosing, committed == nil else { return }
+	public func restorePointSaved(_ card: ClipboardCard, observedIn opening: Int) {
+		guard cardsMounted, !isClosing, presentation == opening, committed == nil else { return }
 		committed = card
 	}
 
 	/// The app saw the clipboard change without Copia: a copy made elsewhere, captured (`card`) or not (nil).
 	/// It is the clipboard now, and ⎋ keeps it.
+	/// The card may be saved but not yet published by a reload; the lens, the chip and Esc treat it as on the clipboard
+	/// once it is.
 	public func clipboardChanged(to card: ClipboardCard?) {
-		let known = card.flatMap { c in clips.contains { $0.id == c.id } ? c : nil }
-		clipboard = known
-		committed = known
+		clipboard = card
+		committed = card
 		copiedID = nil
 	}
 

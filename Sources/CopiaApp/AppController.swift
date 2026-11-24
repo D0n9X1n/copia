@@ -294,15 +294,15 @@ public final class AppController {
 		}
 		watcher.onDraft = { [weak self] draft in
 			guard let self else { return }
-			let change = watcher.lastCaptureChange
+			let change = watcher.lastCaptureChange, opening = model.cardsMounted ? model.presentationID : nil
 			Task {
 				guard self.model.storageStatus != .recoveryRequired else { return }
 				guard let result = try? await self.store.insert(draft) else { await self.refreshStorageStatus(); return }
 				if result.isNew { self.previewer.generate(for: result.clip) }
 				await self.reload()
 				// Only Copia's own browse replaced it since: it is still what the clipboard held before that browse.
-				if change < self.lastChange, change == self.lastForeignChange, self.model.cardsMounted {
-					self.model.restorePointSaved(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key)))
+				if change < self.lastChange, change == self.lastForeignChange, let opening {
+					self.model.restorePointSaved(ClipboardCard(id: ClipDraft.uuid(forKey: result.clip.key)), observedIn: opening)
 				}
 				// A newer change (Copia's own write, or another copy) since this one wins.
 				guard change >= self.lastChange else { return }
@@ -329,10 +329,10 @@ public final class AppController {
 	// MARK: Strip
 
 	/// The stored card the clipboard holds right now, if Copia knows it.
+	/// Ids derive from keys, so a card just saved is known before a reload publishes it.
 	private func clipboardCard(change: Int? = nil) -> ClipboardCard? {
-		guard let onClipboard, onClipboard.change == change ?? clipboardSource.changeCount,
-			let id = index.keys.first(where: { $0.value == onClipboard.key })?.key else { return nil }
-		return ClipboardCard(id: id, plain: onClipboard.plain)
+		guard let onClipboard, onClipboard.change == change ?? clipboardSource.changeCount else { return nil }
+		return ClipboardCard(id: ClipDraft.uuid(forKey: onClipboard.key), plain: onClipboard.plain)
 	}
 
 	public func toggleHistory(on chosenScreen: NSScreen? = nil) {
