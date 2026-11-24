@@ -71,6 +71,10 @@ enum RenderRunner {
 				m.query = "e"; try? await Task.sleep(for: .milliseconds(100))
 				m.browse(1); try? await Task.sleep(for: .milliseconds(400))
 			}))
+			// A click put a different card on the clipboard: the chip confirms it for 2 s, with no ⎋ offer.
+			list.append(Scene(name: "08-click-copied-\(mode)", dark: dark, prepare: { m in
+				m.selectOnPress(m.clips[2].id); await m.copy(id: m.clips[2].id, plain: false, dismiss: false)
+			}))
 			// The footer pin: filled on a pinned card, an outline on the primary and hovered cards, an empty slot elsewhere.
 			list.append(Scene(name: "08-pins-\(mode)", dark: dark, clips: { mixed, _ in
 				var c = mixed; c[0].isPinned = true; return c
